@@ -4,6 +4,7 @@ The LiteRISC processor
 On a fresh Ubuntu install you would need to do the following to install
 SBCL Common Lisp and then run the LiteRISC emulator.
 
+```
 sudo apt install sbcl
 sudo apt install -y git
 sudo snap install curl
@@ -14,4 +15,4 @@ sbcl --load quicklisp.lisp
 git clone git@github.com:kranerup/literisc.git liteRISC
 cd liteRISC
 sbcl --load run.lisp
-
+```
