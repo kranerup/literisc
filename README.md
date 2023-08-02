@@ -1,4 +1,4 @@
-# literisc
+# LiteRISC
 The LiteRISC processor
 
 The idea was to create a compact instruction set like the early 8-bit
