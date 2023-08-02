@@ -1,7 +1,7 @@
 ;;; -------------------------------------------------------------------------------
 ;;; 
 ;;;                     liteRISC instruction set
-;;;                             v 0.3   
+;;;                             v 0.4   
 ;;; 
 ;;; -------------------------------------------------------------------------------
 ;;; The idea was to create a compact instruction set like the early 8-bit
@@ -1017,9 +1017,9 @@
     (charms:disable-echoing)
     (charms:enable-raw-input)
     (charms:clear-window (charms:standard-window))
-    (let ((disasm-window (charms:make-window 40 40 55 11))
-          (output-window (charms:make-window 40 20 10 42))
-          (cpu-window (charms:make-window 40 30 10 10)))
+    (let ((disasm-window (charms:make-window 40 40 55 1))
+          (output-window (charms:make-window 40 20 10 32))
+          (cpu-window (charms:make-window 40 30 10 0)))
       (setf (processor-state-write-callback
               (emulated-system-processor emul))
             (lambda (addr data) (write-cb-write-win addr data output-window)))
