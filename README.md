@@ -164,6 +164,54 @@ data which is variable length and follows the first byte in the instruction.
     - have added byte ld/st to solve this
   - no wait for interrupt instruction
 
+## Screenshot
+
+Here is a screenshot of the emulator while running the hello world
+program.
+
+```
+  ┌--------------------------------------┐
+  |i: j #-2           160                |     A = M[R0].b     248
+  |                                      |     maskb A         250
+  |PC  00000004          4               |     R1 = A          1
+  |A   00000004          4               |     R2 = 127        130 127
+  |R0  0000000C         12               |     A = sex(0)      144
+  |R1  00000000          0               |     A = A - R1      193
+  |R2  FFFFFFFF 4294967295               |     jz #7           165 7
+  |R3  00000000          0               |     A = R1          17
+  |R4  00000000          0               |     M[R2].l = A     114
+  |R5  00000000          0               |     A = sex(1)      145
+  |R6  00000000          0               |     A = A + R0      176
+  |R7  00000000          0               |     R0 = A          0
+  |R8  00000000          0               |     j #-17          160 111
+  |R9  00000000          0               |     A = M[R0].b     248
+  |R10 00000000          0               |     maskb A         250
+  |R11 00000000          0               |     R1 = A          1
+  |R12 00000000          0               |     R2 = 127        130 127
+  |R13 00000000          0               |     A = sex(0)      144
+  |R14 00000000          0               |     A = A - R1      193
+  |R15 00000004          4               |     jz #7           165 7
+  |                                      |     A = R1          17
+  |N V C Z8 C8 Z16 C16                   |     M[R2].l = A     114
+  |0 0 0 1  0  1   0                     |     A = sex(1)      145
+  |                                      |     A = A + R0      176
+  |                                      |     R0 = A          0
+  |                                      |     j #-17          160 111
+  |                                      |     A = M[R0].b     248
+  |                                      |     maskb A         250
+  └--------------------------------------┘     R1 = A          1
+                                               R2 = 127        130 127
+                                               A = sex(0)      144
+  Hello World!                                 A = A - R1      193
+                                               jz #7           165 7
+                                               A = R15         31
+                                               j A             254
+                                               j #-2           160 126
+                                               j #-2           160 126
+                                               j #-2           160 126
+                                               j #-2           160 126
+```
+
 ## Installation
 
 On a fresh Ubuntu install you would need to do the following to install
