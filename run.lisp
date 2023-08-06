@@ -1,11 +1,11 @@
 (ql:quickload :cl-charms)
 (ql:quickload :str)
-(load "macro-utilities.lisp")
-(load "unit.lisp")
-(load "assembler.lisp")
-(load "disassembler.lisp")
-(load "charms-extra.lisp")
-(load "emulator.lisp")
+(load "macro-utilities")
+(load "unit")
+(load "assembler")
+(load "disassembler")
+(load "charms-extra")
+(load "emulator")
 
 (defvar *hello-world*
       (assemble 
@@ -35,7 +35,12 @@
            (r->a srp)
            (j-a))))
 
-(setf e (make-emulator *hello-world* (string-to-mem "Hello World!") 200 t))
+(defvar e nil)
+(defvar dmem nil)
+(setq dmem (make-dmem 1000))
+(set-program dmem (string-to-mem "Hello World!"))
+                                  
+(setf e (make-emulator *hello-world* dmem 200 t))
 (run-with-curses e)
 (quit)
 

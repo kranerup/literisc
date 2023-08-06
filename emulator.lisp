@@ -515,13 +515,13 @@
 (defun mem-read-byte (dmem addr)
   (logand #xff (aref dmem addr)))
 
-(defun mem-write-byte (dmem addr data write-callback)
+(defun mem-write-byte (dmem addr data &optional (write-callback nil))
   ;;(format t "in mem-write-byte ~a ~a~%" addr data)
   (if write-callback (funcall write-callback addr (logand #xff data)))
   (if (and (>= addr 0) (<= 65535))
       (setf (aref dmem addr) (logand #xff data))))
 
-(defun mem-write-dword (dmem addr data write-callback)
+(defun mem-write-dword (dmem addr data &optional (write-callback nil))
   ;;(format t "in mem-write-dword ~a ~a~%" addr data)
   (if write-callback (funcall write-callback addr data))
   ;(if (equal (logand #xffffffff addr) #xffffffff)
@@ -582,7 +582,8 @@
 (defun i-st-a-rx-imm (ps rx offs dmem)
   (mem-write-dword dmem 
                    (+ (processor-state-a ps) offs)
-                   (aref (processor-state-r ps) rx))
+                   (aref (processor-state-r ps) rx)
+                   (processor-state-write-callback ps))
   (if (processor-state-debug ps)
       (format t "st M[~a] = ~a~%"
           (+ (processor-state-a ps) offs)
@@ -662,6 +663,18 @@
                    (processor-state-write-callback ps))
   (if (processor-state-debug ps)
       (format t "stst srp, M[~a] = ~a~%" 
+          (aref (processor-state-r ps) SP)
+          (aref (processor-state-r ps) SRP))))
+
+;    6    push  srp             sp = sp -4, M[sp] = srp
+(defun i-push-srp (ps dmem)
+  (setf (aref (processor-state-r ps) SP)
+        (- (aref (processor-state-r ps) SP) 4))
+  (mem-write-dword dmem (aref (processor-state-r ps) SP)
+                   (aref (processor-state-r ps) SRP)
+                   (processor-state-write-callback ps))
+  (if (processor-state-debug ps)
+      (format t "push srp, M[~a] = ~a~%" 
           (aref (processor-state-r ps) SP)
           (aref (processor-state-r ps) SRP))))
 
@@ -849,13 +862,13 @@
                    ((equal param 3)
                     (i-asr p))
                    ((equal param 4)
-                    (i-push p (get-immediate p imem nil)))
+                    (i-push p (get-immediate p imem nil) dmem))
                    ((equal param 5)
-                    (i-pop p (get-immediate p imem nil)))
+                    (i-pop p (get-immediate p imem nil) dmem))
                    ((equal param 6)
-                    (i-stst-srp p dmem))
+                    (i-push-srp p dmem))
                    ((equal param 7)
-                    (i-pop-a p))
+                    (i-pop-a p dmem))
                    ((equal param 8)
                     (destructuring-bind (opcode2 param2)
                       (get-next-opcode p imem)
@@ -912,18 +925,23 @@
   processor)
 
   
-(defun make-emulator ( prog-list dmem-list max-instr &optional (debug t) )
+(defun make-emulator ( prog-list dmem max-instr &optional (debug t) )
   (let ((emul
           (make-emulated-system
-            :imem (make-imem 500)
-            :dmem (make-dmem 500)
+            :imem (make-imem (+ (list-length prog-list) imem-padding))
+            :dmem dmem
             :processor (make-processor))))
     (setf (processor-state-debug (emulated-system-processor emul)) debug)
+    (setf (processor-state-write-callback
+            (emulated-system-processor emul))
+            'write-cb-write-char)
     (set-program (emulated-system-imem emul) prog-list)
-    (set-program (emulated-system-dmem emul) dmem-list)
     emul))
 
 (defun run-emul ( emul max-instr &optional (debug t))
+    (setf (processor-state-write-callback
+            (emulated-system-processor emul))
+          'write-cb-write-char)
     (dotimes (n max-instr)
       (execute-instruction
         (emulated-system-processor emul) 
@@ -942,6 +960,7 @@
 (setf *reg-row* 5)
 (setf *cc-row* 22)
 
+(defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
 (defun write-processor-state (window proc imem)
   (charms:write-string-at-point
@@ -981,7 +1000,7 @@
     1 (1+ *cc-row*))
   (let* ((mem-at-pc (coerce (subseq imem
                                     (processor-state-pc proc)
-                                    (+ (processor-state-pc proc) 7))
+                                    (+ (processor-state-pc proc) imem-padding))
                             'list))
          (dis-str (str:trim-right
                     (with-output-to-string (*standard-output*)
@@ -992,16 +1011,14 @@
       1 *instr-row*)))
 
 (defun write-disasm (window proc imem row)
-  (let* ((mem-at-pc (coerce (subseq imem
-                                    (processor-state-pc proc)
-                                    (+ (processor-state-pc proc) 7))
-                            'list))
+  (let* ((pc (processor-state-pc proc))
+         (mem-at-pc (coerce (subseq imem pc (+ pc 7)) 'list))
          (dis-str (str:trim-right
                     (with-output-to-string (*standard-output*)
                     (disasm mem-at-pc 1)))))
     (charms:write-string-at-cursor
       window
-      (format nil "~a~%" (str:substring 0 28 dis-str)))))
+      (format nil "~4d: ~a~%" pc (str:substring 0 28 dis-str)))))
 
 (defun write-cb-write-win (addr data window)
   (if (equal (logand #xffffffff addr) #xffffffff)
@@ -1788,6 +1805,14 @@
         (set-expected-r expected SRP #x04030201)
         (i-stst-srp p dmem)
         (equal (mem-read-dword dmem 50) #x04030201))
+      (progn
+        ;--- push SRP
+        (setf (aref (processor-state-r p) SP) 54)
+        (setf (aref (processor-state-r p) SRP) #x04030201)
+        (set-expected-r expected SP 50)
+        (set-expected-r expected SRP #x04030201)
+        (i-push-srp p dmem)
+        (equal (mem-read-dword dmem 50) #x04030201))
       (check-state p expected)
       (progn
         ;--- push R0
@@ -1830,6 +1855,41 @@
         (i-pop p 2 dmem)
         (check-state p expected)))))
 
+(deftest test-run-hello ()
+  (let* ((hw-prog (assemble 
+        '( 
+           ; --- main ---
+           (mvi->r 0 0)
+           (jsr prtstr)
+           (label end)
+           (j end)
+           ; --- prtstr ---
+           ; r0 - ptr to zero terminated string
+           (label prtstr)
+           (ld.b-r->a 0)
+           (mask-a-b)
+           (a->r 1)
+           (mvi->r -1 2) ; ptr to I/O reg
+           (mvi->a 0)
+           (sub-r 1)
+           (jz ret-prtstr)
+           (r->a 1)
+           (st-a->r 2)
+           (mvi->a 1)
+           (add-r 0)
+           (a->r 0)
+           (j prtstr)
+           (label ret-prtstr)
+           (r->a srp)
+           (j-a))))
+         (dmem (make-dmem 1000))
+         (prog-output nil))
+    (set-program dmem (string-to-mem "Hello World!"))
+    (setf prog-output
+          (with-output-to-string (*standard-output*)
+            (run-emul (make-emulator hw-prog dmem 200 nil) 180)))
+    (check (equal prog-output "Hello World!"))))
+
 
 (deftest test-instructions ()
   (test-mv)
@@ -1846,6 +1906,7 @@
   (test-mvi )
   (test-ld )
   (test-st )
-  (test-push-pop ))
+  (test-push-pop )
+  (test-run-hello))
 
 

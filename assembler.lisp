@@ -60,7 +60,7 @@
   (if (within-2sc imm 4)
       (list (logior #x90 
                     (logand #xf imm)))
-      '()))
+      (error "mvi-a value is too large: ~a" imm)))
 
 (defun j (offs)
   (concatenate 'list
@@ -157,8 +157,11 @@
 (defun stst-srp ()
   (list #xf6))
 
-(defun set-program (imem ilist)
-  (let ((p 0))
+(defun push-srp ()
+  (list #xf6))
+
+(defun set-program (imem ilist &optional (start-adr 0))
+  (let ((p start-adr))
     (loop for instr in ilist
           do (progn (setf (aref imem p) instr)
                     (setf p (+ p 1))))))
@@ -252,7 +255,17 @@
         if (listp item) do (setf mcode (eval-asm item curr-pc verbose))
         if (listp item) do (setf curr-pc (+ curr-pc (list-length mcode)))
         if (listp item) append mcode))
+
+
+;;; macro assembler
+(defmacro masm (&rest body)
+  `(assemble (concatenate 'list ,@body)))
 ;;;---------- unit tests --------------------
+;(defmacro part3 (reg)
+;  `'(
+;    (mvi->r 0 ,reg)))
+;(masm (part1) (part2) (part3 3))
+
 (deftest test-fw-jump ()
   (let ((p4asm '(
            (j l1)

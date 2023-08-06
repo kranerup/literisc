@@ -9,7 +9,16 @@ Variable length instructions is choosen to get a memory efficient
 instruction set. Basically only immediate data is variable length.
 All instructions are encoded in one byte with the exception of immediate
 data which is variable length and follows the first byte in the instruction.
- 
+
+To make instructions 8 bits and still being able to address a larger set
+of registers, each instructions can only address one register. Each
+instruction implicitly addresses an accumulator register so that
+there can still be two operands and on result ( A = A op Rx ).
+
+A wider instruction set would make it possible to address several registers
+but this also makes the average instruction length longer. Two 8-bit instructions
+can address two registers plus the accumulator compared two a single 16 bit
+instruction that could address three registers.
 
 ## LiteRISC instruction set v 0.4
 
@@ -81,7 +90,8 @@ data which is variable length and follows the first byte in the instruction.
     3        asr   A                 c = A, A = A >> 1, A<31> = A<30>
     4 see below
     5 see below
-    6    stst  srp           M[sp].l = srp
+    (6    stst  srp           M[sp].l = srp)
+    6        push srp        sp = sp - 4, M[sp].l = srp
     7        popa                    a = M[sp].l, sp = sp + 4
     8 
        [ o o o o  r r r r ]
@@ -141,6 +151,28 @@ data which is variable length and follows the first byte in the instruction.
    [ 1 n n n n n n n ]
    [ 0 0 0 0 n n n n ]
 ```
+## Function calling convention
+
+Leaf functions are called with "JSR func" and return is then done
+with the "func: ... SRP->A; J A" sequence.
+
+Non-leaf functions have to save the PC on the stack and then the
+sequence is "JSR func; func: STST SRP; ... POP A; J A"
+
+The PUSH Rx and POP Rx instructions are primarily for function calls.
+
+Parameters P0-P3 are passed in R10-R13. Return value in R10.
+Parameters can be clobbered but registers R0-R9 are not allowed
+to be clobbered.
+
+A function should use registers R0 and up for temporaries and
+save on stack at start of function.
+
+func: STST SRP; PUSH R4; ...use R0-4... POP R4; POP A; J A
+
+The boundary R0-R9 / R10-R13 is not required by the instruction
+and can be choosen differently.
+
 
 ## Issues
   - CC is not part of the register bank. Awkward to save CC on interrupt,
@@ -163,6 +195,7 @@ data which is variable length and follows the first byte in the instruction.
   - byte operations like string ops seems inefficient
     - have added byte ld/st to solve this
   - no wait for interrupt instruction
+  - shouldn't STST SRP be PUSH SRP?
 
 ## Screenshot
 

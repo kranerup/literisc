@@ -75,7 +75,7 @@
                   (destructuring-bind (val nr-bytes) (disasm-immediate (cdr bytes) nil )
                     (list (format nil "pop R0..R~a" val) nr-bytes)))
                  ((equal param 6)
-                  (list (format nil "M[sp] = srp") 1))
+                  (list (format nil "push srp") 1))
                  ((equal param 7)
                   (list (format nil "popa") 1))
                  ((equal param 8)
@@ -112,7 +112,7 @@
                   (list (format nil "undefined") 1))))
           )))
 
-(defun disasm (bytes &optional nr-instr)
+(defun disasm (bytes &optional (nr-instr 1000000000))
   (let ((pc 0)
         (prefix-cnt (if (> nr-instr 1) 1 0)))
     (loop while (< pc (list-length bytes))
