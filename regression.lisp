@@ -1,0 +1,18 @@
+(ql:quickload :cl-charms)
+(ql:quickload :str)
+(load "macro-utilities")
+(load "unit")
+(load "assembler")
+(load "disassembler")
+(load "charms-extra")
+(load "emulator")
+
+(deftest regression ()
+  (test-asm)
+  (test-disasm)
+  (test-instructions))
+(if (regression)
+    (format t "======== Regression PASS ========~%")
+    (format t "*********** FAIL **************~%"))
+(quit)
+
