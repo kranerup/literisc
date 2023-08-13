@@ -132,8 +132,9 @@
   (setq string-space-free (+ string-space-free
                              (list-length str)))))
 
-(add-symbol "symbol" 0)
+(add-symbol "not-this" 0)
 (add-symbol "symbol2" 0)
+(add-symbol "symbol" 0)
 ;(set-program dmem (string-to-mem "symbol2") (+ (* sym-length n-sym-strings)))
 
 ;(set-program dmem (string-to-mem "symbol next ( inside ) end") source-start)
@@ -194,23 +195,26 @@
      
      ;; setup:
      ;; P3 - use-unread
-     (mvi->r 0 P3)
+     ;(mvi->r 0 P3)
      ;; P1 - read-ptr
-     (mvi->r n-source-start P1)
+     ;(mvi->r n-source-start P1)
 
      ;; ------- reader 1 --------------
      ;(jsr f-reader)
      ;(r->a P0) (a->r R0)
 
+     ;; R5 - the source symbol that we are searching for
+     (mvi->r n-source-start R5)
+     
      ;(mvi->r n-cons-type R1) ; R1 cons type table ptr
      (mvi->r n-cons R2) ; R2 cons table ptr
      (mvi->r n-string-space R3) ; strings
      ;(ld.b-r->a R1) ;; ignore value for now
 
+     ; R2 = cons-table-ptr 
+     (label l-next-cons)
      ;; n-cons + 2
      (r->a R2)
-     
-     (label l-next-cons)
      (a->r R4)
      (mvi->a 2) ; high word
      (add-r R4)
@@ -218,20 +222,26 @@
      ;; read cdr
      (ld.w-r->a R4) ; cdr -> sym-name-ptr
      (add-r R3) ; string-space + sym-name-ptr
-     (a->r R1)
-     (jsr prtstr)
+     (a->r P0)
+     (r->a R5)
+     (a->r P1)
+     (jsr l-str-equal)
+
+     (mvi->a 0)
+     (sub-r P0)
+     (jnz l-found-sym)
+     ;(jsr prtstr)
 
      ;; cons-ptr += 4
      (mvi->a 4)
-     (add-r R4)
-     (a->r R4)
+     (add-r R2)
+     (a->r R2)
 
      (j l-next-cons)
 
-     
-     (label stop)
-     (j stop)
-     
+     (label l-found-sym) 
+     (label l-stop)
+     (j l-stop)
      
      (mvi->r n-read-sym-str R1)
      (jsr prtstr)
@@ -351,7 +361,7 @@
   '( ;; str-equal
      ;; P1 - string-ptr
      ;; P0 - string-ptr / return value
-     ;; clobbers R0,R1
+     (push-r R1)
      (label l-str-equal)
      (ld.b-r->a P1)
      (a->r R0)
@@ -365,11 +375,13 @@
      (jnz l-inc-strs) ; not 0, inc ptrs then loop back
      ;; end of string and equal
      (mvi->r 1 P0)
+     (pop-r R1)
      (r->a SRP)
      (j-a)
 
      (label l-ret-uneq)
      (mvi->r 0 P0)
+     (pop-r R1)
      (r->a SRP)
      (j-a)
      
