@@ -5,11 +5,6 @@
 ;    (mvi->r 0 ,reg)))
 ;(masm (part1) (part2) (part3 3))
 
-;;; calling convention:
-;;; - return value in R0
-;;; - parameters in R1..
-;;; - A is allowed to be clobbered
-
 (defconstant R0  0 )
 (defconstant R1  1 )
 (defconstant R2  2 )
@@ -25,9 +20,127 @@
 (defconstant R12 12) (defconstant P2 R12)
 (defconstant R13 13) (defconstant P3 R13)
 
-(defconstant source-start 300)
-(defconstant read-sym-str 100)
-(defconstant stack-highest 400)
+(defvar dmem nil)
+(defvar dmem-allocated 0)
+(setq dmem (make-dmem 1000))
+
+(defmacro alloc-init ( sym data )
+  `(progn
+     (defvar ,sym nil)
+     (setq ,sym dmem-allocated)
+     (let* ((d ,data)
+            (d-len (list-length d)))
+       (set-program dmem d dmem-allocated)
+       (setq dmem-allocated (+ dmem-allocated d-len)))))
+
+(defmacro alloc ( sym len )
+  `(progn
+     (defvar ,sym nil)
+     (setq ,sym dmem-allocated)
+     (setq dmem-allocated (+ dmem-allocated ,len))))
+
+(defvar string-space-free 0) ; relative n-string-space
+
+(defvar cons-free nil)
+
+;;; cons-type: [ t:8 ]  (msb..lsb)
+;;;   [ 0:4 | gc:1 | type:3 ]
+;;;   type: 0 - free
+;;;         1 - number
+;;;         2 - symbol
+;;;         3 - char
+;;;         4 - cons
+;;;         5 - macro
+;;;         6 - function
+;;;         7 - special function
+;;;
+;;; cons: [ f1:16 | f2:16 ]
+;;;       [      f:32     ]
+;;;   type   |    f1    |     f2    |
+;;;   -------+----------+-----------+
+;;;   symbol | name-ptr | value-ptr |
+;;;     name-ptr:string space ptr
+;;;     value-ptr:cons cell ptr
+;;;   cons   | car-ptr  | cdr-ptr   |
+;;;     car/cdr-ptr: cons cell ptr
+;;;          |          f           |
+;;;   number |        value         |
+;;;   char   |        value         |
+;;;   
+
+(defun cons-cell (f1 f2)
+  (logior (logand #xFFFF f2)
+          (ash (logand #xFFFF f1) 16)))
+(defun cons-bytes ( cell )
+  (integer-to-byte-list cell cons-size))
+
+    
+(defconstant c-cons-free      0)
+(defconstant c-cons-number    1)
+(defconstant c-cons-symbol    2)
+(defconstant c-cons-char      3)
+(defconstant c-cons-cons      4)
+(defconstant c-cons-macro     5)
+(defconstant c-cons-func      6)
+(defconstant c-cons-spec-func 7)
+
+(defvar n-stack-highest nil)
+
+(defun init-lisp ()
+  (setq dmem-allocated 0)
+  (alloc-init n-source-start     (string-to-mem "symbol"))
+  (alloc-init n-sym-string-start (string-to-mem "symbol"))
+  (alloc-init n-print-sep        (string-to-mem "---
+"))
+  (alloc n-read-sym-str 20)
+
+  (alloc n-string-space 200)
+  (setq string-space-free 0)
+
+  (defparameter nr-cons 20)
+  (defparameter cons-size 4) ; bytes
+  (alloc n-cons (* nr-cons cons-size))
+  (alloc n-cons-type nr-cons)
+  (setq cons-free 0) ; points to entry nr in n-cons table
+
+  (alloc n-stack (* 100 4))
+  (setq n-stack-highest (- dmem-allocated 1)))
+
+
+  
+
+;;; -- sym-strings --
+(defun add-symbol (sym-name value-ptr)
+(let ((str (string-to-mem sym-name))
+      (str-ptr nil)
+      (cons-ptr cons-free))
+  (set-program dmem str (+ n-string-space string-space-free))
+  (setf str-ptr string-space-free)
+
+  (set-program dmem (list c-cons-symbol )
+               (+ n-cons-type cons-ptr)) ; one byte per cons-type item
+  (format t "ccell ~x cbytes ~a~%"
+          (cons-cell str-ptr value-ptr)
+          (cons-bytes (cons-cell str-ptr value-ptr)))
+          
+  (set-program dmem
+               (cons-bytes 
+                 (cons-cell str-ptr value-ptr))
+               (+ n-cons (* cons-size cons-ptr)))
+
+  (setf cons-free (1+ cons-free))
+  (setq string-space-free (+ string-space-free
+                             (list-length str)))))
+
+(add-symbol "symbol" 0)
+(add-symbol "symbol2" 0)
+;(set-program dmem (string-to-mem "symbol2") (+ (* sym-length n-sym-strings)))
+
+;(set-program dmem (string-to-mem "symbol next ( inside ) end") source-start)
+;(set-program dmem (string-to-mem "symbol") source-start)
+;(set-program dmem (string-to-mem "symbol") sym-string-start)
+
+
 
 ;;; P3 - use-unread (updated)
 ;;; P2 - last-read (updated)
@@ -39,7 +152,7 @@
      ;; if use-unread == 0
      (mvi->a 0)
      (sub-r P3)
-     (jne l-use-unread)
+     (jnz l-use-unread)
      ;; read char
      ;; char = source[ read-ptr ]
      (ld.b-r->a P1)
@@ -67,20 +180,129 @@
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
-     (mvi->r stack-highest SP)
+     ;(mvi->r 0 R1)
+     ;(jsr prtstr)
+     
+     (mvi->r n-stack-highest SP)
+
+     ;; test str-equal
+     ;;(mvi->r n-source-start P1)
+     ;;(mvi->r n-sym-string-start P0)
+     ;;(jsr l-str-equal)
+     ;;(j end)
+     
+     
      ;; setup:
      ;; P3 - use-unread
      (mvi->r 0 P3)
      ;; P1 - read-ptr
-     (mvi->r source-start P1)
+     (mvi->r n-source-start P1)
 
+     ;; ------- reader 1 --------------
+     ;(jsr f-reader)
+     ;(r->a P0) (a->r R0)
+
+     ;(mvi->r n-cons-type R1) ; R1 cons type table ptr
+     (mvi->r n-cons R2) ; R2 cons table ptr
+     (mvi->r n-string-space R3) ; strings
+     ;(ld.b-r->a R1) ;; ignore value for now
+
+     ;; n-cons + 2
+     (r->a R2)
+     
+     (label l-next-cons)
+     (a->r R4)
+     (mvi->a 2) ; high word
+     (add-r R4)
+     (a->r R4)
+     ;; read cdr
+     (ld.w-r->a R4) ; cdr -> sym-name-ptr
+     (add-r R3) ; string-space + sym-name-ptr
+     (a->r R1)
+     (jsr prtstr)
+
+     ;; cons-ptr += 4
+     (mvi->a 4)
+     (add-r R4)
+     (a->r R4)
+
+     (j l-next-cons)
+
+     
+     (label stop)
+     (j stop)
+     
+     
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+     
+     
+     
+     ;; ------- reader 1 --------------
      (jsr f-reader)
      (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
+     ;; ------- reader 2 --------------
+     (jsr f-reader)
+     (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
+     ;; ------- reader 3 --------------
+     (jsr f-reader)
+     (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
+     ;; ------- reader 4 --------------
+     (jsr f-reader)
+     (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
+     ;; ------- reader 5 --------------
+     (jsr f-reader)
+     (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
+     ;; ------- reader 6 --------------
+     (jsr f-reader)
+     (r->a P0) (a->r R0)
+
+     (mvi->r 0 R1)
+     (jsr prtstr)
+
+     (mvi->r n-read-sym-str R1)
+     (jsr prtstr)
+
      (label end)
      (j end)))
 
 (defvar func-prtstr nil)
-(setq func-prtstr
+(setq func-prtstr-old
   '( ;; --- prtstr ---
      ;; r1 - ptr to zero terminated string
      (label prtstr)
@@ -101,6 +323,65 @@
      (r->a srp)
      (j-a)))
 
+(setq func-prtstr
+  '( ;; --- prtstr ---
+     ;; P0 - ptr to zero terminated string
+     (label prtstr)
+     (push-r R1)
+     (ld.b-r->a P0)
+     (mask-a-b)
+     (a->r R0)
+     (mvi->r -1 R1) ; ptr to I/O reg
+     (mvi->a 0)
+     (sub-r R0)
+     (jz ret-prtstr)
+     (r->a R0)
+     (st-a->r R1)
+     (mvi->a 1)
+     (add-r P0)
+     (a->r P0)
+     (j prtstr)
+     (label ret-prtstr)
+     (pop-r R1)
+     (r->a srp)
+     (j-a)))
+
+(defvar func-str-equal nil)
+(setq func-str-equal
+  '( ;; str-equal
+     ;; P1 - string-ptr
+     ;; P0 - string-ptr / return value
+     ;; clobbers R0,R1
+     (label l-str-equal)
+     (ld.b-r->a P1)
+     (a->r R0)
+     (ld.b-r->a P0)
+     (a->r R1)
+     (sub-r R0)
+     (jnz l-ret-uneq)
+     ;; equal but are we at end of string?
+     (mvi->a 0)
+     (sub-r R0)
+     (jnz l-inc-strs) ; not 0, inc ptrs then loop back
+     ;; end of string and equal
+     (mvi->r 1 P0)
+     (r->a SRP)
+     (j-a)
+
+     (label l-ret-uneq)
+     (mvi->r 0 P0)
+     (r->a SRP)
+     (j-a)
+     
+     (label l-inc-strs)
+     (mvi->a 1)
+     (add-r P1)
+     (a->r P1)
+     (mvi->a 1)
+     (add-r P0)
+     (a->r P0)
+     (j l-str-equal)))
+
 ;;; P3 - use-unread (updated)
 ;;; P2 - last-read (updated)
 ;;; P1 - read-ptr (updated)
@@ -116,7 +397,7 @@
     (push-srp)
     (push-r R4)
     ;; R1 - read-sym-ptr
-    (mvi->r read-sym-str R1)
+    (mvi->r n-read-sym-str R1)
     ;; R3 - io-ptr
     (mvi->r -1 R3) ; ptr to I/O reg
     ;; R4 - reading-symbol
@@ -126,21 +407,23 @@
     (jsr l-read-c) ; P1=read-ptr
     ;; R0 = char
     (r->a P0) (a->r R0)
-    ;; if reading-symbol
+
+    ;; --- if reading-symbol -----
     (mvi->a 0)
     (sub-r R4)
     (jz l-not-rd-sym)
 
+    ;; ----------- reading-symbol --------------
     ;; end of symbol?
     ;; if c in ['(',')',' ',0]:  
     (mvi->r (char-code #\( ) R2)
     (r->a R2)
     (sub-r R0)
-    (jz l-end-of-sym)
+    (jz l-end-of-sym-unrd)
     (mvi->r (char-code #\) ) R2)
     (r->a R2)
     (sub-r R0)
-    (jz l-end-of-sym)
+    (jz l-end-of-sym-unrd)
     (mvi->r (char-code #\  ) R2)
     (r->a R2)
     (sub-r R0)
@@ -149,17 +432,18 @@
     (sub-r R0)
     (jnz l-read-sym-char)
 
-    (label l-end-of-sym)
+    (label l-end-of-sym-unrd)
     ;; unread-c
     (r->a R0) (a->r P2) ; last-read = char
     (mvi->r 1 P3) ; use-unread = 1
+    (label l-end-of-sym)
     ;; reading-symbol = False
     (mvi->r 0 R4)
     ;; return sym
     (mvi->r reader-sym P0)
     (j l-reader-ret)
-    
-    ;; else
+   
+    ;; else ------- not reading-symbol ---------
     (label l-not-rd-sym)
     ;;  if char == '('
     (mvi->r (char-code #\( ) R2)
@@ -197,7 +481,6 @@
     ;; debug print
     (r->a R0)
     (st-a->r R3); putchar
-    (j l-rd-more)
     ;; reading-symbol = True
     (mvi->r 1 R4)
     (j l-rd-more) ; loop back and read next char
@@ -212,21 +495,17 @@
 
 
 (defvar *hello-world* nil)
-(setq *hello-world*
-      (masm main func-prtstr read-c reader))
+;(setq *hello-world*
+;      (masm main func-prtstr read-c reader))
 
 (defvar e nil)
-(defvar dmem nil)
-(setq dmem (make-dmem 1000))
-(set-program dmem (string-to-mem "Hello World!"))
-(set-program dmem (string-to-mem "symbol") source-start)
                                   
-(setf e (make-emulator *hello-world* dmem 200 nil))
-(run-with-curses e)
+;(setf e (make-emulator *hello-world* dmem 200 nil))
+;(run-with-curses e)
 
 (defun asm-n-run ()
   (setq *hello-world*
-        (masm main func-prtstr read-c reader))
+        (masm main func-prtstr read-c reader func-str-equal))
   (setf e (make-emulator *hello-world* dmem 200 nil))
   (run-with-curses e))
 
