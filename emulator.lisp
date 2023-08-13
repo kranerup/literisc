@@ -115,7 +115,13 @@
 ;;;       5    st   Rx,A+#nn            M[A+nn].b = Rx
 ;;;       6    st   Rx,A                M[A].b = Rx
 ;;;       7    st   A,Rx                M[Rx].b = A
-;;;       8-15 Unused
+;;;       8-9  Unused
+;;;      10    ld   A+#nn,Rx            Rx = M[A+nn].w
+;;;      11    ld   A,Rx                Rx = M[A].w
+;;;      12    ld   Rx,A                A = M[Rx].w
+;;;      13    st   Rx,A+#nn            M[A+nn].w = Rx
+;;;      14    st   Rx,A                M[A].w = Rx
+;;;      15    st   A,Rx                M[Rx].w = A
 ;;;      
 ;;;    9 Unused
 ;;;    10       maskb A                 A = A & 0xff
@@ -515,6 +521,11 @@
 (defun mem-read-byte (dmem addr)
   (logand #xff (aref dmem addr)))
 
+(defun mem-read-word (dmem addr)
+  (let* ((byte-l (mem-read-byte dmem addr))
+         (byte-h (mem-read-byte dmem (1+ addr))))
+    (logior (ash byte-h 8) byte-l)))
+
 (defun mem-write-byte (dmem addr data &optional (write-callback nil))
   ;;(format t "in mem-write-byte ~a ~a~%" addr data)
   (if write-callback (funcall write-callback addr (logand #xff data)))
@@ -537,6 +548,17 @@
         (setf (aref dmem (+ addr 3))
               (logand #xff (ash data -24))))))
 
+(defun mem-write-word (dmem addr data &optional (write-callback nil))
+  ;;(format t "in mem-write-word ~a ~a~%" addr data)
+  (if write-callback (funcall write-callback addr data))
+  (if (and (>= addr 0) (<= 65535))
+      (progn
+        (setf (aref dmem addr)
+              (logand #xff data))
+        (setf (aref dmem (+ addr 1))
+              (logand #xff (ash data -8))))))
+
+
 ; 7     st   A,Rx               M[Rx].l = A
 (defun i-st-rx-a (ps rx dmem)
   (mem-write-dword dmem (aref (processor-state-r ps) rx)
@@ -554,6 +576,16 @@
                   (processor-state-write-callback ps))
   (if (processor-state-debug ps)
       (format t "st M[~a].b = ~a~%"
+          (aref (processor-state-r ps) rx)
+          (processor-state-a ps))))
+
+; 15    st   A,Rx               M[Rx].w = A
+(defun i-st-w-rx-a (ps rx dmem)
+  (mem-write-word dmem (aref (processor-state-r ps) rx)
+                  (processor-state-a ps)
+                  (processor-state-write-callback ps))
+  (if (processor-state-debug ps)
+      (format t "st M[~a].w = ~a~%"
           (aref (processor-state-r ps) rx)
           (processor-state-a ps))))
 
@@ -575,6 +607,16 @@
                   (aref (processor-state-r ps) rx))
   (if (processor-state-debug ps)
       (format t "st M[~a].b = ~a~%"
+          (processor-state-a ps)
+          (aref (processor-state-r ps) rx))))
+
+; 14    st   Rx,A               M[A].w = Rx
+(defun i-st-w-a-rx (ps rx dmem)
+  (mem-write-word dmem 
+                  (processor-state-a ps)
+                  (aref (processor-state-r ps) rx))
+  (if (processor-state-debug ps)
+      (format t "st M[~a].w = ~a~%"
           (processor-state-a ps)
           (aref (processor-state-r ps) rx))))
 
@@ -600,6 +642,17 @@
           (+ (processor-state-a ps) offs)
           (aref (processor-state-r ps) rx))))
 
+; 13    st   Rx,A+#nn           M[A+nn].w = Rx
+(defun i-st-w-a-rx-imm (ps rx offs dmem)
+  (mem-write-word dmem 
+                  (+ (processor-state-a ps) offs)
+                  (aref (processor-state-r ps) rx)
+                  (processor-state-write-callback ps))
+  (if (processor-state-debug ps)
+      (format t "st M[~a].w = ~a~%"
+          (+ (processor-state-a ps) offs)
+          (aref (processor-state-r ps) rx))))
+
 ; 2     ld   A+#nn,Rx           Rx = M[A+nn].l
 (defun i-ld-a-rx-imm (ps rx offs dmem)
   (setf (aref (processor-state-r ps) rx)
@@ -620,6 +673,15 @@
           (+ (processor-state-a ps) offs)
           (aref (processor-state-r ps) rx))))
 
+
+; 10    ld   A+#nn,Rx           Rx = M[A+nn].w
+(defun i-ld-w-a-rx-imm (ps rx offs dmem)
+  (let* ((addr (+ (processor-state-a ps) offs))
+         (word (mem-read-word dmem addr)))
+    (setf (aref (processor-state-r ps) rx) word)
+    (if (processor-state-debug ps)
+        (format t "ld Rx = M[~a].w = ~a~%" addr word))))
+
 ; 3     ld   A,Rx               Rx = M[A].l
 (defun i-ld-a-rx (ps rx dmem)
   (setf (aref (processor-state-r ps) rx)
@@ -635,6 +697,15 @@
         (mem-read-byte dmem (processor-state-a ps)))
   (if (processor-state-debug ps) 
       (format t "ld Rx = M[~a].b = ~a~%"
+          (processor-state-a ps)
+          (aref (processor-state-r ps) rx))))
+
+; 11    ld   A,Rx               Rx = M[A].w
+(defun i-ld-w-a-rx (ps rx dmem)
+  (setf (aref (processor-state-r ps) rx)
+        (mem-read-word dmem (processor-state-a ps)))
+  (if (processor-state-debug ps) 
+      (format t "ld Rx = M[~a].w = ~a~%"
           (processor-state-a ps)
           (aref (processor-state-r ps) rx))))
 
@@ -655,6 +726,16 @@
       (format t "ld A = M[~a].b = ~a~%"
         (aref (processor-state-r ps) rx)
         (processor-state-a ps))))
+
+; 12    ld   Rx,A               A = M[Rx].w
+(defun i-ld-w-rx-a (ps rx dmem)
+  (setf (processor-state-a ps)
+        (mem-read-word dmem (aref (processor-state-r ps) rx)))
+  (if (processor-state-debug ps)
+      (format t "ld A = M[~a].w = ~a~%"
+        (aref (processor-state-r ps) rx)
+        (processor-state-a ps))))
+
 
 ;    6    stst  srp             M[sp] = srp
 (defun i-stst-srp (ps dmem)
@@ -883,8 +964,20 @@
                             ((equal opcode2 6)
                              (i-st-b-a-rx p param2 dmem))
                             ((equal opcode2 7)
-                             (i-st-rx-a-b p param2 dmem))
-                    )))
+                             (i-st-b-rx-a p param2 dmem))
+                            ((equal opcode2 10)
+                             (i-ld-w-a-rx-imm o param2 (get-immediate p imem nil) dmem))
+                            ((equal opcode2 11)
+                             (i-ld-w-a-rx p param2 dmem))
+                            ((equal opcode2 12)
+                             (i-ld-w-rx-a p param2 dmem))
+                            ((equal opcode2 13)
+                             (i-st-w-a-rx-imm o param2 (get-immediate p imem nil) dmem))
+                            ((equal opcode2 14)
+                             (i-st-w-a-rx p param2 dmem))
+                            ((equal opcode2 15)
+                             (i-st-w-rx-a p param2 dmem))
+                            )))
                    ((equal param 10)
                     (i-maskb p))
                    ((equal param 11)
@@ -915,6 +1008,7 @@
     (if debug (print p)))
   nil)
 
+;;; converts a string into a list of bytes and appends a 0
 (defun string-to-mem (s)
   (loop for c in (append (coerce s 'list) '(#\Nul))
         append (list (char-code c) )))

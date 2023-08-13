@@ -4,13 +4,12 @@
 ;;;  (:use :cl))
 ;;;(in-package #:lr-asm)
 
-;;; --- these should be common to all files ----
-(defconstant SRP 15)
-(defconstant SP 14)
-(defun binary-to-signed-integer (binary num-bits)
-    (if (>= (ash binary (- 1 num-bits)) 1)
-              (- binary (ash 1 num-bits))
-                    binary))
+;;; lsb is returned at start of list
+(defun integer-to-byte-list (data bytes)
+  (reverse
+    (loop :for i :downfrom (1- bytes) :to 0
+          :collect (ldb (byte 8 (* i 8)) data))))
+
 ;;; --------------------------------------------
 
 (defun most-negative-2sc (bits)
@@ -44,14 +43,6 @@
                             (logand #x7f (ash val -7)))
                     (logand #x7f val))))))
 
-(defun ld-a-rel->r (offs r)
-  (concatenate 'list
-               (list (logior #x20 r))
-               (asm-immediate offs)))
-(defun st-r->a-rel (offs r)
-  (concatenate 'list
-               (list (logior #x50 r))
-               (asm-immediate offs)))
 (defun mvi->r (imm r)
   (concatenate 'list
                (list (logior #x80 r))
@@ -96,20 +87,31 @@
 
 (def-reg a->r    #x00)
 (def-reg r->a    #x10)
-(def-reg ld-a->r #x30)
-(def-reg ld-r->a #x40)
-(def-reg st-r->a #x60)
-(def-reg st-a->r #x70)
 (def-reg sub-r   #xc0)
 (def-reg add-r   #xb0)
 (def-reg and-r   #xd0)
 (def-reg or-r    #xe0)
+
+;;; ----- load / store 32-bit words
+(def-reg ld-a->r #x30)
+(def-reg ld-r->a #x40)
+(def-reg st-r->a #x60)
+(def-reg st-a->r #x70)
+(defun ld-a-rel->r (offs r)
+  (concatenate 'list
+               (list (logior #x20 r))
+               (asm-immediate offs)))
+(defun st-r->a-rel (offs r)
+  (concatenate 'list
+               (list (logior #x50 r))
+               (asm-immediate offs)))
 
 (defun ld.b-a->r (r)
   (concatenate 'list
                (list #xf8
                      (logior #x30 r))))
 
+;;; ----- load / store bytes
 (defun ld.b-r->a (r)
   (concatenate 'list
                (list #xf8
@@ -125,11 +127,52 @@
                (list #xf8
                      (logior #x70 r))))
 
+(defun ld.b-a-rel->r (offs r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #x20 r))
+               (asm-immediate offs)))
+
 (defun st.b-r->a-rel (offs r)
   (concatenate 'list
                (list #xf8
                      (logior #x50 r))
                (asm-immediate offs)))
+
+;;; ----- load / store 16-bit words
+
+(defun ld.w-a->r (r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xb0 r))))
+
+(defun ld.w-r->a (r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xc0 r))))
+
+(defun st.w-a->r (r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xe0 r))))
+
+(defun st.w-r->a (r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xf0 r))))
+
+(defun ld.w-a-rel->r (offs r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xa0 r))
+               (asm-immediate offs)))
+
+(defun st.w-r->a-rel (offs r)
+  (concatenate 'list
+               (list #xf8
+                     (logior #xd0 r))
+               (asm-immediate offs)))
+
 
 (defmacro def-acc (fname opcode)
   `(defun ,fname ()
@@ -160,9 +203,11 @@
 (defun push-srp ()
   (list #xf6))
 
+;;; writes a list of bytes to memory at given address
 (defun set-program (imem ilist &optional (start-adr 0))
   (let ((p start-adr))
     (loop for instr in ilist
+          do (format t "M[~a] = ~a~%" p instr)
           do (progn (setf (aref imem p) instr)
                     (setf p (+ p 1))))))
 
