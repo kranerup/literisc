@@ -42,6 +42,7 @@
 (defvar string-space-free 0) ; relative n-string-space
 
 (defvar cons-free nil)
+(defvar n-cons-end nil)
 
 ;;; cons-type: [ t:8 ]  (msb..lsb)
 ;;;   [ 0:4 | gc:1 | type:3 ]
@@ -100,6 +101,7 @@
   (defparameter nr-cons 20)
   (defparameter cons-size 4) ; bytes
   (alloc n-cons (* nr-cons cons-size))
+  (setq n-cons-end dmem-allocated)
   (alloc n-cons-type nr-cons)
   (setq cons-free 0) ; points to entry nr in n-cons table
 
@@ -178,6 +180,66 @@
 
      ))
 
+(defvar func-find-symbol nil)
+(setq func-find-symbol
+  '( ;; find-symbol
+     ;; P0 - string-ptr, searched symbol
+     ;;    - returns true if found
+     ;; P1 - cons-ptr to symbol
+     (label l-find-symbol)
+     (push-srp)
+     (push-r R5)
+
+     ; R2 = cons-table-ptr 
+     ; R3 = string-space
+     ; R4 = tmp
+     ; R5 = cons-end
+     (mvi->r n-cons R2)
+     (mvi->r n-string-space R3) ; strings
+     (mvi->r n-cons-end R5)
+
+     (label l-next-cons)
+     ;; R4 = n-cons + 2
+     (r->a R2)
+     (a->r R4)
+     (mvi->a 2) ; high word
+     (add-r R4)
+     (a->r R4)
+     ;; read cdr
+     (ld.w-r->a R4) ; cdr -> sym-name-ptr
+     (add-r R3) ; string-space + sym-name-ptr
+     (a->r P1) ; P1 = string-ptr in sym-table
+     ;; P0 = string-ptr searched symbol
+     (jsr l-str-equal)
+
+     (mvi->a 0)
+     (sub-r P0)
+     (jnz l-found-sym)
+
+     ;; cons-ptr += 4
+     (mvi->a 4)
+     (add-r R2)
+     (a->r R2)
+
+     (sub-r R5) ; equal end of cons table
+     (jlo l-next-cons) ; A < cons-end
+     ;; end
+     (mvi->a 0)
+     (a->r P0)
+     (j l-ret-find-sym)
+
+     (label l-found-sym) 
+     (mvi->a 1)
+     (a->r P0) ; return flag
+     (r->a R2)
+     (a->r P1) ; return sym-cons
+    
+     (label l-ret-find-sym)
+     (pop-r R5)
+     (pop-a)
+     (j-a)
+     ))
+
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -192,6 +254,8 @@
      ;;(jsr l-str-equal)
      ;;(j end)
      
+     (mvi->r n-source-start P0)
+     (jsr l-find-symbol)
      
      ;; setup:
      ;; P3 - use-unread
@@ -204,42 +268,42 @@
      ;(r->a P0) (a->r R0)
 
      ;; R5 - the source symbol that we are searching for
-     (mvi->r n-source-start R5)
+     ;;(mvi->r n-source-start R5)
      
-     ;(mvi->r n-cons-type R1) ; R1 cons type table ptr
-     (mvi->r n-cons R2) ; R2 cons table ptr
-     (mvi->r n-string-space R3) ; strings
-     ;(ld.b-r->a R1) ;; ignore value for now
+     ;;;(mvi->r n-cons-type R1) ; R1 cons type table ptr
+     ;;(mvi->r n-cons R2) ; R2 cons table ptr
+     ;;(mvi->r n-string-space R3) ; strings
+     ;;;(ld.b-r->a R1) ;; ignore value for now
 
-     ; R2 = cons-table-ptr 
-     (label l-next-cons)
-     ;; n-cons + 2
-     (r->a R2)
-     (a->r R4)
-     (mvi->a 2) ; high word
-     (add-r R4)
-     (a->r R4)
-     ;; read cdr
-     (ld.w-r->a R4) ; cdr -> sym-name-ptr
-     (add-r R3) ; string-space + sym-name-ptr
-     (a->r P0)
-     (r->a R5)
-     (a->r P1)
-     (jsr l-str-equal)
+     ;;; R2 = cons-table-ptr 
+     ;;(label l-next-cons)
+     ;;;; n-cons + 2
+     ;;(r->a R2)
+     ;;(a->r R4)
+     ;;(mvi->a 2) ; high word
+     ;;(add-r R4)
+     ;;(a->r R4)
+     ;;;; read cdr
+     ;;(ld.w-r->a R4) ; cdr -> sym-name-ptr
+     ;;(add-r R3) ; string-space + sym-name-ptr
+     ;;(a->r P0)
+     ;;(r->a R5)
+     ;;(a->r P1)
+     ;;(jsr l-str-equal)
 
-     (mvi->a 0)
-     (sub-r P0)
-     (jnz l-found-sym)
-     ;(jsr prtstr)
+     ;;(mvi->a 0)
+     ;;(sub-r P0)
+     ;;(jnz l-found-sym)
+     ;;;(jsr prtstr)
 
-     ;; cons-ptr += 4
-     (mvi->a 4)
-     (add-r R2)
-     (a->r R2)
+     ;;;; cons-ptr += 4
+     ;;(mvi->a 4)
+     ;;(add-r R2)
+     ;;(a->r R2)
 
-     (j l-next-cons)
+     ;;(j l-next-cons)
 
-     (label l-found-sym) 
+     ;;(label l-found-sym) 
      (label l-stop)
      (j l-stop)
      
@@ -361,8 +425,9 @@
   '( ;; str-equal
      ;; P1 - string-ptr
      ;; P0 - string-ptr / return value
-     (push-r R1)
      (label l-str-equal)
+     (push-r R1)
+     (label l-str-equal-loop)
      (ld.b-r->a P1)
      (a->r R0)
      (ld.b-r->a P0)
@@ -392,7 +457,7 @@
      (mvi->a 1)
      (add-r P0)
      (a->r P0)
-     (j l-str-equal)))
+     (j l-str-equal-loop)))
 
 ;;; P3 - use-unread (updated)
 ;;; P2 - last-read (updated)
@@ -515,10 +580,10 @@
 ;(setf e (make-emulator *hello-world* dmem 200 nil))
 ;(run-with-curses e)
 
-(defun asm-n-run ()
+(defun asm-n-run ( &optional (debug nil))
   (setq *hello-world*
-        (masm main func-prtstr read-c reader func-str-equal))
-  (setf e (make-emulator *hello-world* dmem 200 nil))
+        (masm main func-prtstr read-c reader func-str-equal func-find-symbol))
+  (setf e (make-emulator *hello-world* dmem 200 debug))
   (run-with-curses e))
 
 ;(run-emul e 200 nil)
