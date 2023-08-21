@@ -105,11 +105,17 @@
   (alloc n-cons-type nr-cons)
   (setq cons-free 0) ; points to entry nr in n-cons table
 
+  ;; use-unread, last-read, read-ptr
+  (alloc reader-state (* 4 3))
+  (defparameter rs-use-unread 0)
+  (defparameter rs-last-read 4)
+  (defparameter rs-read-ptr 8)
+  
   (alloc n-stack (* 100 4))
   (setq n-stack-highest (- dmem-allocated 1)))
 
 
-  
+(init-lisp)
 
 ;;; -- sym-strings --
 (defun add-symbol (sym-name value-ptr)
@@ -145,36 +151,55 @@
 
 
 
-;;; P3 - use-unread (updated)
-;;; P2 - last-read (updated)
-;;; P1 - read-ptr (updated)
+;;; R0 - reader-state base address
+;;;    read/updates the following as offset from base address
+;;;    - use-unread (updated)
+;;;    - last-read (updated)
+;;;    - read-ptr (updated)
 ;;; P0 - returns char
 (defvar read-c nil)
 (setq read-c
   '( (label l-read-c)
+     (push-r R2)
+     (mvi->r reader-state R0)
+     (r->a R0) ; A = R0 base-ptr
+     (ld-a-rel->r rs-use-unread R1) ; R1 = M[base-ptr+use-unread-offs]
      ;; if use-unread == 0
      (mvi->a 0)
-     (sub-r P3)
+     (sub-r R1)
      (jnz l-use-unread)
-     ;; read char
-     ;; char = source[ read-ptr ]
-     (ld.b-r->a P1)
+     ;; read-char = M[ read-ptr ]
+     (r->a R0) ; base-ptr
+     (ld-a-rel->r rs-read-ptr R2) ; R2 (read-ptr) = M[ A(base) + read-ptr-offs ]
+     (ld.b-r->a R2) ; P0 = A = M[ R2 (read-ptr) ]
      (a->r P0)
-     ;; read-ptr =+ 1
+     ;; read-ptr += 1
      (mvi->a 1)
-     (add-r P1)
-     (a->r P1)
-     ;; last-read = char
-     (r->a P0) (a->r P2)
+     (add-r R2)
+     (a->r R2)
+     ;; save read-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R2) ; M[ A(base) + read-ptr-offs ] = R2 (read-ptr)
+     ;; update last-read
+     ;;   last-read = read-char
+     ;; A (base-ptr)
+     (st-r->a-rel rs-last-read P0) ; M[ A(base) + last-read-offs ] = P0 (last-read)
      ;; return
+     (pop-r R2)
      (r->a srp)
      (j-a)
 
+     ;; use-unread == 1
      (label l-use-unread)
-     (mvi->a 0) ; use-unread = 0
-     (a->r P3)
-     (r->a P2) (a->r P0) ; char = last-read
+     ;; clear use-unread
+     (mvi->r 0 R1) ; R1 = use-unread = 0
+     (r->a R0) ; A = R0 base-ptr
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     ;; read-char = last-read
+     (ld-a-rel->r rs-last-read P0) ; P0 = M[ A(base) + last-read-offs ]
      ;; return
+     (pop-r R2)
      (r->a srp)
      (j-a)
 
@@ -240,6 +265,140 @@
      (j-a)
      ))
 
+;;; sread:
+;;;   read-sym
+;;;   if '('
+;;;     return list() 
+;;;   elif \'
+;;;     return quote()
+;;;   else
+;;;     return atom()
+;;; atom:
+;;;   return symbol / number
+;;;   symbol = cons-cell with sym-type
+;;;   number = cons-cell with num-type
+;;;   if symbol found return existing symbol
+;;;   else create a new symbol
+;;; list:
+;;;    if ')'
+;;;       return nil
+;;;    else
+;;        return cons( sym, list() )
+
+(defvar sread nil)
+(setq sread
+  '( ;; --- sread ---
+     (push-srp)
+     (push-r R3)
+
+     
+     ;; P3 - use-unread (updated)
+     ;; P2 - last-read (updated)
+     ;; P1 - read-ptr (updated)
+     ;; P0 - returns read object
+     (jsr f-reader)
+     ;(r->a P0) (a->r R0)
+
+))
+
+
+(defvar test-read-c nil)
+(setq test-read-c 
+  '( 
+     (mvi->r n-stack-highest SP)
+
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr l-read-c) ; P0 = char
+     (jsr l-putchar) ; print P0
+
+     (r->a R0) ; base-ptr
+     (mvi->r 1 R1) ; use-unread = 1
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (1)
+
+     (jsr l-read-c) ; P0 = char
+     (jsr l-putchar) ; print P0
+
+     (jsr l-read-c) ; P0 = char
+     (jsr l-putchar) ; print P0
+
+     (jsr l-read-c) ; P0 = char
+     (jsr l-putchar) ; print P0
+
+     (jsr l-read-c) ; P0 = char
+     (jsr l-putchar) ; print P0
+
+     (label end)
+     (j end)))
+
+     
+     ;;;(jsr l-find-symbol)
+     ;;;;; ------- reader 1 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
+     ;;;;; ------- reader 2 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
+     ;;;;; ------- reader 3 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
+     ;;;;; ------- reader 4 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
+     ;;;;; ------- reader 5 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
+     ;;;;; ------- reader 6 --------------
+     ;;;(jsr f-reader)
+     ;;;(r->a P0) (a->r R0)
+
+     ;;;(mvi->r 0 R1)
+     ;;;(jsr prtstr)
+
+     ;;;(mvi->r n-read-sym-str R1)
+     ;;;(jsr prtstr)
+
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -256,6 +415,7 @@
      
      (mvi->r n-source-start P0)
      (jsr l-find-symbol)
+     ))
      
      ;; setup:
      ;; P3 - use-unread
@@ -304,78 +464,17 @@
      ;;(j l-next-cons)
 
      ;;(label l-found-sym) 
-     (label l-stop)
-     (j l-stop)
+     ;;(label l-stop)
+     ;;(j l-stop)
+     ;;
+     ;;(mvi->r n-read-sym-str R1)
+     ;;(jsr prtstr)
      
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
      
      
-     
-     ;; ------- reader 1 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     ;; ------- reader 2 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     ;; ------- reader 3 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     ;; ------- reader 4 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     ;; ------- reader 5 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     ;; ------- reader 6 --------------
-     (jsr f-reader)
-     (r->a P0) (a->r R0)
-
-     (mvi->r 0 R1)
-     (jsr prtstr)
-
-     (mvi->r n-read-sym-str R1)
-     (jsr prtstr)
-
-     (label end)
-     (j end)))
 
 (defvar func-prtstr nil)
+#|
 (setq func-prtstr-old
   '( ;; --- prtstr ---
      ;; r1 - ptr to zero terminated string
@@ -396,6 +495,7 @@
      (label ret-prtstr)
      (r->a srp)
      (j-a)))
+|#
 
 (setq func-prtstr
   '( ;; --- prtstr ---
@@ -419,6 +519,20 @@
      (pop-r R1)
      (r->a srp)
      (j-a)))
+
+(defvar func-putchar nil)
+(setq func-putchar
+  '( ;; --- putchar ---
+     ;; P0 - char to print
+     (label l-putchar)
+     (push-r R0)
+     (mvi->r -1 R0) ; ptr to I/O reg
+     (r->a P0)
+     (st-a->r R0)
+     (pop-r R0)
+     (r->a srp)
+     (j-a)))
+     
 
 (defvar func-str-equal nil)
 (setq func-str-equal
@@ -580,12 +694,11 @@
 ;(setf e (make-emulator *hello-world* dmem 200 nil))
 ;(run-with-curses e)
 
-(defun asm-n-run ( &optional (debug nil))
+(defun asm-n-run ( main &optional (debug nil))
   (setq *hello-world*
-        (masm main func-prtstr read-c reader func-str-equal func-find-symbol))
+        (masm main func-prtstr read-c reader func-str-equal func-find-symbol func-putchar))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (run-with-curses e))
 
 ;(run-emul e 200 nil)
-(quit)
 
