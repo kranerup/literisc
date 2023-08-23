@@ -89,7 +89,7 @@
 
 (defun init-lisp ()
   (setq dmem-allocated 0)
-  (alloc-init n-source-start     (string-to-mem "symbol"))
+  (alloc-init n-source-start     (string-to-mem "symbol second ( inner )"))
   (alloc-init n-sym-string-start (string-to-mem "symbol"))
   (alloc-init n-print-sep        (string-to-mem "---
 "))
@@ -337,11 +337,43 @@
      (label end)
      (j end)))
 
+(defvar test-reader nil)
+(setq test-reader
+ '(
+     (mvi->r n-stack-highest SP)
+
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr f-reader)
+     (mvi->r n-read-sym-str P0)
+     (jsr prtstr)
      
+     (jsr f-reader)
+     (mvi->r n-read-sym-str P0)
+     (jsr prtstr)
+
+     (jsr f-reader)
+     (mvi->r n-read-sym-str P0)
+     (jsr prtstr)
+
+     (jsr f-reader)
+     (mvi->r n-read-sym-str P0)
+     (jsr prtstr)
+
+     (jsr f-reader)
+     (mvi->r n-read-sym-str P0)
+     (jsr prtstr)
+
+     (label end-reader)
+     (j end-reader)))
+
      ;;;(jsr l-find-symbol)
-     ;;;;; ------- reader 1 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
 
      ;;;(mvi->r 0 R1)
      ;;;(jsr prtstr)
@@ -573,14 +605,11 @@
      (a->r P0)
      (j l-str-equal-loop)))
 
-;;; P3 - use-unread (updated)
-;;; P2 - last-read (updated)
-;;; P1 - read-ptr (updated)
-;;; P0 - returns read object
 (defconstant reader-lpar 1)
 (defconstant reader-rpar 2)
 (defconstant reader-sym 3)
 
+;;; P0 - returns read object
 (defvar reader nil)
 (setq reader
   '(
@@ -595,8 +624,8 @@
     (mvi->r 0 R4)
 
     (label l-rd-more)
-    (jsr l-read-c) ; P1=read-ptr
-    ;; R0 = char
+    (jsr l-read-c)
+    ;; R0 = P0 = char
     (r->a P0) (a->r R0)
 
     ;; --- if reading-symbol -----
@@ -625,8 +654,13 @@
 
     (label l-end-of-sym-unrd)
     ;; unread-c
-    (r->a R0) (a->r P2) ; last-read = char
-    (mvi->r 1 P3) ; use-unread = 1
+    (mvi->r reader-state R2) ; reader-state base-ptr
+    (r->a R2) ; A = base-ptr
+    ;; last-read = char
+    (st-r->a-rel rs-last-read R0) ; M[ A(base) + last-read-offs ] = R0 (char)
+    (mvi->r 1 R2) ; use-unread = 1
+    (st-r->a-rel rs-use-unread R2) ; M[ A(base) + use-unread-offs ] = R2 (1)
+
     (label l-end-of-sym)
     ;; reading-symbol = False
     (mvi->r 0 R4)
@@ -670,8 +704,8 @@
     (add-r R1) ; read-sym-str++
     (a->r R1)
     ;; debug print
-    (r->a R0)
-    (st-a->r R3); putchar
+    ;(r->a R0)
+    ;(st-a->r R3); putchar
     ;; reading-symbol = True
     (mvi->r 1 R4)
     (j l-rd-more) ; loop back and read next char
