@@ -202,6 +202,19 @@
                                     :debug t
                                     :write-callback nil))
 
+(defun reset-processor (p)
+  (setf (processor-state-pc p) 0)
+  (setf (processor-state-a p) 0)
+  (setf (processor-state-n p) 0)
+  (setf (processor-state-v p) 0)
+  (setf (processor-state-z p) 0)
+  (setf (processor-state-c8 p) 0)
+  (setf (processor-state-z8 p) 0)
+  (setf (processor-state-c16 p) 0)
+  (setf (processor-state-z16 p) 0)
+  (loop for r from 0 to 15
+        do (setf (aref (processor-state-r p) r) 0)) )
+
 ; 1     mv  Rx,A                A = Rx
 (defun i-mv-r (ps rx)
   (setf (processor-state-a ps)
@@ -960,19 +973,19 @@
                             ((equal opcode2 4)
                              (i-ld-b-rx-a p param2 dmem))
                             ((equal opcode2 5)
-                             (i-st-b-a-rx-imm o param2 (get-immediate p imem nil) dmem))
+                             (i-st-b-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 6)
                              (i-st-b-a-rx p param2 dmem))
                             ((equal opcode2 7)
                              (i-st-b-rx-a p param2 dmem))
                             ((equal opcode2 10)
-                             (i-ld-w-a-rx-imm o param2 (get-immediate p imem nil) dmem))
+                             (i-ld-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 11)
                              (i-ld-w-a-rx p param2 dmem))
                             ((equal opcode2 12)
                              (i-ld-w-rx-a p param2 dmem))
                             ((equal opcode2 13)
-                             (i-st-w-a-rx-imm o param2 (get-immediate p imem nil) dmem))
+                             (i-st-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 14)
                              (i-st-w-a-rx p param2 dmem))
                             ((equal opcode2 15)
@@ -1120,6 +1133,49 @@
         window
         (format nil "~c" (code-char (logand #xff data))))))
 
+(defun get-string (window)
+  (loop with cr := nil and ch := nil and s := ""
+        do (setf ch (charms:get-char window :ignore-error t))
+        while (not (equal ch #\Newline))
+        do (setf s (concatenate 'string s (list ch)))
+        do (setf ch (with-output-to-string (*standard-output*)
+                      (princ ch *standard-output*)))
+        do (charms:write-string-at-cursor window ch)
+        finally (return s)))
+
+;        do (case ch
+;             ((nil) (sleep 0.1))
+;             ((#\Newline) (setf cr t))
+;             ((t)
+;             ((with-output-to-string (*standard-output*)
+;                (princ s *standard-output*)
+;                (princ ch *standard-output*)))
+  
+
+(defun get-breakpoint (breakpoints window)
+  (charms:clear-window window)
+  (draw-window-box window)
+  (charms:write-string-at-point
+    window
+    "breakpoint?"
+    1 1)
+  (charms:refresh-window window)
+  (let ((s (get-string window))
+        (bp nil))
+    (setf bp (parse-integer s))
+    (setf (gethash bp breakpoints) bp)
+    (charms:clear-window window)
+    (draw-window-box window)
+    (charms:write-string-at-point
+      window
+      (format nil "break at:~a" bp)
+      1 1)
+    (charms:refresh-window window)))
+
+  ;(charms:refresh-window window))
+    ;(multiple-value-bind (bp position) (read-from-string s)
+    ;  (setf (gethash bp breakpoints) bp))))
+
 (defun run-with-curses ( emul )
   (setq *print-pretty* nil)
   (setf (processor-state-debug 
@@ -1128,22 +1184,27 @@
     (charms:disable-echoing)
     (charms:enable-raw-input)
     (charms:clear-window (charms:standard-window))
-    (let ((disasm-window (charms:make-window 40 40 55 1))
-          (output-window (charms:make-window 40 20 10 32))
-          (cpu-window (charms:make-window 40 30 10 0)))
+    (let ((disasm-window (charms:make-window  40 40 55 1))
+          (output-window (charms:make-window  40 20 10 32))
+          (cpu-window (charms:make-window     40 30 10 0))
+          (command-window (charms:make-window 30  5 10 45))
+          (breakpoints (make-hash-table)))
       (setf (processor-state-write-callback
               (emulated-system-processor emul))
             (lambda (addr data) (write-cb-write-win addr data output-window)))
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
+      (charms:clear-window command-window)
       (draw-window-box cpu-window)
+      (draw-window-box command-window)
       (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
       (charms/ll:scrollok (charms::window-pointer output-window) 1)
       (charms:enable-non-blocking-mode cpu-window)
       (charms:refresh-window disasm-window)
       (charms:refresh-window output-window)
       (charms:refresh-window cpu-window)
+      (charms:refresh-window command-window)
       (loop named emulate
             with single-step := nil and run := nil and update-windows := t
             do (progn
@@ -1169,6 +1230,10 @@
                    ((nil) nil)
                    ((#\Space) (setf single-step 1))
                    ((#\r) (setf run (not run)))
+                   ((#\R) (progn
+                            (reset-processor (emulated-system-processor emul))
+                            (setf update-windows t)))
+                   ((#\b) (get-breakpoint breakpoints command-window))
                    ((#\q #\Q) (return-from emulate)))
                  ;(sleep 0.1)
                  (if (or run single-step)
@@ -1178,6 +1243,10 @@
                          (emulated-system-processor emul) 
                          (emulated-system-imem emul)
                          (emulated-system-dmem emul))))
+                 (if (gethash 
+                       (processor-state-pc (emulated-system-processor emul))
+                       breakpoints)
+                     (setf run nil))
                  (setf single-step nil))))))
 
 

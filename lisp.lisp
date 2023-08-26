@@ -57,18 +57,26 @@
 ;;;
 ;;; cons: [ f1:16 | f2:16 ]
 ;;;       [      f:32     ]
+;;;     msb ... lsb
+;;;     [ f1 | f2 ]
+;;; byte 3 2   1 0
+
 ;;;   type   |    f1    |     f2    |
 ;;;   -------+----------+-----------+
 ;;;   symbol | name-ptr | value-ptr |
 ;;;     name-ptr:string space ptr
 ;;;     value-ptr:cons cell ptr
-;;;   cons   | car-ptr  | cdr-ptr   |
+;;;   cons   | cdr-ptr  | car-ptr   |
 ;;;     car/cdr-ptr: cons cell ptr
 ;;;          |          f           |
 ;;;   number |        value         |
 ;;;   char   |        value         |
 ;;;   
+;;; cons pointers are relative indexes in the
+;;; cons table with each entry being a complete cons
+;;; cell (so not byte indexes but 4-bytes per index).
 
+;;;
 (defun cons-cell (f1 f2)
   (logior (logand #xFFFF f2)
           (ash (logand #xFFFF f1) 16)))
@@ -89,7 +97,7 @@
 
 (defun init-lisp ()
   (setq dmem-allocated 0)
-  (alloc-init n-source-start     (string-to-mem "symbol second ( inner )"))
+  (alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
   (alloc-init n-sym-string-start (string-to-mem "symbol"))
   (alloc-init n-print-sep        (string-to-mem "---
 "))
@@ -118,7 +126,7 @@
 (init-lisp)
 
 ;;; -- sym-strings --
-(defun add-symbol (sym-name value-ptr)
+(defun add-symbol (dmem sym-name value-ptr)
 (let ((str (string-to-mem sym-name))
       (str-ptr nil)
       (cons-ptr cons-free))
@@ -140,9 +148,6 @@
   (setq string-space-free (+ string-space-free
                              (list-length str)))))
 
-(add-symbol "not-this" 0)
-(add-symbol "symbol2" 0)
-(add-symbol "symbol" 0)
 ;(set-program dmem (string-to-mem "symbol2") (+ (* sym-length n-sym-strings)))
 
 ;(set-program dmem (string-to-mem "symbol next ( inside ) end") source-start)
@@ -150,7 +155,9 @@
 ;(set-program dmem (string-to-mem "symbol") sym-string-start)
 
 
-
+;;; read-c keeps it's state in global memory variables relative
+;;; reader-state base address.
+;;; 
 ;;; R0 - reader-state base address
 ;;;    read/updates the following as offset from base address
 ;;;    - use-unread (updated)
@@ -215,10 +222,12 @@
      (push-srp)
      (push-r R5)
 
-     ; R2 = cons-table-ptr 
-     ; R3 = string-space
-     ; R4 = tmp
-     ; R5 = cons-end
+     ;; R1 = cons-rel-ptr - relative offset
+     ;; R2 = cons-table-ptr - absolute address
+     ;; R3 = string-space
+     ;; R4 = tmp
+     ;; R5 = cons-end
+     (mvi->r 0 R1)
      (mvi->r n-cons R2)
      (mvi->r n-string-space R3) ; strings
      (mvi->r n-cons-end R5)
@@ -227,7 +236,7 @@
      ;; R4 = n-cons + 2
      (r->a R2)
      (a->r R4)
-     (mvi->a 2) ; high word
+     (mvi->a 2) ; high word (cons-f1)
      (add-r R4)
      (a->r R4)
      ;; read cdr
@@ -246,6 +255,11 @@
      (add-r R2)
      (a->r R2)
 
+     ;; cons-rel-ptr += 1
+     (mvi->a 1)
+     (add-r R1)
+     (a->r R1)
+
      (sub-r R5) ; equal end of cons table
      (jlo l-next-cons) ; A < cons-end
      ;; end
@@ -255,15 +269,129 @@
 
      (label l-found-sym) 
      (mvi->a 1)
-     (a->r P0) ; return flag
-     (r->a R2)
-     (a->r P1) ; return sym-cons
+     (a->r P0) ; P0 = 1, return flag
+     (r->a R1)
+     (a->r P1) ; P1 = cons-ptr, return sym-cons
     
      (label l-ret-find-sym)
      (pop-r R5)
      (pop-a)
      (j-a)
      ))
+
+(defconstant reader-lpar 1)
+(defconstant reader-rpar 2)
+(defconstant reader-sym 3)
+
+;;; P0 - returns read object type
+;;; if reader-sym then symbol string is in n-read-sym-str
+(defvar reader nil)
+(setq reader
+  '(
+    (label f-reader)
+    (push-srp)
+    (push-r R4)
+    ;; R1 - read-sym-ptr
+    (mvi->r n-read-sym-str R1)
+    ;; R3 - io-ptr
+    (mvi->r -1 R3) ; ptr to I/O reg
+    ;; R4 - reading-symbol
+    (mvi->r 0 R4)
+
+    (label l-rd-more)
+    (jsr l-read-c)
+    ;; R0 = P0 = char
+    (r->a P0) (a->r R0)
+
+    ;; --- if reading-symbol -----
+    (mvi->a 0)
+    (sub-r R4)
+    (jz l-not-rd-sym)
+
+    ;; ----------- reading-symbol --------------
+    ;; end of symbol?
+    ;; if c in ['(',')',' ',0]:  
+    (mvi->r (char-code #\( ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jz l-end-of-sym-unrd)
+    (mvi->r (char-code #\) ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jz l-end-of-sym-unrd)
+    (mvi->r (char-code #\  ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jz l-end-of-sym)
+    (mvi->a 0)
+    (sub-r R0)
+    (jnz l-read-sym-char)
+
+    (label l-end-of-sym-unrd)
+    ;; unread-c
+    (mvi->r reader-state R2) ; reader-state base-ptr
+    (r->a R2) ; A = base-ptr
+    ;; last-read = char
+    (st-r->a-rel rs-last-read R0) ; M[ A(base) + last-read-offs ] = R0 (char)
+    (mvi->r 1 R2) ; use-unread = 1
+    (st-r->a-rel rs-use-unread R2) ; M[ A(base) + use-unread-offs ] = R2 (1)
+
+    (label l-end-of-sym)
+    ;; reading-symbol = False
+    (mvi->r 0 R4)
+    ;; return sym
+    (mvi->r reader-sym P0)
+    (j l-reader-ret)
+   
+    ;; else ------- not reading-symbol ---------
+    (label l-not-rd-sym)
+    ;;  if char == '('
+    (mvi->r (char-code #\( ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jnz l-not-lpar)
+    ;;   then return lpar
+    (mvi->r reader-lpar P0)
+    (j l-reader-ret)
+    
+    (label l-not-lpar)
+    ;;  if char == ')'
+    (mvi->r (char-code #\) ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jnz l-not-rpar)
+    ;;   then return rpar
+    (mvi->r reader-rpar P0)
+    (j l-reader-ret)
+   
+    (label l-not-rpar)
+    ;; is it a space then just read next char
+    (mvi->r (char-code #\ ) R2)
+    (r->a R2)
+    (sub-r R0) ; ' ' - R0
+    (jz l-rd-more) ; loop back and read next char
+
+    ;; all other chars are written to sym buffer
+    (label l-read-sym-char)
+    (r->a R0)
+    (st-a->r R1) ; M[read-sym-str] = char
+    (mvi->a 1)
+    (add-r R1) ; read-sym-str++
+    (a->r R1)
+    ;; debug print
+    ;(r->a R0)
+    ;(st-a->r R3); putchar
+    ;; reading-symbol = True
+    (mvi->r 1 R4)
+    (j l-rd-more) ; loop back and read next char
+
+    ;; return
+    (label l-reader-ret)
+    (pop-r R4)
+    (pop-a)
+    (j-a)
+    
+    ))
 
 ;;; sread:
 ;;;   read-sym
@@ -288,17 +416,37 @@
 (defvar sread nil)
 (setq sread
   '( ;; --- sread ---
+     ;; P0 - returns cons ptr to read objects
      (push-srp)
      (push-r R3)
 
+     (jsr f-reader) ; -> P0
+     (mvi-a reader-lpar)
+     (sub-r P0)
+     (jnz l-sread-nxt)
+     ;; '('
+     (jsr l-list)
+     (j l-sread-ret)
      
-     ;; P3 - use-unread (updated)
-     ;; P2 - last-read (updated)
-     ;; P1 - read-ptr (updated)
-     ;; P0 - returns read object
-     (jsr f-reader)
-     ;(r->a P0) (a->r R0)
+     ;; quote TBD
 
+     ;; atom
+     (label l-sread-nxt)
+     ;; number TBD
+     ;; symbol
+     (mvi->r n-read-sym-str P0)
+     (jsr l-find-symbol) ; -> P0 found flag
+     (mvi-a 1)
+     (sub-r P0)
+     (jnz l-sread-new-sym)
+    
+     (r->a P1)
+     (a->r P0)
+    
+     (label l-sread-ret)
+     (pop-r R3)
+     (pop-a)
+     (j-a)
 ))
 
 
@@ -373,63 +521,22 @@
      (label end-reader)
      (j end-reader)))
 
-     ;;;(jsr l-find-symbol)
+(defvar test-find-symbol nil)
+(setq test-find-symbol
+ '(      
+     (mvi->r n-stack-highest SP)
 
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
+     (mvi->r n-source-start P0)
+     (jsr l-find-symbol)
+     (jsr l-cdr) ; P0 = name-ptr
+     (mvi->r n-string-space R0)
+     (r->a P0)
+     (add-r R0)
+     (jsr prtstr)
 
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
+     (label end-fs)
+     (j end-fs)))
 
-     ;;;;; ------- reader 2 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
-
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
-
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
-
-     ;;;;; ------- reader 3 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
-
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
-
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
-
-     ;;;;; ------- reader 4 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
-
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
-
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
-
-     ;;;;; ------- reader 5 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
-
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
-
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
-
-     ;;;;; ------- reader 6 --------------
-     ;;;(jsr f-reader)
-     ;;;(r->a P0) (a->r R0)
-
-     ;;;(mvi->r 0 R1)
-     ;;;(jsr prtstr)
-
-     ;;;(mvi->r n-read-sym-str R1)
-     ;;;(jsr prtstr)
 
 (defvar main nil)
 (setq main 
@@ -605,119 +712,45 @@
      (a->r P0)
      (j l-str-equal-loop)))
 
-(defconstant reader-lpar 1)
-(defconstant reader-rpar 2)
-(defconstant reader-sym 3)
+(defvar func-car nil)
+(setq func-car
+  '( ;; car
+     ;; P0 - cons ptr 
+     ;;    - returns car ptr from the cons cell
+     (label l-car)
+     (r->a P0) ; cons-ptr = cons-index << 2 + n-cons
+     (lsl-a)
+     (lsl-a)
+     (ld.w-a-rel->r n-cons P0) ; R0 = lowest word of cons-cell (cons.f2/car)
+     (r->a SRP)
+     (j-a)))
 
-;;; P0 - returns read object
-(defvar reader nil)
-(setq reader
-  '(
-    (label f-reader)
-    (push-srp)
-    (push-r R4)
-    ;; R1 - read-sym-ptr
-    (mvi->r n-read-sym-str R1)
-    ;; R3 - io-ptr
-    (mvi->r -1 R3) ; ptr to I/O reg
-    ;; R4 - reading-symbol
-    (mvi->r 0 R4)
+(defvar func-cdr nil)
+(setq func-cdr
+  '( ;; cdr
+     ;; P0 - cons ptr 
+     ;;    - returns cdr ptr from the cons cell
+     (label l-cdr)
+     (r->a P0) ; cons-ptr = cons-index << 2 + n-cons + 2
+     (lsl-a)
+     (lsl-a)
+     (ld.w-a-rel->r (+ 2 n-cons) P0) ; R0 = highest word of cons-cell (cons.f1/cdr)
+     (r->a SRP)
+     (j-a)))
 
-    (label l-rd-more)
-    (jsr l-read-c)
-    ;; R0 = P0 = char
-    (r->a P0) (a->r R0)
-
-    ;; --- if reading-symbol -----
-    (mvi->a 0)
-    (sub-r R4)
-    (jz l-not-rd-sym)
-
-    ;; ----------- reading-symbol --------------
-    ;; end of symbol?
-    ;; if c in ['(',')',' ',0]:  
-    (mvi->r (char-code #\( ) R2)
-    (r->a R2)
-    (sub-r R0)
-    (jz l-end-of-sym-unrd)
-    (mvi->r (char-code #\) ) R2)
-    (r->a R2)
-    (sub-r R0)
-    (jz l-end-of-sym-unrd)
-    (mvi->r (char-code #\  ) R2)
-    (r->a R2)
-    (sub-r R0)
-    (jz l-end-of-sym)
-    (mvi->a 0)
-    (sub-r R0)
-    (jnz l-read-sym-char)
-
-    (label l-end-of-sym-unrd)
-    ;; unread-c
-    (mvi->r reader-state R2) ; reader-state base-ptr
-    (r->a R2) ; A = base-ptr
-    ;; last-read = char
-    (st-r->a-rel rs-last-read R0) ; M[ A(base) + last-read-offs ] = R0 (char)
-    (mvi->r 1 R2) ; use-unread = 1
-    (st-r->a-rel rs-use-unread R2) ; M[ A(base) + use-unread-offs ] = R2 (1)
-
-    (label l-end-of-sym)
-    ;; reading-symbol = False
-    (mvi->r 0 R4)
-    ;; return sym
-    (mvi->r reader-sym P0)
-    (j l-reader-ret)
-   
-    ;; else ------- not reading-symbol ---------
-    (label l-not-rd-sym)
-    ;;  if char == '('
-    (mvi->r (char-code #\( ) R2)
-    (r->a R2)
-    (sub-r R0)
-    (jnz l-not-lpar)
-    ;;   then return lpar
-    (mvi->r reader-lpar P0)
-    (j l-reader-ret)
-    
-    (label l-not-lpar)
-    ;;  if char == ')'
-    (mvi->r (char-code #\) ) R2)
-    (r->a R2)
-    (sub-r R0)
-    (jnz l-not-rpar)
-    ;;   then return rpar
-    (mvi->r reader-rpar P0)
-    (j l-reader-ret)
-   
-    (label l-not-rpar)
-    ;; is it a space then just read next char
-    (mvi->r (char-code #\ ) R2)
-    (r->a R2)
-    (sub-r R0) ; ' ' - R0
-    (jz l-rd-more) ; loop back and read next char
-
-    ;; all other chars are written to sym buffer
-    (label l-read-sym-char)
-    (r->a R0)
-    (st-a->r R1) ; M[read-sym-str] = char
-    (mvi->a 1)
-    (add-r R1) ; read-sym-str++
-    (a->r R1)
-    ;; debug print
-    ;(r->a R0)
-    ;(st-a->r R3); putchar
-    ;; reading-symbol = True
-    (mvi->r 1 R4)
-    (j l-rd-more) ; loop back and read next char
-
-    ;; return
-    (label l-reader-ret)
-    (pop-r R4)
-    (pop-a)
-    (j-a)
-    
-    ))
-
+(defvar func-print nil)
+(setq func-print
+  '( ;; print
+     ;; P0 - cons ptr
+     (label l-print)
+     (push-srp)
+     (push-r R0)
+     ;; assume it's a symbol so we don't need to look at
+     ;; the cons=type.
+     (mvi->r n-cons R0)
+     (r->a P0)
+     (add-r R0)))
+     
 
 (defvar *hello-world* nil)
 ;(setq *hello-world*
@@ -728,10 +761,37 @@
 ;(setf e (make-emulator *hello-world* dmem 200 nil))
 ;(run-with-curses e)
 
-(defun asm-n-run ( main &optional (debug nil))
+(defun t1 ()
+  (asm-n-run test-read-c
+    #'(lambda (dmem)
+        (set-program dmem 
+                     (string-to-mem "symbol symbol2 ( inner )") 
+                     n-source-start))))
+(defun t2 ()
+  (asm-n-run test-reader
+    #'(lambda (dmem)
+        (set-program dmem 
+                     (string-to-mem "symbol symbol2 ( inner )") 
+                     n-source-start))))
+
+(defun t3 ()
+  (asm-n-run test-find-symbol
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "not-this" 0)
+        (add-symbol dmem "symbol2" 0)
+        (add-symbol dmem "symbol" 0)
+        (set-program dmem 
+                     (string-to-mem "symbol") 
+                     n-source-start))))
+
+(defun asm-n-run ( main &optional (setup nil) (debug nil))
   (setq *hello-world*
-        (masm main func-prtstr read-c reader func-str-equal func-find-symbol func-putchar))
+        (masm main func-prtstr read-c reader func-str-equal
+              func-find-symbol func-putchar func-cdr
+              func-car))
   (setf e (make-emulator *hello-world* dmem 200 debug))
+  (if setup (funcall setup dmem))
   (run-with-curses e))
 
 ;(run-emul e 200 nil)
