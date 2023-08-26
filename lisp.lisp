@@ -413,15 +413,16 @@
 ;;;    else
 ;;        return cons( sym, list() )
 
-(defvar sread nil)
-(setq sread
+(defvar func-sread nil)
+(setq func-sread
   '( ;; --- sread ---
      ;; P0 - returns cons ptr to read objects
+     (label l-sread)
      (push-srp)
      (push-r R3)
 
      (jsr f-reader) ; -> P0
-     (mvi-a reader-lpar)
+     (mvi->a reader-lpar)
      (sub-r P0)
      (jnz l-sread-nxt)
      ;; '('
@@ -436,7 +437,7 @@
      ;; symbol
      (mvi->r n-read-sym-str P0)
      (jsr l-find-symbol) ; -> P0 found flag
-     (mvi-a 1)
+     (mvi->a 1)
      (sub-r P0)
      (jnz l-sread-new-sym)
     
@@ -447,6 +448,9 @@
      (pop-r R3)
      (pop-a)
      (j-a)
+     
+     (label l-list)
+     (label l-sread-new-sym)
 ))
 
 
@@ -527,16 +531,46 @@
      (mvi->r n-stack-highest SP)
 
      (mvi->r n-source-start P0)
-     (jsr l-find-symbol)
-     (jsr l-cdr) ; P0 = name-ptr
+     (jsr l-find-symbol) ; P0=found-flag P1=symbol
+     (r->a P1)(a->r P0)
+     (jsr l-cdr) ; P0 = name-ptr = cdr(symbol)
+     ;; name-ptr is index into string-space
      (mvi->r n-string-space R0)
      (r->a P0)
      (add-r R0)
+     (a->r P0)
      (jsr prtstr)
 
      (label end-fs)
      (j end-fs)))
 
+;;; test reading a symbol
+(defvar test-sread-1 nil)
+(setq test-sread-1
+ '(      
+     (mvi->r n-stack-highest SP)
+
+     ;; --- init reader -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr l-sread) ; P0=object (cons prt)
+     ;; in this test we know it's a symbol
+     (jsr l-cdr) ; P0 = name-ptr = cdr(symbol)
+     ;; name-ptr is index into string-space
+     (mvi->r n-string-space R0)
+     (r->a P0)
+     (add-r R0)
+     (a->r P0)
+     (jsr prtstr)
+
+     (label end-fs)
+     (j end-fs)))
 
 (defvar main nil)
 (setq main 
@@ -785,11 +819,21 @@
                      (string-to-mem "symbol") 
                      n-source-start))))
 
+(defun t4 ()
+  (asm-n-run test-sread-1
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "not-this" 0)
+        (add-symbol dmem "symbol" 0)
+        (set-program dmem 
+                     (string-to-mem "symbol") 
+                     n-source-start))))
+
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
   (setq *hello-world*
         (masm main func-prtstr read-c reader func-str-equal
               func-find-symbol func-putchar func-cdr
-              func-car))
+              func-car func-sread))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e))
