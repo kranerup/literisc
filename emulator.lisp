@@ -1143,15 +1143,6 @@
         do (charms:write-string-at-cursor window ch)
         finally (return s)))
 
-;        do (case ch
-;             ((nil) (sleep 0.1))
-;             ((#\Newline) (setf cr t))
-;             ((t)
-;             ((with-output-to-string (*standard-output*)
-;                (princ s *standard-output*)
-;                (princ ch *standard-output*)))
-  
-
 (defun get-breakpoint (breakpoints window)
   (charms:clear-window window)
   (draw-window-box window)
@@ -1172,9 +1163,16 @@
       1 1)
     (charms:refresh-window window)))
 
-  ;(charms:refresh-window window))
-    ;(multiple-value-bind (bp position) (read-from-string s)
-    ;  (setf (gethash bp breakpoints) bp))))
+(defun dump-mem (dmem window)
+  (loop with addr := 0
+        for row from 1 to 48
+        do (charms:write-string-at-point
+             window
+             (format nil "~4,'0X: ~{~2,'0X~^ ~}"
+                     addr
+                     (coerce (subseq dmem addr (+ 16 addr)) 'list))
+             1 row)
+        do (setf addr (+ addr 16))))
 
 (defun run-with-curses ( emul )
   (setq *print-pretty* nil)
@@ -1184,10 +1182,11 @@
     (charms:disable-echoing)
     (charms:enable-raw-input)
     (charms:clear-window (charms:standard-window))
-    (let ((disasm-window (charms:make-window  40 40 55 1))
+    (let ((disasm-window (charms:make-window  36 49 50 1))
           (output-window (charms:make-window  40 20 10 32))
           (cpu-window (charms:make-window     40 30 10 0))
           (command-window (charms:make-window 30  5 10 45))
+          (dump-window (charms:make-window    75 50 87 0))
           (breakpoints (make-hash-table)))
       (setf (processor-state-write-callback
               (emulated-system-processor emul))
@@ -1196,8 +1195,13 @@
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
       (charms:clear-window command-window)
+      (charms:clear-window dump-window)
       (draw-window-box cpu-window)
       (draw-window-box command-window)
+      (draw-window-box dump-window)
+      (dump-mem 
+        (emulated-system-dmem emul)
+        dump-window)
       (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
       (charms/ll:scrollok (charms::window-pointer output-window) 1)
       (charms:enable-non-blocking-mode cpu-window)
@@ -1205,6 +1209,7 @@
       (charms:refresh-window output-window)
       (charms:refresh-window cpu-window)
       (charms:refresh-window command-window)
+      (charms:refresh-window dump-window)
       (loop named emulate
             with single-step := nil and run := nil and update-windows := t
             do (progn
