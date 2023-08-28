@@ -108,6 +108,7 @@
 
   (defparameter nr-cons 20)
   (defparameter cons-size 4) ; bytes
+  (alloc-init n-cons-free '(0 0))
   (alloc n-cons (* nr-cons cons-size))
   (setq n-cons-end dmem-allocated)
   (alloc n-cons-type nr-cons)
@@ -145,6 +146,8 @@
                (+ n-cons (* cons-size cons-ptr)))
 
   (setf cons-free (1+ cons-free))
+  (setf (aref dmem n-cons-free) (logand #xff cons-free))
+  (setf (aref dmem (1+ n-cons-free)) (ash cons-free -8))
   (setq string-space-free (+ string-space-free
                              (list-length str)))))
 
@@ -425,8 +428,9 @@
      (mvi->a reader-lpar)
      (sub-r P0)
      (jnz l-sread-nxt)
+
      ;; '('
-     (jsr l-list)
+     (jsr l-list) ; -> P0
      (j l-sread-ret)
      
      ;; quote TBD
@@ -449,11 +453,91 @@
      (pop-a)
      (j-a)
      
-     (label l-list)
      (label l-sread-new-sym)
+
+     ;; list:
+     ;;    if ')'
+     ;;       return nil
+     ;;    else
+     ;;       return cons( sym, list() )
+     (label l-list)
+     (push-srp)
+     (push-r R1)
+     (jsr f-reader) ; -> P0
+     (mvi->a reader-rpar) ; if ')'
+     (sub-r P0)
+     (jnz l-list-cont)
+     ;; return nil
+     (mvi->r 0 P0)
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+
+     ;; else 
+     ;;   return cons( sym, list() )
+     (r->a P0) (a->r R0) ; R0 = sym
+     (jsr l-cons) ; P0 = cons-cell
+     (r->a P0) (a->r R1) ; R1 = cons-cell
+     (r->a R0) (a->r P1) ; P1 = sym
+     (jsr l-rplca) ; (rplca cons-cell sym)
+     (jsr l-list)
+     (r->a P0) (a->r R0) ; R0 = list-ret-val
+     (r->a R1) (a->r P0) ; P0 = cons-cell
+     (jsr l-rplcd) ; (rplcd cons-cell list-ret-val) 
+     ;; return cons-cell
+     (r->a R1) (a->r P0) ; P0 = cons-cell
+     (pop-r R1)
+     (pop-a)
+     (j-a)
 ))
 
+(defvar func-rplca nil)
+(setq func-rplca
+  '( ;; rplca
+     ;; P0 - cons ptr
+     ;; P1 - value to replace car of cons cell
+     (label l-rplca)
+     (push-r R0)
+     (mvi->r n-cons R0)
+     (r->a R0)
+     (add-r P0) ; n-cons + cons-ptr is car ptr
+     (st.w-a->r P1) ; write car
+     (pop-r R0)
+     (r->a SRP)
+     (j-a)))
 
+(defvar func-rplcd nil)
+(setq func-rplcd
+  '( ;; rplcd
+     ;; P0 - cons ptr
+     ;; P1 - value to replace cdr of cons cell
+     (label l-rplcd)
+     (push-r R0)
+     (mvi->r n-cons R0)
+     (mvi->a 2) ; offs for cdr
+     (add-r R0)
+     (add-r P0) ; n-cons + cdr-offs + cons-ptr
+     (st.w-a->r P1) ; write cdr
+     (pop-r R0)
+     (r->a SRP)
+     (j-a)))
+     
+(defvar func-cons nil)
+(setq func-cons
+  '( ;; cons
+     ;; P0 - returns a ptr to a new allocated cons cell
+     (label l-cons)
+     (push-r R0)
+     (mvi->r n-cons-free R0)
+     (ld.w-r->a R0) ; A = next free cons
+     (a->r P0) ; return value
+     (mvi->a 2) ; cons-free += 2
+     (add-r P0)
+     (st.w-a->r R0)
+     (pop-r R0)
+     (r->a SRP)
+     (j-a)))
+     
 (defvar test-read-c nil)
 (setq test-read-c 
   '( 
@@ -547,6 +631,34 @@
 ;;; test reading a symbol
 (defvar test-sread-1 nil)
 (setq test-sread-1
+ '(      
+     (mvi->r n-stack-highest SP)
+
+     ;; --- init reader -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr l-sread) ; P0=object (cons prt)
+     ;; in this test we know it's a symbol
+     (jsr l-cdr) ; P0 = name-ptr = cdr(symbol)
+     ;; name-ptr is index into string-space
+     (mvi->r n-string-space R0)
+     (r->a P0)
+     (add-r R0)
+     (a->r P0)
+     (jsr prtstr)
+
+     (label end-fs)
+     (j end-fs)))
+
+;;; test reading a list
+(defvar test-sread-2 nil)
+(setq test-sread-2
  '(      
      (mvi->r n-stack-highest SP)
 
@@ -829,11 +941,35 @@
                      (string-to-mem "symbol") 
                      n-source-start))))
 
+;;; reading an empty list == nil
+(defun t5 ()
+  (asm-n-run test-sread-2
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "nil" 0) ; nil must be symbol 0
+        (add-symbol dmem "sym1" 0)
+        (add-symbol dmem "sym2" 0)
+        (set-program dmem 
+                     (string-to-mem "()") 
+                     n-source-start))))
+
+(defun t6 ()
+  (asm-n-run test-sread-2
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "nil" 0) ; nil must be symbol 0
+        (add-symbol dmem "sym1" 0)
+        (add-symbol dmem "sym2" 0)
+        (set-program dmem 
+                     (string-to-mem "(sym1 sym2)") 
+                     n-source-start))))
+
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
   (setq *hello-world*
         (masm main func-prtstr read-c reader func-str-equal
               func-find-symbol func-putchar func-cdr
-              func-car func-sread))
+              func-car func-sread func-rplca func-rplcd
+              func-cons ))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e))
