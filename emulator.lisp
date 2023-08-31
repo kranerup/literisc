@@ -1127,7 +1127,8 @@
       window
       (format nil "~4d: ~a~%" pc (str:substring 0 28 dis-str)))))
 
-(defun write-cb-write-win (addr data window)
+(defun write-cb-write-win (addr data was-written window)
+  (setf was-written t)
   (if (equal (logand #xffffffff addr) #xffffffff)
       (charms:write-string-at-cursor
         window
@@ -1163,14 +1164,21 @@
       1 1)
     (charms:refresh-window window)))
 
+(defun printable-ascii (num)
+  (if (<= 32 num 126)
+      (code-char num)
+      #\.))
+
 (defun dump-mem (dmem window)
   (loop with addr := 0
         for row from 1 to 48
         do (charms:write-string-at-point
              window
-             (format nil "~4,'0X: ~{~2,'0X~^ ~}"
+             (format nil "~4,'0X: ~{~2,'0X~^ ~} ~{~a~}"
                      addr
-                     (coerce (subseq dmem addr (+ 16 addr)) 'list))
+                     (coerce (subseq dmem addr (+ 16 addr)) 'list)
+                     (mapcar #'printable-ascii
+                             (coerce (subseq dmem addr (+ 16 addr)) 'list)))
              1 row)
         do (setf addr (+ addr 16))))
 
@@ -1187,10 +1195,12 @@
           (cpu-window (charms:make-window     40 30 10 0))
           (command-window (charms:make-window 30  5 10 45))
           (dump-window (charms:make-window    75 50 87 0))
-          (breakpoints (make-hash-table)))
+          (breakpoints (make-hash-table))
+          (mem-was-written nil))
       (setf (processor-state-write-callback
               (emulated-system-processor emul))
-            (lambda (addr data) (write-cb-write-win addr data output-window)))
+            (lambda (addr data)
+              (write-cb-write-win addr data mem-was-written output-window)))
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
@@ -1248,6 +1258,8 @@
                          (emulated-system-processor emul) 
                          (emulated-system-imem emul)
                          (emulated-system-dmem emul))))
+                 (if mem-was-written 
+                     (dump-mem (emulated-system-dmem emul) dump-window))
                  (if (gethash 
                        (processor-state-pc (emulated-system-processor emul))
                        breakpoints)
