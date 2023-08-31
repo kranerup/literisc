@@ -97,8 +97,12 @@
 
 (defun init-lisp ()
   (setq dmem-allocated 0)
-  (alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
-  (alloc-init n-sym-string-start (string-to-mem "symbol"))
+  (loop for idx from 0 to (1- (length dmem))
+        do (setf (aref dmem idx) 0))
+  ;;(alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
+  ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
+  (alloc n-source-start 32)
+  (alloc n-sym-string-start 32)
   (alloc-init n-print-sep        (string-to-mem "---
 "))
   (alloc n-read-sym-str 20)
@@ -438,15 +442,16 @@
      ;; atom
      (label l-sread-nxt)
      ;; number TBD
+     ;; ....
+     
      ;; symbol
      (mvi->r n-read-sym-str P0)
-     (jsr l-find-symbol) ; -> P0 found flag
+     (jsr l-find-symbol) ; P0=found-flag P1=symbol
      (mvi->a 1)
      (sub-r P0)
      (jnz l-sread-new-sym)
     
-     (r->a P1)
-     (a->r P0)
+     (r->a P1) (a->r P0) ; P0 = symbol (from l-find-symbol)
     
      (label l-sread-ret)
      (pop-r R3)
@@ -454,7 +459,9 @@
      (j-a)
      
      (label l-sread-new-sym)
+     ;; new symbol TBD
 
+     ;; -----------------
      ;; list:
      ;;    if ')'
      ;;       return nil
@@ -463,6 +470,7 @@
      (label l-list)
      (push-srp)
      (push-r R1)
+
      (jsr f-reader) ; -> P0
      (mvi->a reader-rpar) ; if ')'
      (sub-r P0)
@@ -475,6 +483,7 @@
 
      ;; else 
      ;;   return cons( sym, list() )
+     (label l-list-cont)
      (r->a P0) (a->r R0) ; R0 = sym
      (jsr l-cons) ; P0 = cons-cell
      (r->a P0) (a->r R1) ; R1 = cons-cell
