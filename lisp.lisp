@@ -591,17 +591,23 @@
   '( ;; cons
      ;; P0 - returns a ptr to a new allocated cons cell
      (label l-cons)
-     (push-r R0)
+     (push-r R1)
      (mvi->r n-cons-free R0)
      (ld.w-r->a R0) ; A = next free cons
      (a->r P0) ; return value
      (mvi->a 1) ; cons-free += 1
      (add-r P0)
      (st.w-r->a R0)
-     (pop-r R0)
+     ;; set type to cons
+     (mvi->r c-cons-cons R0)
+     (mvi->r n-cons-type R1)
+     (r->a P0)
+     (add-r R1) ; A = n-cons-type + cons-idx
+     (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-cons
+     (pop-r R1)
      (r->a SRP)
      (j-a)))
-     
+
 (defvar test-read-c nil)
 (setq test-read-c 
   '( 
@@ -774,12 +780,13 @@
      ;;          +->[ sym2 | . ]
      ;;                      |
      ;;                      +-> nil
-     (jsr l-car) ; -> P0 = car(result) = sym1
-     (jsr l-print-symbol)
-     (r->a R0) (a->r P0)
-     (jsr l-cdr)
-     (jsr l-car) ; sym2
-     (jsr l-print-symbol)
+     (jsr l-print)
+     ;;;(jsr l-car) ; -> P0 = car(result) = sym1
+     ;;;(jsr l-print-symbol)
+     ;;;(r->a R0) (a->r P0)
+     ;;;(jsr l-cdr)
+     ;;;(jsr l-car) ; sym2
+     ;;;(jsr l-print-symbol)
 
      (label end-fs)
      (j end-fs)))
@@ -984,19 +991,6 @@
      (r->a SRP)
      (j-a)))
 
-(defvar func-print nil)
-(setq func-print
-  '( ;; print
-     ;; P0 - cons ptr
-     (label l-print)
-     (push-srp)
-     (push-r R0)
-     ;; assume it's a symbol so we don't need to look at
-     ;; the cons=type.
-     (mvi->r n-cons R0)
-     (r->a P0)
-     (add-r R0)))
-
 (defvar func-print-symbol nil)
 (setq func-print-symbol
   '( ;; print-symbol
@@ -1014,6 +1008,62 @@
      (pop-r R0)
      (pop-a)
      (j-a)))
+
+(defvar func-print nil)
+(setq func-print
+  '( ;; print
+     ;; P0 = object to be printed
+     (label l-print)
+     (push-srp)
+     (push-r R1)
+     (mvi->r n-cons-type R1)
+     (r->a P0) (a->r R0)
+     (add-r R1) ; n-cons-type + cons-idx
+     (ld.b-a->r R1) ; R1 = type
+     (mvi->a c-cons-symbol)
+     (sub-r R1)
+     (jnz l-not-sym)
+     ;; symbol
+     (jsr l-print-symbol) ; P0 is still cons-idx
+     (j l-print-ret)
+    
+     ;;
+     (label l-not-sym)
+     (mvi->a c-cons-cons)
+     (sub-r R1)
+     (jnz l-not-cons)
+     ;; cons, i.e. a list
+     (jsr l-print-list)
+     (j l-print-ret)
+     
+     (label  l-not-cons)
+     ;; other types TBD
+    
+     (label l-print-ret)
+     (pop-r R1)
+     (pop-a)
+     (j-a)))
+
+(defvar func-print-list nil)
+(setq func-print-list
+  '( ;; print-list
+     ;; P0 = cons-idx of list
+     (label l-print-list)
+     (push-srp)
+     (push-r R1)
+     (r->a P0) (a->r R0)
+     (mvi->r (char-code #\() P0)
+     (jsr l-putchar)
+     (r->a R0) (a->r P0)
+     (jsr l-car)
+     (jsr l-print)
+     (mvi->r (char-code #\)) P0)
+     (jsr l-putchar)
+     (pop-r R1)
+     (pop-a)
+     (j-a)))
+     
+
 
 (defvar *hello-world* nil)
 ;(setq *hello-world*
@@ -1100,7 +1150,8 @@
               main func-prtstr read-c scan func-str-equal
               func-find-symbol func-putchar func-cdr
               func-car func-parse func-rplca func-rplcd
-              func-cons func-print-symbol ))
+              func-cons func-print-symbol func-print
+              func-print-list ))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))
