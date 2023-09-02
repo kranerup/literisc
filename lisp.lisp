@@ -31,13 +31,15 @@
      (let* ((d ,data)
             (d-len (list-length d)))
        (set-program dmem d dmem-allocated)
-       (setq dmem-allocated (+ dmem-allocated d-len)))))
+       (setq dmem-allocated (+ dmem-allocated d-len)))
+     (assert (< dmem-allocated (length dmem)))))
 
 (defmacro alloc ( sym len )
   `(progn
      (defvar ,sym nil)
      (setq ,sym dmem-allocated)
-     (setq dmem-allocated (+ dmem-allocated ,len))))
+     (setq dmem-allocated (+ dmem-allocated ,len))
+     (assert (< dmem-allocated (length dmem)))))
 
 (defun word-align (addr)
   (if (equal (logand 1 addr) 0)
@@ -55,7 +57,8 @@
      (defvar ,sym nil)
      (setq dmem-allocated (word-align dmem-allocated))
      (setq ,sym dmem-allocated)
-     (setq dmem-allocated (+ dmem-allocated (* 2 ,words)))))
+     (setq dmem-allocated (+ dmem-allocated (* 2 ,words)))
+     (assert (< dmem-allocated (length dmem)))))
 
 ;;; allocate 32-bit words, word aligned
 (defmacro alloc-dwords (sym words)
@@ -63,7 +66,8 @@
      (defvar ,sym nil)
      (setq dmem-allocated (dword-align dmem-allocated))
      (setq ,sym dmem-allocated)
-     (setq dmem-allocated (+ dmem-allocated (* 4 ,words)))))
+     (setq dmem-allocated (+ dmem-allocated (* 4 ,words)))
+     (assert (< dmem-allocated (length dmem)))))
 
 (defvar string-space-free 0) ; relative n-string-space
 
@@ -83,10 +87,11 @@
 ;;;
 ;;; cons: [ f1:16 | f2:16 ]
 ;;;       [      f:32     ]
-;;;     msb ... lsb
-;;;     [ f1 | f2 ]
-;;; byte 3 2   1 0
-
+;;;
+;;;          msb ... lsb
+;;;       [   f1  |    f2 ]
+;;; byte     3  2    1  0
+;;;
 ;;;   type   |    f1    |     f2    |
 ;;;   -------+----------+-----------+
 ;;;   symbol | name-ptr | value-ptr |
@@ -530,15 +535,15 @@
      
      (r->a P0) (a->r R0) ; R0 = sym
      (jsr l-cons) ; P0 = cons-cell
-     (r->a P0) (a->r R1) ; R1 = cons-cell
+     (r->a P0) (a->r R1) ; R1 = cons-cell = P0
      (r->a R0) (a->r P1) ; P1 = sym
      (jsr l-rplca) ; (rplca cons-cell sym)
      (jsr l-list)
-     (r->a P0) (a->r R0) ; R0 = list-ret-val
+     (r->a P0) (a->r P1) ; P1 = list-ret-val = P0
      (r->a R1) (a->r P0) ; P0 = cons-cell
      (jsr l-rplcd) ; (rplcd cons-cell list-ret-val) 
      ;; return cons-cell
-     (r->a R1) (a->r P0) ; P0 = cons-cell
+     (r->a R1) (a->r P0) ; P0 = cons-cell = R1
      (pop-r R1)
      (pop-a)
      (j-a)
@@ -745,6 +750,39 @@
      (label end-fs)
      (j end-fs)))
 
+;;; test reading a list
+(defvar test-parse-3 nil)
+(setq test-parse-3
+ '(      
+     (mvi->r n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr f-scan) ; P0 = read obj type
+     
+     (jsr l-parse) ; P0= obj type from scan -> object (cons ptr)
+     (r->a P0) (a->r R0)
+     ;; [ sym1 | . ]
+     ;;          |
+     ;;          +->[ sym2 | . ]
+     ;;                      |
+     ;;                      +-> nil
+     (jsr l-car) ; -> P0 = car(result) = sym1
+     (jsr l-print-symbol)
+     (r->a R0) (a->r P0)
+     (jsr l-cdr)
+     (jsr l-car) ; sym2
+     (jsr l-print-symbol)
+
+     (label end-fs)
+     (j end-fs)))
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -848,6 +886,7 @@
      ;; P0 - ptr to zero terminated string
      (label prtstr)
      (push-r R1)
+     (label l-prtstr-loop)
      (ld.b-r->a P0)
      (mask-a-b)
      (a->r R0)
@@ -860,7 +899,7 @@
      (mvi->a 1)
      (add-r P0)
      (a->r P0)
-     (j prtstr)
+     (j l-prtstr-loop)
      (label ret-prtstr)
      (pop-r R1)
      (r->a srp)
@@ -957,7 +996,24 @@
      (mvi->r n-cons R0)
      (r->a P0)
      (add-r R0)))
-     
+
+(defvar func-print-symbol nil)
+(setq func-print-symbol
+  '( ;; print-symbol
+     ;; P0 = cons ptr to a symbol cons-cell (P0 destroyed)
+     (label l-print-symbol)
+     (push-srp)
+     (push-r R0)
+     (jsr l-cdr) ; P0 = name-ptr = cdr(symbol)
+     ;; name-ptr is index into string-space
+     (mvi->r n-string-space R0)
+     (r->a P0)
+     (add-r R0)
+     (a->r P0)
+     (jsr prtstr)
+     (pop-r R0)
+     (pop-a)
+     (j-a)))
 
 (defvar *hello-world* nil)
 ;(setq *hello-world*
@@ -1025,6 +1081,17 @@
                      (string-to-mem "(sym1)") 
                      n-source-start))))
 
+(defun t7 ()
+  (asm-n-run test-parse-3
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "nil" 0) ; nil must be symbol 0
+        (add-symbol dmem "sym1" 0)
+        (add-symbol dmem "sym2" 0)
+        (set-program dmem 
+                     (string-to-mem "(sym1 sym2)") 
+                     n-source-start))))
+
 (defvar *symtab* nil)
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
   (setq *symtab* (make-hash-table))
@@ -1033,7 +1100,7 @@
               main func-prtstr read-c scan func-str-equal
               func-find-symbol func-putchar func-cdr
               func-car func-parse func-rplca func-rplcd
-              func-cons ))
+              func-cons func-print-symbol ))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))
