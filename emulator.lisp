@@ -1117,18 +1117,22 @@
       (format nil "i: ~a" (str:substring 0 20 dis-str))
       1 *instr-row*)))
 
-(defun write-disasm (window proc imem row)
+(defun write-disasm (window proc imem symtab row)
   (let* ((pc (processor-state-pc proc))
          (mem-at-pc (coerce (subseq imem pc (+ pc 7)) 'list))
          (dis-str (str:trim-right
                     (with-output-to-string (*standard-output*)
                     (disasm mem-at-pc 1)))))
-    (charms:write-string-at-cursor
-      window
-      (format nil "~4d: ~a~%" pc (str:substring 0 28 dis-str)))))
+    (charms:write-string-at-cursor window
+      (if symtab
+          (format nil "~12a: ~a~%"
+                  (if (gethash pc symtab)
+                      (str:substring 0 12 (gethash pc symtab))
+                      (format nil "~12d" pc))
+                  (str:substring 0 28 dis-str))
+          (format nil "~4d: ~a~%" pc (str:substring 0 28 dis-str))))))
 
-(defun write-cb-write-win (addr data was-written window)
-  (setf was-written t)
+(defun write-cb-write-win (addr data window)
   (if (equal (logand #xffffffff addr) #xffffffff)
       (charms:write-string-at-cursor
         window
@@ -1180,9 +1184,10 @@
                      (mapcar #'printable-ascii
                              (coerce (subseq dmem addr (+ 16 addr)) 'list)))
              1 row)
-        do (setf addr (+ addr 16))))
+        do (setf addr (+ addr 16)))
+  (charms:refresh-window window))
 
-(defun run-with-curses ( emul )
+(defun run-with-curses ( emul &optional symtab)
   (setq *print-pretty* nil)
   (setf (processor-state-debug 
           (emulated-system-processor emul)) nil)
@@ -1190,17 +1195,18 @@
     (charms:disable-echoing)
     (charms:enable-raw-input)
     (charms:clear-window (charms:standard-window))
-    (let ((disasm-window (charms:make-window  36 49 50 1))
+    (let ((disasm-window (charms:make-window  41 49 36 1))
           (output-window (charms:make-window  40 20 10 32))
-          (cpu-window (charms:make-window     40 30 10 0))
-          (command-window (charms:make-window 30  5 10 45))
+          (cpu-window (charms:make-window     30 30 01 0))
+          (command-window (charms:make-window 30  5  1 45))
           (dump-window (charms:make-window    75 50 87 0))
           (breakpoints (make-hash-table))
           (mem-was-written nil))
       (setf (processor-state-write-callback
               (emulated-system-processor emul))
             (lambda (addr data)
-              (write-cb-write-win addr data mem-was-written output-window)))
+              (setf mem-was-written t)
+              (write-cb-write-win addr data output-window)))
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
@@ -1234,6 +1240,7 @@
                          disasm-window
                          (emulated-system-processor emul)
                          (emulated-system-imem emul)
+                         symtab
                          39)
                        (charms:refresh-window disasm-window)
                        ;(charms:refresh-window (charms:standard-window))

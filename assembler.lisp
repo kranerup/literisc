@@ -207,7 +207,7 @@
 (defun set-program (imem ilist &optional (start-adr 0))
   (let ((p start-adr))
     (loop for instr in ilist
-          do (format t "M[~a] = ~a~%" p instr)
+          ;do (format t "M[~a] = ~a~%" p instr)
           do (progn (setf (aref imem p) instr)
                     (setf p (+ p 1))))))
 
@@ -285,15 +285,30 @@
             (setf curr-pc (+ curr-pc (list-length (eval-asm item curr-pc debug)) )))))
     diff))
 
+(defun list-labels (aprog)
+  (dolist (item aprog)
+    (if (equal (car item) 'label)
+        (format t "label ~a ~a~%" (cdr item) (symbol-value (cadr item))))))
+
+(defun create-symtab (aprog symtab)
+  (dolist (item aprog)
+    (if (equal (car item) 'label)
+        (setf (gethash (symbol-value (cadr item)) symtab)
+              (symbol-name (cadr item))))))
+
 ;;; Calculate label positions until there are no more changes.
 (defun minimize-labels (aprog verbose)
   (loop for i from 1 to 5 
         while (calc-labels aprog verbose)
         until (>= i 5)))
 
-(defun assemble (aprog &optional (verbose nil))
+(defun assemble (aprog &optional (verbose nil) (symtab nil))
   (define-labels aprog verbose)
   (minimize-labels aprog verbose)
+  (if symtab
+      (progn
+        (list-labels aprog)
+        (create-symtab aprog symtab)))
   (if verbose (format t "--- assemble ---~%"))
   (loop with mcode := nil and curr-pc := 0
         for item in aprog
@@ -303,8 +318,8 @@
 
 
 ;;; macro assembler
-(defmacro masm (&rest body)
-  `(assemble (concatenate 'list ,@body)))
+(defmacro masm (symtab &rest body)
+  `(assemble (concatenate 'list ,@body) nil ,symtab))
 ;;;---------- unit tests --------------------
 ;(defmacro part3 (reg)
 ;  `'(
