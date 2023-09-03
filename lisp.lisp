@@ -570,7 +570,7 @@
      ;; P0=number -> P0=cons
      (label l-num-atom)
      (push-r R1)
-     (mvi-r n-cons R1)
+     (mvi->r n-cons R1)
      (r->a P0) (a->r R0) ; R0=num
      (jsr l-cons) ; P0 = cons-cell
      (r->a P0) (a->r R1) ; R1=cons
@@ -698,8 +698,62 @@
      (r->a SRP)
      (j-a)))
 
+(defvar func-div10 nil)
+(setq func-div10
+  '( ;; div10
+     (label l-div10)
+     ;; input: P0 = number
+     ;; output: P0 = number//10
+     ;;         P1 = number % 10
+     ;; using this algorithm:
+     ;; x = 0
+     ;; b =   0x10000000  # 32-bit binary 10000000000000000000000000000000
+     ;; b10 = 0xA0000000  # 32-bit binary 10100000000000000000000000000000
+     ;; 
+     ;; while b != 0:
+     ;;     if b10 <= v:
+     ;;         v -= b10
+     ;;         x |= b
+     ;;     b10 >>= 1
+     ;;     b >>= 1
+     ;; return x,v
+     (push-r R5)
+     (mvi->r #x10000000 R0) ; b
+     (mvi->r #xA0000000 R1) ; b10
+     (mvi->r 0 R2) ; x
+     ; P0 = v
+     (label l-div10-loop)
+     (mvi->a 0)
+     (sub-r P0)
+     (jz l-div10-ret)
+     (r->a P0) ; v 
+     (sub-r R1) ; v - b10
+     (jhs l-no-sub) ; if b10 <= v -> if v >= b10
+     ; v = v - b10 (already in A)
+     (a->r P0)
+     ; x |= b
+     (r->a R2) ; x
+     (or-r R0) ; | b
+     (a->r R2) ; ->x
 
-
+     (label l-no-sub)
+     ; b10 >>= 1
+     (r->a R1)
+     (lsr-a)
+     (a->r R1)
+     ; b >>= 1
+     (r->a R0)
+     (lsr-a)
+     (a->r R0)
+     
+     (j l-div10-loop)
+     
+     (label l-div10-ret)
+     (r->a P0) (a->r P1) ; P1 = v (remainder)
+     (r->a R2) (a->r P0) ; P0 = x (quotient)
+     (pop-r R2)
+     (r->a SRP)
+     (j-a)))
 
 (defvar test-read-c nil)
 (setq test-read-c 
@@ -886,7 +940,14 @@
      (jsr l-str2num)
      (label end-s2n)
      (j end-s2n)))
-     
+
+(defvar test-div10 nil)
+(setq test-div10
+  '( (mvi->r 321 P0)
+     (jsr l-div10)
+     (label end-d10)
+     (j end-d10)))
+
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -1138,7 +1199,7 @@
      (jsr l-putchar)
      (pop-r R0)
      (pop-a)
-     (j-a)
+     (j-a)))
 
 
 (defvar func-print nil)
@@ -1303,6 +1364,9 @@
                      (string-to-mem "1234") 
                      n-source-start))))
 
+(defun t9 ()
+  (asm-n-run test-div10))
+
 (defvar *symtab* nil)
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
   (setq *symtab* (make-hash-table))
@@ -1312,7 +1376,7 @@
               func-find-symbol func-putchar func-cdr
               func-car func-parse func-rplca func-rplcd
               func-cons func-print-symbol func-print
-              func-print-list func-str2num ))
+              func-print-list func-str2num func-div10 ))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))
