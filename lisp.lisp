@@ -326,6 +326,7 @@
 (defconstant reader-lpar 1)
 (defconstant reader-rpar 2)
 (defconstant reader-sym 3)
+(defconstant reader-num 3)
 
 ;;; P0 - returns read object type
 ;;; if reader-sym then symbol string is in n-read-sym-str
@@ -423,8 +424,8 @@
     (add-r R1) ; read-sym-str++
     (a->r R1)
     ;; debug print
-    (r->a R0)
-    (st-a->r R3); putchar
+    ;(r->a R0)
+    ;(st-a->r R3); putchar
     ;; reading-symbol = True
     (mvi->r 1 R4)
     (j l-rd-more) ; loop back and read next char
@@ -457,6 +458,65 @@
 ;;;    else
 ;;        return cons( sym, list() )
 
+(defvar func-str2num nil)
+(setq func-str2num
+  '( ;; --- str2num ---
+     ;; params:  P0 = string-ptr
+     ;; returns: P0 = true if number
+     ;;          P1 = number
+     (label l-str2num)
+     (push-r R2)
+     (mvi->r 0 P1) ; result
+
+     (label l-num-loop)
+     (ld.b-r->a P0)
+     (a->r R0) ; the char
+     (mvi->a 0)
+     (sub-r R0)
+     (jz l-num-end)
+     
+     (mvi->r (1+ (char-code #\9 )) R1)
+     (r->a R0)
+     (sub-r R1) ; C - '9'
+     (jhs-b l-no-num)
+
+     (mvi->r (char-code #\0 ) R1)
+     (r->a R0)
+     (sub-r R1) ; C - '0'
+     (jlo-b l-no-num)
+
+     ; digit, then convert to int
+     ; but that is already done: A = C - '0'
+     ; result *= 10 -> res << 3 + res + res
+     (a->r R0) ; int-digit
+     (r->a P1)
+     (lsl-a)
+     (lsl-a)
+     (lsl-a)
+     (add-r P1)
+     (add-r P1) ; result*10
+     (add-r R0) ; + int-digit
+     (a->r P1)
+     ;; string-ptr++
+     (mvi->a 1)
+     (add-r P0)
+     (a->r P0)
+     (j l-num-loop)
+
+     (label l-no-num)
+     (mvi->a 0)
+     (a->r P0) ; P0 = false
+     (j l-num-ret)
+     
+     (label l-num-end) 
+     (mvi->a 1)
+     (a->r P0) ; P0 = true
+
+     (label l-num-ret)
+     (pop-r R2)
+     (r->a SRP)
+     (j-a)))
+     
 (defvar func-parse nil)
 (setq func-parse
   '( ;; --- parse ---
@@ -790,6 +850,16 @@
 
      (label end-fs)
      (j end-fs)))
+
+(defvar test-str2num nil)
+(setq test-str2num
+  '( 
+     (mvi->r n-stack-highest SP)
+     (mvi->r n-source-start P0)
+     (jsr l-str2num)
+     (label end-s2n)
+     (j end-s2n)))
+     
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -1054,9 +1124,22 @@
      (r->a P0) (a->r R0)
      (mvi->r (char-code #\() P0)
      (jsr l-putchar)
+     (label l-pr-list-loop)
      (r->a R0) (a->r P0)
      (jsr l-car)
      (jsr l-print)
+     (r->a R0) (a->r P0)
+     (jsr l-cdr)
+     (r->a P0) (a->r R0)
+     (mvi->a 0) ;; nil?
+     (sub-r R0)
+     (jz l-eol)
+
+     (mvi->r (char-code #\ ) P0)
+     (jsr l-putchar)
+     (j l-pr-list-loop)
+    
+     (label l-eol)
      (mvi->r (char-code #\)) P0)
      (jsr l-putchar)
      (pop-r R1)
@@ -1139,7 +1222,15 @@
         (add-symbol dmem "sym1" 0)
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
-                     (string-to-mem "(sym1 sym2)") 
+                     (string-to-mem "(sym1 (sym2 sym1))") 
+                     n-source-start))))
+
+(defun t8 ()
+  (asm-n-run test-str2num
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (set-program dmem 
+                     (string-to-mem "1234") 
                      n-source-start))))
 
 (defvar *symtab* nil)
@@ -1151,7 +1242,7 @@
               func-find-symbol func-putchar func-cdr
               func-car func-parse func-rplca func-rplcd
               func-cons func-print-symbol func-print
-              func-print-list ))
+              func-print-list func-str2num ))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))

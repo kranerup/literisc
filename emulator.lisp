@@ -1196,7 +1196,7 @@
     (charms:enable-raw-input)
     (charms:clear-window (charms:standard-window))
     (let ((disasm-window (charms:make-window  45 49 36 1))
-          (output-window (charms:make-window  40 20 10 32))
+          (output-window (charms:make-window  40 20 01 32))
           (cpu-window (charms:make-window     30 30 01 0))
           (command-window (charms:make-window 30  5  1 45))
           (dump-window (charms:make-window    75 50 87 0))
