@@ -538,10 +538,18 @@
 
      ;; atom
      (label l-parse-nxt)
-     ;; number TBD
-     ;; ....
+     ;; number
+     (mvi->r n-read-sym-str P0)
+     (jsr l-str2num) ; -> P0=is-num flag P1=number
+     (mvi->a 0)
+     (sub-r P0)
+     (jz l-parse-sym)
+     (r->a P1) (a->r P0)
+     (jsr l-num-atom) ; P0=number -> P0=cons
+     (j l-parse-ret)
      
      ;; symbol
+     (label l-parse-sym)
      (mvi->r n-read-sym-str P0)
      (jsr l-find-symbol) ; P0=found-flag P1=symbol
      (mvi->a 1)
@@ -558,6 +566,28 @@
      (label l-parse-new-sym)
      ;; new symbol TBD
 
+     ;; -----------------
+     ;; P0=number -> P0=cons
+     (label l-num-atom)
+     (push-r R1)
+     (mvi-r n-cons R1)
+     (r->a P0) (a->r R0) ; R0=num
+     (jsr l-cons) ; P0 = cons-cell
+     (r->a P0) (a->r R1) ; R1=cons
+     (lsl-a)
+     (lsl-a)
+     (add-r R1) ; cons-addr = n-cons + cons-idx * 4
+     (st-a->r R0) ; cons-cell-content = number
+     ;; set type to num
+     ;; set type to cons
+     (mvi->r c-cons-number R0)
+     (mvi->r n-cons-type R1)
+     (r->a P0)
+     (add-r R1) ; A = n-cons-type + cons-idx
+     (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-number
+
+     (r->a SRP)
+     (j-a)
      ;; -----------------
      ;; L list() {
      ;;   L x;
@@ -667,6 +697,9 @@
      (pop-r R1)
      (r->a SRP)
      (j-a)))
+
+
+
 
 (defvar test-read-c nil)
 (setq test-read-c 
@@ -841,12 +874,6 @@
      ;;                      |
      ;;                      +-> nil
      (jsr l-print)
-     ;;;(jsr l-car) ; -> P0 = car(result) = sym1
-     ;;;(jsr l-print-symbol)
-     ;;;(r->a R0) (a->r P0)
-     ;;;(jsr l-cdr)
-     ;;;(jsr l-car) ; sym2
-     ;;;(jsr l-print-symbol)
 
      (label end-fs)
      (j end-fs)))
@@ -1079,6 +1106,41 @@
      (pop-a)
      (j-a)))
 
+(defvar func-print-number nil)
+(setq func-print-number
+  '( ;; print-number
+     ;; P0 = cons ptr to a number cons-cell (P0 destroyed)
+     (label l-print-number)
+     (push-srp)
+     (push-r R0)
+     (mvi->r n-cons R0)
+     (r->a P0)
+     (lsl-a)
+     (lsl-a)
+     (add-r R0) ; cons-addr = n-cons + cons-idx * 4
+     (ld-a->r P0) ; the number
+     (jsr l-prtdec)
+     (pop-r R0)
+     (pop-a)
+     (j-a)
+     
+     (label l-prtdec) 
+     ;; P0 = number
+     (push-srp)
+     (push-r R0)
+     (mvi->a 0)
+     (sub-r P0)
+     (jz l-is-zero)
+
+     
+     (label l-is-zero)
+     (mvi->r (char-code #\0 ) P0)
+     (jsr l-putchar)
+     (pop-r R0)
+     (pop-a)
+     (j-a)
+
+
 (defvar func-print nil)
 (setq func-print
   '( ;; print
@@ -1107,8 +1169,16 @@
      (j l-print-ret)
      
      (label  l-not-cons)
-     ;; other types TBD
-    
+     (mvi->a c-cons-number)
+     (sub-r R1)
+     (jnz l-not-num)
+     ;; number
+     (jsr l-print-number)
+     (j l-print-ret)
+   
+     (label l-not-num)
+     ;; other type TBD
+     
      (label l-print-ret)
      (pop-r R1)
      (pop-a)
