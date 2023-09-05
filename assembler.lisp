@@ -35,13 +35,23 @@
                     (logior #x80 
                             (logand #x7f (ash val -7)))
                     (logand #x7f val))
-              (list (logior #x80 
-                            (logand #x7f (ash val -21)))
-                    (logior #x80 
-                            (logand #x7f (ash val -14)))
-                    (logior #x80 
-                            (logand #x7f (ash val -7)))
-                    (logand #x7f val))))))
+              (if (within-2sc val 28)
+                (list (logior #x80 
+                              (logand #x7f (ash val -21)))
+                      (logior #x80 
+                              (logand #x7f (ash val -14)))
+                      (logior #x80 
+                              (logand #x7f (ash val -7)))
+                      (logand #x7f val))
+                (list (logior #x80 
+                              (logand #x7f (ash val -28)))
+                      (logior #x80 
+                              (logand #x7f (ash val -21)))
+                      (logior #x80 
+                              (logand #x7f (ash val -14)))
+                      (logior #x80 
+                              (logand #x7f (ash val -7)))
+                      (logand #x7f val)))))))
 
 (defun mvi->r (imm r)
   (concatenate 'list

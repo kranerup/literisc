@@ -707,7 +707,7 @@
      ;;         P1 = number % 10
      ;; using this algorithm:
      ;; x = 0
-     ;; b =   0x10000000  # 32-bit binary 10000000000000000000000000000000
+     ;; B =   0x10000000  # 32-bit binary 10000000000000000000000000000000
      ;; b10 = 0xA0000000  # 32-bit binary 10100000000000000000000000000000
      ;; 
      ;; while b != 0:
@@ -724,7 +724,7 @@
      ; P0 = v
      (label l-div10-loop)
      (mvi->a 0)
-     (sub-r P0)
+     (sub-r R0)
      (jz l-div10-ret)
      (r->a P0) ; v 
      (sub-r R1) ; v - b10
@@ -943,7 +943,8 @@
 
 (defvar test-div10 nil)
 (setq test-div10
-  '( (mvi->r 321 P0)
+  '( (mvi->r n-stack-highest SP)
+     (mvi->r 321 P0)
      (jsr l-div10)
      (label end-d10)
      (j end-d10)))
@@ -1376,7 +1377,8 @@
               func-find-symbol func-putchar func-cdr
               func-car func-parse func-rplca func-rplcd
               func-cons func-print-symbol func-print
-              func-print-list func-str2num func-div10 ))
+              func-print-list func-str2num func-div10
+              func-print-number))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))
