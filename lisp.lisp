@@ -957,6 +957,16 @@
      (label end-d10)
      (j end-d10)))
 
+(defvar test-prtdec nil)
+(setq test-prtdec
+  '( (mvi->r n-stack-highest SP)
+     (mvi->r 439 P0)
+     (jsr l-prtdec)
+     (mvi->r 100001 P0)
+     (jsr l-prtdec)
+     (label end-pd)
+     (j end-pd)))
+
 (defvar main nil)
 (setq main 
   '( ;; --- main ---
@@ -1197,18 +1207,30 @@
      (label l-prtdec) 
      ;; P0 = number
      (push-srp)
-     (push-r R0)
-     (mvi->a 0)
-     (sub-r P0)
-     (jz l-is-zero)
-
-     
-     (label l-is-zero)
-     (mvi->r (char-code #\0 ) P0)
+     (push-r R1)
+     (r->a P0) (a->r R0)
+     (mvi->r 10 R1)
+     (r->a P0)
+     (sub-r R1) ; P0 >= 10
+     (jhs l-is-more-digits)
+     ;; single digit
+     (label l-prt-single)
+     (mvi->r (char-code #\0 ) R0)
+     (r->a P0)
+     (add-r R0) ; '0' + num
+     (a->r P0)
      (jsr l-putchar)
-     (pop-r R0)
+     (pop-r R1)
      (pop-a)
-     (j-a)))
+     (j-a)
+
+     (label l-is-more-digits)
+     (jsr l-div10) ; P0 -> P0=q P1=r
+     (r->a P1) (a->r R1) 
+     (jsr l-prtdec)
+     (r->a R1) (a->r P0)
+     (j l-prt-single)
+     ))
 
 
 (defvar func-print nil)
@@ -1375,6 +1397,9 @@
 
 (defun t9 ()
   (asm-n-run test-div10))
+
+(defun t10 ()
+  (asm-n-run test-prtdec))
 
 (defvar *symtab* nil)
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
