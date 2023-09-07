@@ -717,7 +717,7 @@
      ;;     b10 >>= 1
      ;;     b >>= 1
      ;; return x,v
-     (push-r R5)
+     (push-r R2)
      (mvi->r #x10000000 R0) ; b
      (mvi->r #xA0000000 R1) ; b10
      (mvi->r 0 R2) ; x
@@ -728,7 +728,8 @@
      (jz l-div10-ret)
      (r->a P0) ; v 
      (sub-r R1) ; v - b10
-     (jhs l-no-sub) ; if b10 <= v -> if v >= b10
+     (jlo l-no-sub) ; if b10 <= v then sub -> if v >= b10 -> if v < b10 then not sub
+     ; 123 <= 122 -> 122 >= 123
      ; v = v - b10 (already in A)
      (a->r P0)
      ; x |= b
@@ -944,7 +945,14 @@
 (defvar test-div10 nil)
 (setq test-div10
   '( (mvi->r n-stack-highest SP)
-     (mvi->r 321 P0)
+     (mvi->r 439 P0)
+     (jsr l-div10)
+     (mvi->r 141 P0)
+     (jsr l-div10)
+     (mvi->r 4200000000 P0)
+     (jsr l-div10)
+     (jsr l-div10)
+     (jsr l-div10)
      (jsr l-div10)
      (label end-d10)
      (j end-d10)))
