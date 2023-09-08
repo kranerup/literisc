@@ -585,14 +585,14 @@
      ;; P0=number -> P0=cons
      (label l-num-atom)
      (push-srp)
-     (push-r R1)
-     (mvi->r n-cons R1)
+     (push-r R2)
      (r->a P0) (a->r R0) ; R0=num
      (jsr l-cons) ; P0 = cons-cell
      (r->a P0) (a->r R1) ; R1=cons
      (lsl-a)
      (lsl-a)
-     (add-r R1) ; cons-addr = n-cons + cons-idx * 4
+     (mvi->r n-cons R2)
+     (add-r R2) ; cons-addr = n-cons + cons-idx * 4
      (st-r->a R0) ; cons-cell-content = number
      ;; set type to num
      ;; set type to cons
@@ -602,7 +602,7 @@
      (add-r R1) ; A = n-cons-type + cons-idx
      (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-number
 
-     (pop-r R1)
+     (pop-r R2)
      (pop-a)
      (j-a)
      ;; -----------------
@@ -1459,6 +1459,19 @@
         (set-program dmem 
                      (string-to-mem "123") 
                      n-source-start))))
+
+(defun dump-cons (dmem n-cons n-cons-type)
+  (let ((incr 4))
+    (loop with addr := n-cons and taddr := n-cons-type
+          for row from 1 to 20
+          do (format t "~4,'0X: ~{~2,'0X~^ ~} ~a~%"
+                       addr
+                       (coerce (subseq dmem addr (+ 4 addr)) 'list)
+                       (aref dmem taddr))
+          until (equal (aref dmem taddr) c-cons-free)
+          do (setf addr (+ addr incr))
+          do (setf taddr (1+ taddr)))))
+  
 
 (defvar *symtab* nil)
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
