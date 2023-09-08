@@ -326,10 +326,12 @@
 (defconstant reader-lpar 1)
 (defconstant reader-rpar 2)
 (defconstant reader-sym 3)
-(defconstant reader-num 3)
+(defconstant reader-num 4)
 
-;;; P0 - returns read object type
-;;; if reader-sym then symbol string is in n-read-sym-str
+;;; output:
+;;;   P0 - returns read object type
+;;;   P1 - number if type is reader-num
+;;;   if type is reader-sym then symbol string is in n-read-sym-str
 (defvar scan nil)
 (setq scan
   '(
@@ -382,9 +384,20 @@
     (st-r->a-rel rs-use-unread R2) ; M[ A(base) + use-unread-offs ] = R2 (1)
 
     (label l-end-of-sym)
-    ;; reading-symbol = False
-    (mvi->r 0 R4)
+
+    ;; try to convert string to number
+    (mvi->r n-read-sym-str P0) ; string-ptr = start of read sym buffer
+    (jsr l-str2num) ; P0=string-ptr -> P0=num-flag P1=num
+    (mvi->a 0)
+    (sub-r P0)
+    (jz l-ret-sym)
+    ;; return num
+    (mvi->r reader-num P0)
+    ;; P1 is already num
+    (j l-reader-ret)
+    
     ;; return sym
+    (label l-ret-sym)
     (mvi->r reader-sym P0)
     (j l-reader-ret)
    
@@ -804,14 +817,17 @@
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
+     ;; sym
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
-     
+    
+     ;; num
      (jsr f-scan)
-     (mvi->r n-read-sym-str P0)
-     (jsr prtstr)
+     (r->a P1) (a->r P0)
+     (jsr l-prtdec)
 
+     ;;sym
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
@@ -873,6 +889,30 @@
 
      (label end-fs)
      (j end-fs)))
+
+;;; test reading a number
+(defvar test-parse-num nil)
+(setq test-parse-num
+ '(      
+     (mvi->r n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr f-scan) ; P0 = read obj type
+     
+     (jsr l-parse) ; P0= obj type from scan -> object (cons ptr)
+
+     (jsr l-print-number)
+
+     (label end-pn)
+     (j end-pn)))
 
 ;;; test reading a list
 (defvar test-parse-2 nil)
@@ -963,6 +1003,8 @@
      (mvi->r 439 P0)
      (jsr l-prtdec)
      (mvi->r 100001 P0)
+     (jsr l-prtdec)
+     (mvi->r 0 P0)
      (jsr l-prtdec)
      (label end-pd)
      (j end-pd)))
@@ -1329,7 +1371,7 @@
   (asm-n-run test-reader
     #'(lambda (dmem)
         (set-program dmem 
-                     (string-to-mem "symbol symbol2 ( inner )") 
+                     (string-to-mem "symbol 123 123x symbol2 ( inner )") 
                      n-source-start))))
 
 (defun t3 ()
@@ -1400,6 +1442,17 @@
 
 (defun t10 ()
   (asm-n-run test-prtdec))
+
+(defun t11 ()
+  (asm-n-run test-parse-num
+    #'(lambda (dmem)
+        (setq string-space-free 0)
+        (add-symbol dmem "nil" 0) ; nil must be symbol 0
+        (add-symbol dmem "sym1" 0)
+        (add-symbol dmem "sym2" 0)
+        (set-program dmem 
+                     (string-to-mem "123") 
+                     n-source-start))))
 
 (defvar *symtab* nil)
 (defun asm-n-run ( main &optional (setup nil) (debug nil))
