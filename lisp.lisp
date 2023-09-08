@@ -533,8 +533,11 @@
 (defvar func-parse nil)
 (setq func-parse
   '( ;; --- parse ---
-     ;; P0 - object type from scan()
-     ;; P0 - returns cons ptr to read objects
+     ;; input:
+     ;;   P0 - object type from scan()
+     ;;   P1 - number if type is numeric
+     ;; output:
+     ;;   P0 - returns cons ptr to read objects
      (label l-parse)
      (push-srp)
      (push-r R3)
@@ -552,11 +555,10 @@
      ;; atom
      (label l-parse-nxt)
      ;; number
-     (mvi->r n-read-sym-str P0)
-     (jsr l-str2num) ; -> P0=is-num flag P1=number
-     (mvi->a 0)
+     (mvi->a reader-num)
      (sub-r P0)
-     (jz l-parse-sym)
+     (jnz l-parse-sym)
+
      (r->a P1) (a->r P0)
      (jsr l-num-atom) ; P0=number -> P0=cons
      (j l-parse-ret)
@@ -582,6 +584,7 @@
      ;; -----------------
      ;; P0=number -> P0=cons
      (label l-num-atom)
+     (push-srp)
      (push-r R1)
      (mvi->r n-cons R1)
      (r->a P0) (a->r R0) ; R0=num
@@ -590,7 +593,7 @@
      (lsl-a)
      (lsl-a)
      (add-r R1) ; cons-addr = n-cons + cons-idx * 4
-     (st-a->r R0) ; cons-cell-content = number
+     (st-r->a R0) ; cons-cell-content = number
      ;; set type to num
      ;; set type to cons
      (mvi->r c-cons-number R0)
@@ -599,7 +602,8 @@
      (add-r R1) ; A = n-cons-type + cons-idx
      (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-number
 
-     (r->a SRP)
+     (pop-r R1)
+     (pop-a)
      (j-a)
      ;; -----------------
      ;; L list() {
@@ -959,9 +963,9 @@
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
-     (jsr f-scan) ; P0 = read obj type
+     (jsr f-scan) ; -> P0 = read obj type, P1 = num (if type is num)
      
-     (jsr l-parse) ; P0= obj type from scan -> object (cons ptr)
+     (jsr l-parse) ; P0= obj type from scan, P1 = num -> object (cons ptr)
      (r->a P0) (a->r R0)
      ;; [ sym1 | . ]
      ;;          |
@@ -1426,7 +1430,9 @@
         (add-symbol dmem "sym1" 0)
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
-                     (string-to-mem "(sym1 (sym2 sym1))") 
+                     ;(string-to-mem "(sym1 (sym2 sym1))") 
+                     ;(string-to-mem "(123 (sym2 sym1))") 
+                     (string-to-mem "123") 
                      n-source-start))))
 
 (defun t8 ()
