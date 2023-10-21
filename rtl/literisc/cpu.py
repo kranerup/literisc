@@ -15,6 +15,8 @@ def cpu( clk, rstn,
     acc = Signal(modbv(0)[32:])
     acc_next = Signal(modbv(0)[32:])
 
+    next_ir = Signal(modbv(0)[8:])
+    curr_ir = Signal(modbv(0)[8:])
     ir = Signal(modbv(0)[8:])
     imm = Signal(modbv(0)[32:])
     imm_next = Signal(modbv(0)[32:])
@@ -22,10 +24,12 @@ def cpu( clk, rstn,
     rx = Signal(modbv(0)[32:])
     r_field  = Signal(modbv(0)[4:])
     state = Signal(modbv(0)[4:])
+    next_state = Signal(modbv(0)[4:])
     alu_oper = Signal(modbv(0)[4:])
 
     sel_imem = Signal(modbv(0)[4:])
     load_ir = Signal(modbv(0)[1:])
+    new_ir = Signal(modbv(0)[1:])
     inc_pc = Signal(modbv(0)[1:])
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
@@ -132,52 +136,61 @@ def cpu( clk, rstn,
     OPC_STW_RX     = 15 # M[Rx].w = A
 
 
-    @always(clk.posedge, rstn.negedge)
+    ist = multiflop( next_state, state, clk, rstn )
+    iir = multiflop( next_ir, ir, clk, rstn )
+    irc = multiflop( load_ir, new_ir, clk, rstn )
+
+    @always_comb
     def ctrl():
-        if rstn == 0 or halt == 1:
-            state.next = NEXT_INSTR
+        if halt == 1:
+            next_state.next = NEXT_INSTR
             load_ir.next = 1
             load_imm.next = 1
             inc_pc.next = 1
         else:
             if state == NEXT_INSTR:
-                print("NEXT_INSTR")
                 if op == OPC_MVI or op == OPC_JMP:
-                    print("- OPC_MVI/JMP")
                     load_ir.next = 0
                     load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    state.next = READ_IMM
+                    next_state.next = READ_IMM
                 else:
                     load_ir.next = 1
                     load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    state.next = NEXT_INSTR
+                    next_state.next = NEXT_INSTR
             elif state == READ_IMM:
-                print("READ_IMM")
                 if imm_more:
-                    print("- imm_more")
                     load_ir.next = 0
                     load_imm.next = 0
                     load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    state.next = READ_IMM
+                    next_state.next = READ_IMM
                 else:
                     load_ir.next = 1
                     load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    state.next = NEXT_INSTR
+                    next_state.next = NEXT_INSTR
 
     @always(clk.negedge)
     def prt_state():
         print("state:",state)
+        if state == NEXT_INSTR:
+            print("NEXT_INSTR")
+            if op == OPC_MVI or op == OPC_JMP:
+                print("- OPC_MVI/JMP")
+        elif state == READ_IMM:
+            print("READ_IMM")
+            if imm_more:
+                print("- imm_more")
 
     @always_comb
     def decoder():
+        load_pc.next = 0
         if op == OPC_A_RX:
             alu_oper.next = ALU_PASS_Y
             op_sel_rx.next = 0 # D.C.
@@ -346,12 +359,16 @@ def cpu( clk, rstn,
     def pcctrl():
         if halt:
             pc_next.next = pc
+            print("pc=pc")
         elif load_pc == 1:
             pc_next.next = alu_out
+            print("pc=alu_out")
         elif inc_pc == 1:
             pc_next.next = pc + 1
+            print("pc=pc+1")
         else:
             pc_next.next = pc
+            print("pc=pc")
 
     ipc = multiflop( pc_next, pc, clk, rstn )
 
@@ -366,8 +383,11 @@ def cpu( clk, rstn,
 
     @always_comb
     def irctrl():
-        if load_ir == 1:
-            ir.next = imem_dout[8:]
+        if new_ir == 1:
+            curr_ir.next = imem_dout[8:]
+        else:
+            curr_ir.next = ir
+        next_ir.next = curr_ir
 
     @always_comb
     def selrx():
@@ -487,8 +507,8 @@ def cpu( clk, rstn,
     @always_comb
     def extr_instr():
         # [ o o o o  r r r r ]
-        op.next = ir[8:] >> 4
-        r_field.next = ir[4:]
+        op.next = curr_ir[8:] >> 4
+        r_field.next = curr_ir[4:]
 
     @always(clk.negedge)
     def prt_cpu():
