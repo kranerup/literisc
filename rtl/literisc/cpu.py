@@ -82,6 +82,24 @@ def cpu( clk, rstn,
     OPC_AND       = 13 # A = A & Rx
     OPC_OR        = 14 # A = A | Rx
     OPC_NEXT      = 15
+    # op code jump
+    OPCJ_J        = 0  # jump always
+    OPCJ_JLT      = 1  # jump <   signed      n ^ v
+    OPCJ_JGE      = 2  # jump >=  signed    !(n ^ v)
+    OPCJ_JLO      = 3  # jump <   unsigned    c
+    OPCJ_JHS      = 4  # jump >=  unsigned   !c
+    OPCJ_JZ       = 5  # jump on zero         z
+    OPCJ_JNZ      = 6  # jump on not zero    !z
+    OPCJ_JLO      = 7  # jump <   unsigned    c8
+    OPCJ_JHS      = 8  # jump >=  unsigned   !c8
+    OPCJ_JZ       = 9  # jump on zero         z8
+    OPCJ_JNZ      = 10 # jump on not zero    !z8
+    OPCJ_JLO      = 11 # jump <   unsigned    c16
+    OPCJ_JHS      = 12 # jump >=  unsigned   !c16
+    OPCJ_JZ       = 13 # jump on zero         z16
+    OPCJ_JNZ      = 14 # jump on not zero    !z16
+    OPCJ_JSR      = 15 # SRP = PC; PC = PC + sex(nn)
+
     # op code inner
     OPCI_NOT     = 0  # A = ~A
     OPCI_LSL     = 1  # c = A, A = A << 1, A<0> = 0
@@ -98,7 +116,7 @@ def cpu( clk, rstn,
     OPCI_SEXB    = 12 # A<31:8>  = A<7>
     OPCI_SEXW    = 13 # A<31:16> = A<15>
     OPCI_J_A     = 14 # PC = A
-    OPCI_UNUSED2 = 15
+    OPCI_NOP     = 15 # NOP
     # op code inner 2
     OPC_LDB_A_OFFS = 2  # Rx = M[A+nn].b
     OPC_LDB_A      = 3  # Rx = M[A].b
@@ -124,8 +142,8 @@ def cpu( clk, rstn,
         else:
             if state == NEXT_INSTR:
                 print("NEXT_INSTR")
-                if op == OPC_MVI:
-                    print("- OPC_MVI")
+                if op == OPC_MVI or op == OPC_JMP:
+                    print("- OPC_MVI/JMP")
                     load_ir.next = 0
                     load_imm.next = 1
                     inc_pc.next = 1
@@ -181,6 +199,38 @@ def cpu( clk, rstn,
             wr_reg.next = 0
             inc_sp.next = 0
             dec_sp.next = 0
+        elif op == OPC_JMP:
+            if state == NEXT_INSTR:
+                op_sel_rx.next = 0
+                alu_x_imm.next = 1
+                alu_imm_width.next = 1 # 7 bits from instr byte
+                wr_acc.next = 0
+                alu_y_pc.next = 1
+                reg_wr_alu.next = 0
+                wr_reg.next = 0
+                inc_sp.next = 0
+                dec_sp.next = 0
+            elif state == READ_IMM:
+                op_sel_rx.next = 0
+                alu_x_imm.next = 1
+                alu_imm_width.next = 1 # 7 bits from instr byte
+                wr_acc.next = 0
+                alu_y_pc.next = 1
+                reg_wr_alu.next = 0
+                wr_reg.next = 1
+                inc_sp.next = 0
+                dec_sp.next = 0
+
+                if imm_more:
+                    alu_oper.next = ALU_PASS_X
+                    load_pc.next = 0
+                else:
+                    alu_oper.next = ALU_ADD
+                    load_pc.next = 1
+
+
+            #if r_field == OPCJ_J:
+
         elif op == OPC_MVI: # Rx = sex(nn)
             if state == NEXT_INSTR:
                 alu_oper.next = ALU_PASS_X
@@ -225,6 +275,18 @@ def cpu( clk, rstn,
             wr_reg.next = 0
             inc_sp.next = 0
             dec_sp.next = 0
+        elif op == OPC_NEXT:
+            # the reg field is secondary opcode
+            if r_field == OPCI_NOP:
+                alu_oper.next = ALU_PASS_Y
+                op_sel_rx.next = 1
+                alu_x_imm.next = 0
+                wr_acc.next = 0
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+                wr_reg.next = 0
+                inc_sp.next = 0
+                dec_sp.next = 0
 
 
     @always(clk.negedge)
@@ -241,6 +303,11 @@ def cpu( clk, rstn,
                 print("EXE A=RX",rx)
             elif op == OPC_ADD:
                 print("EXE A=A+Rx",rx)
+            elif op == OPC_NEXT:
+                if r_field == OPCI_NOP:
+                    print("EXE NOP")
+            elif op == OPC_JMP:
+                print("EXE jmp #")
             print("ctrl:",
                 "alu_oper",alu_oper,
                 "alu_x_imm",alu_x_imm,
@@ -254,6 +321,7 @@ def cpu( clk, rstn,
                 "inc_pc",inc_pc,
                 "sel_imem",sel_imem)
             print(
+                "load_pc",load_pc,
                 "load_ir",load_ir,
                 "load_imm",load_imm,
                 "load_more",load_more)
@@ -268,6 +336,8 @@ def cpu( clk, rstn,
             elif alu_oper == ALU_ADD:
                 print("alu ADD",alu_op_x,alu_op_y,alu_op_x+alu_op_y)
 
+            if op_sel_rx:
+                print("rx",r_field, reg_bank[r_field])
             print("imm:",imm,"imm_next",imm_next)
             print("imem_dout:",imem_dout)
             print("pc_next",pc_next)
@@ -276,10 +346,10 @@ def cpu( clk, rstn,
     def pcctrl():
         if halt:
             pc_next.next = pc
-        elif inc_pc == 1:
-            pc_next.next = pc + 1
         elif load_pc == 1:
             pc_next.next = alu_out
+        elif inc_pc == 1:
+            pc_next.next = pc + 1
         else:
             pc_next.next = pc
 
@@ -302,7 +372,6 @@ def cpu( clk, rstn,
     @always_comb
     def selrx():
         if op_sel_rx:
-            print("rx",r_field, reg_bank[r_field])
             rx.next = reg_bank[ r_field ]
 
     # 7-bits
@@ -316,7 +385,11 @@ def cpu( clk, rstn,
     @always_comb
     def ld_imm():
         if load_imm:
-            imm_next.next = imem_dout[7:]
+            ext = modbv(0)[32:]
+            if imem_dout[6]:
+                ext[:] = 0xffffffff
+            ext[7:] = imem_dout[7:]
+            imm_next.next = ext
         elif load_more:
             imm_next.next = imm << 7 | imem_dout[7:]
         imm_more.next = imem_dout[7]
@@ -328,14 +401,18 @@ def cpu( clk, rstn,
         # alu op X
         if alu_x_imm:
             if alu_imm_width == 0:
-                alu_op_x.next = imm_next[4:] # TBD sex
+                ext = modbv(0)[32:]
+                if imm_next[3]:
+                    ext[:] = 0xffffffff
+                ext[4:] = imm_next[4:]
+                alu_op_x.next = ext
             elif alu_imm_width == 1:
                 alu_op_x.next = imm_next # TBD sex
         else:
             alu_op_x.next = rx
         # alu op Y (ACC)
         if alu_y_pc:
-            alu_op_y.next = pc
+            alu_op_y.next = pc + 1
         else:
             alu_op_y.next = acc
 
@@ -476,17 +553,31 @@ def cpu_top( clk, rstn ):
     imem_depth = 32
 
     program = [ 0 for i in range(imem_depth) ]
-    program[ 0  ] = 0x82 # R2 = 33
-    program[ 1  ] = 33
-    program[ 2  ] = 0x97 # A = 7 
-    program[ 3  ] = 0x84 # R4 = 294
-    program[ 4  ] = (294 >> 7) | 0x80
-    program[ 5  ] = (294 & 0x7f)
-    program[ 6  ] = 0x03 # R3 = A
-    program[ 7  ] = 0x92 # A = 2
-    program[ 8  ] = 0x08 # R8 = A
-    program[ 9  ] = 0x13 # A = R3
-    program[ 10 ] = 0xb8 # A = A + R8
+    program[ 0  ] = 0xff # NOP
+    program[ 1  ] = 0xff # NOP
+    program[ 2  ] = 0xff # NOP
+    program[ 3  ] = 0xff # NOP
+    program[ 4  ] = 0xa2 # JMP 0
+    program[ 5  ] = 0
+    program[ 6  ] = 0x82 # R2 = 33
+    program[ 7  ] = 33
+    program[ 8  ] = 0x97 # A = 7 
+    program[ 9  ] = 0x9f # A = -1
+    program[ 10 ] = 0x84 # R4 = -1
+    program[ 11 ] = 0b1111111
+    program[ 12 ] = 0x85 # R5 = -2
+    program[ 13 ] = 0b1111110
+    program[ 14 ] = 0x84 # R4 = 294
+    program[ 15 ] = (294 >> 7) | 0x80
+    program[ 16 ] = (294 & 0x7f)
+    program[ 17 ] = 0xff # NOP
+    program[ 18 ] = 0xff # NOP
+    program[ 19 ] = 0xff # NOP
+    program[ 20 ] = 0x03 # R3 = A
+    program[ 21 ] = 0x92 # A = 2
+    program[ 22 ] = 0x08 # R8 = A
+    program[ 23 ] = 0x13 # A = R3
+    program[ 24 ] = 0xb8 # A = A + R8
     imem_load = tuple(program)
 
     imem = memory(
