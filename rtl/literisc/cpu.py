@@ -7,10 +7,16 @@ def cpu( clk, rstn,
          imem_dout,
          imem_adr,
          imem_rd,
+         dmem_din,
+         dmem_dout,
+         dmem_adr,
+         dmem_rd,
+         dmem_wr,
          halt):
 
     pc = Signal(modbv(0)[16:])
     pc_next = Signal(modbv(0)[16:])
+    pc_inc = Signal(modbv(0)[16:])
     reg_bank = [ Signal(modbv(0)[32:]) for _ in range(16) ]
     acc = Signal(modbv(0)[32:])
     acc_next = Signal(modbv(0)[32:])
@@ -46,9 +52,18 @@ def cpu( clk, rstn,
     alu_out = Signal(modbv(0)[32:])
     reg_wr_op = Signal(modbv(0)[32:])
     reg_wr_alu = Signal(modbv(0)[1:])
+    reg_wr_pc = Signal(modbv(0)[1:])
+    reg_wr_dmem = Signal(modbv(0)[1:])
+    n_reg_wr_deferred = Signal(modbv(0)[1:])
+    reg_wr_deferred = Signal(modbv(0)[1:])
+    n_reg_ld_rx = Signal(modbv(0)[4:])
+    reg_ld_rx = Signal(modbv(0)[4:])
     wr_acc = Signal(modbv(0)[1:])
     wr_reg = Signal(modbv(0)[1:])
     reg_dest  = Signal(modbv(0)[4:])
+    reg_dest_srp  = Signal(modbv(0)[1:])
+    dmem_adr_sel = Signal(modbv(0)[1:])
+    dmem_wr_acc = Signal(modbv(0)[1:])
 
     SP = 14
     SRP = 15
@@ -139,6 +154,8 @@ def cpu( clk, rstn,
     ist = multiflop( next_state, state, clk, rstn )
     iir = multiflop( next_ir, ir, clk, rstn )
     irc = multiflop( load_ir, new_ir, clk, rstn )
+    idf = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
+    idr = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
 
     @always_comb
     def ctrl():
@@ -190,7 +207,25 @@ def cpu( clk, rstn,
 
     @always_comb
     def decoder():
+        alu_imm_width.next = 0
+        alu_oper.next = 0
+        alu_x_imm.next = 0
+        alu_y_pc.next = 0
+        dec_sp.next = 0
+        dmem_rd.next = 0
+        dmem_wr.next = 0
+        inc_sp.next = 0
         load_pc.next = 0
+        n_reg_ld_rx.next = 0
+        n_reg_wr_deferred.next = 0
+        op_sel_rx.next = 0
+        reg_dest_srp.next = 0
+        reg_wr_alu.next = 0
+        reg_wr_pc.next = 0
+        wr_acc.next = 0
+        wr_reg.next = 0
+        dmem_wr_acc.next = 0
+ 
         if op == OPC_A_RX:
             alu_oper.next = ALU_PASS_Y
             op_sel_rx.next = 0 # D.C.
@@ -199,8 +234,32 @@ def cpu( clk, rstn,
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
             wr_reg.next = 1
-            inc_sp.next = 0
-            dec_sp.next = 0
+        elif op == OPC_RX_A:
+            alu_oper.next = ALU_PASS_X
+            op_sel_rx.next = 1
+            alu_x_imm.next = 0
+            wr_acc.next = 1
+            alu_y_pc.next = 0 # acc
+            reg_wr_alu.next = 1
+        elif op == OPC_LD_A:
+            alu_oper.next = ALU_PASS_Y
+            op_sel_rx.next = 0 # D.C.
+            alu_x_imm.next = 0 # D.C.
+            wr_acc.next = 0
+            alu_y_pc.next = 0 # acc
+            n_reg_wr_deferred.next = 1
+            n_reg_ld_rx.next = r_field
+            dmem_rd.next = 1
+            dmem_adr_sel.next = 0 # ALU
+        elif op == OPC_ST_A:
+            alu_oper.next = ALU_PASS_Y
+            op_sel_rx.next = 0 # D.C.
+            alu_x_imm.next = 0 # D.C.
+            wr_acc.next = 0
+            alu_y_pc.next = 0 # acc
+            dmem_wr.next = 1
+            dmem_adr_sel.next = 0 # ALU
+            dmem_wr_acc.next = 0 # Rx
         elif op == OPC_MVIA:
             alu_oper.next = ALU_PASS_X
             op_sel_rx.next = 0
@@ -209,9 +268,6 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # D.C.
             reg_wr_alu.next = 1
-            wr_reg.next = 0
-            inc_sp.next = 0
-            dec_sp.next = 0
         elif op == OPC_JMP:
             if state == NEXT_INSTR:
                 op_sel_rx.next = 0
@@ -220,9 +276,6 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 1
                 reg_wr_alu.next = 0
-                wr_reg.next = 0
-                inc_sp.next = 0
-                dec_sp.next = 0
             elif state == READ_IMM:
                 op_sel_rx.next = 0
                 alu_x_imm.next = 1
@@ -230,9 +283,6 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 1
                 reg_wr_alu.next = 0
-                wr_reg.next = 1
-                inc_sp.next = 0
-                dec_sp.next = 0
 
                 if imm_more:
                     alu_oper.next = ALU_PASS_X
@@ -241,8 +291,10 @@ def cpu( clk, rstn,
                     alu_oper.next = ALU_ADD
                     load_pc.next = 1
 
-
-            #if r_field == OPCJ_J:
+                if r_field == OPCJ_JSR:
+                    reg_dest_srp.next = 1
+                    reg_wr_pc.next = 1
+                    wr_reg.next = 1
 
         elif op == OPC_MVI: # Rx = sex(nn)
             if state == NEXT_INSTR:
@@ -253,9 +305,6 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # D.C.
                 reg_wr_alu.next = 1
-                wr_reg.next = 0
-                inc_sp.next = 0
-                dec_sp.next = 0
             elif state == READ_IMM:
                 alu_oper.next = ALU_PASS_X
                 op_sel_rx.next = 0
@@ -265,8 +314,6 @@ def cpu( clk, rstn,
                 alu_y_pc.next = 0 # D.C.
                 reg_wr_alu.next = 1
                 wr_reg.next = 1
-                inc_sp.next = 0
-                dec_sp.next = 0
 
         elif op == OPC_RX_A:
             alu_oper.next = ALU_PASS_X
@@ -275,9 +322,6 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
-            wr_reg.next = 0
-            inc_sp.next = 0
-            dec_sp.next = 0
         elif op == OPC_ADD:
             alu_oper.next = ALU_ADD
             op_sel_rx.next = 1
@@ -285,9 +329,6 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
-            wr_reg.next = 0
-            inc_sp.next = 0
-            dec_sp.next = 0
         elif op == OPC_NEXT:
             # the reg field is secondary opcode
             if r_field == OPCI_NOP:
@@ -297,9 +338,14 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 1
-                wr_reg.next = 0
-                inc_sp.next = 0
-                dec_sp.next = 0
+            elif r_field == OPCI_J_A:
+                load_pc.next = 1
+                alu_oper.next = ALU_PASS_Y
+                op_sel_rx.next = 0
+                alu_x_imm.next = 0
+                wr_acc.next = 0
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 0
 
 
     @always(clk.negedge)
@@ -357,18 +403,15 @@ def cpu( clk, rstn,
 
     @always_comb
     def pcctrl():
+        pc_inc.next = pc + 1
         if halt:
             pc_next.next = pc
-            print("pc=pc")
         elif load_pc == 1:
             pc_next.next = alu_out
-            print("pc=alu_out")
         elif inc_pc == 1:
-            pc_next.next = pc + 1
-            print("pc=pc+1")
+            pc_next.next = pc_inc
         else:
             pc_next.next = pc
-            print("pc=pc")
 
     ipc = multiflop( pc_next, pc, clk, rstn )
 
@@ -391,7 +434,10 @@ def cpu( clk, rstn,
 
     @always_comb
     def selrx():
-        if op_sel_rx:
+        #if op_sel_rx:
+        if reg_wr_deferred and reg_ld_rx == r_field:
+            rx.next = dmem_dout
+        else:
             rx.next = reg_bank[ r_field ]
 
     # 7-bits
@@ -464,8 +510,23 @@ def cpu( clk, rstn,
     def wrback():
         if reg_wr_alu:
             reg_wr_op.next = alu_out
+        elif reg_wr_pc:
+            reg_wr_op.next = pc_inc
         else:
             reg_wr_op.next = imem_dout
+
+    @always_comb
+    def dmema():
+        if dmem_adr_sel == 0:
+            dmem_adr.next = alu_out
+        # else: SP
+
+    @always_comb
+    def dmemd():
+        if dmem_wr_acc == 1:
+            dmem_din.next = acc
+        else:
+            dmem_din.next = rx
 
     @always_comb
     def to_acc():
@@ -488,10 +549,16 @@ def cpu( clk, rstn,
 
     @always_comb
     def regd():
-        reg_dest.next = r_field # TBD
+        if reg_dest_srp:
+            reg_dest.next = SRP
+        else:
+            reg_dest.next = r_field
 
     @always(clk.posedge, rstn.negedge)
     def reg_wr():
+        if reg_wr_deferred:
+            reg_bank[ reg_ld_rx ].next = dmem_dout
+
         if wr_reg:
             reg_bank[ reg_dest ].next = reg_wr_op
         if inc_sp:
@@ -567,37 +634,59 @@ def cpu_top( clk, rstn ):
     imem_dout = Signal(modbv(0)[8:])
     imem_rd = Signal(modbv(0)[1:])
     imem_wr = Signal(modbv(0)[1:])
+
+    dmem_adr = Signal(modbv(0)[16:])
+    dmem_din = Signal(modbv(0)[32:])
+    dmem_dout = Signal(modbv(0)[32:])
+    dmem_rd = Signal(modbv(0)[1:])
+    dmem_wr = Signal(modbv(0)[1:])
+
     load_done = Signal(modbv(0)[1:])
     halt = Signal(modbv(0)[1:])
 
-    imem_depth = 32
+    imem_depth = 64
+    dmem_depth = 1024 
 
     program = [ 0 for i in range(imem_depth) ]
-    program[ 0  ] = 0xff # NOP
-    program[ 1  ] = 0xff # NOP
-    program[ 2  ] = 0xff # NOP
-    program[ 3  ] = 0xff # NOP
-    program[ 4  ] = 0xa2 # JMP 0
-    program[ 5  ] = 0
-    program[ 6  ] = 0x82 # R2 = 33
-    program[ 7  ] = 33
-    program[ 8  ] = 0x97 # A = 7 
-    program[ 9  ] = 0x9f # A = -1
-    program[ 10 ] = 0x84 # R4 = -1
-    program[ 11 ] = 0b1111111
-    program[ 12 ] = 0x85 # R5 = -2
-    program[ 13 ] = 0b1111110
-    program[ 14 ] = 0x84 # R4 = 294
-    program[ 15 ] = (294 >> 7) | 0x80
-    program[ 16 ] = (294 & 0x7f)
+    program[ 0  ] = 0x81 # R1 = 10
+    program[ 1  ] = 10
+    program[ 2  ] = 0x82 # R2 = 20
+    program[ 3  ] = 20
+    program[ 4  ] = 0x97 # A = 7 
+    program[ 5  ] = 0x62 # M[A].l = R2
+    program[ 6  ] = 0x31 # R1 = M[ A ].l
+    program[ 7  ] = 0x13 # A = R1 ; forward mem data to reg operand
+    program[ 8  ] = 0xff # NOP
+    program[ 9  ] = 0xff # NOP
+    program[ 10 ] = 0xaf # JSR 1 # JMP 1
+    program[ 11 ] = 1
+    program[ 12 ] = 0xff # NOP - skipped
+    program[ 13 ] = 0x1f # A = SRP
+    program[ 14 ] = 0xfe # J A
+    program[ 15 ] = 0x88 # R8 = 33
+    program[ 16 ] = 22
     program[ 17 ] = 0xff # NOP
-    program[ 18 ] = 0xff # NOP
-    program[ 19 ] = 0xff # NOP
-    program[ 20 ] = 0x03 # R3 = A
-    program[ 21 ] = 0x92 # A = 2
-    program[ 22 ] = 0x08 # R8 = A
-    program[ 23 ] = 0x13 # A = R3
-    program[ 24 ] = 0xb8 # A = A + R8
+    program[ 18 ] = 0xa0 # JMP 0
+    program[ 19 ] = 0
+    program[ 20 ] = 0x82 # R2 = 33
+    program[ 21 ] = 33
+    program[ 22 ] = 0x97 # A = 7 
+    program[ 23 ] = 0x9f # A = -1
+    program[ 24 ] = 0x84 # R4 = -1
+    program[ 25 ] = 0b1111111
+    program[ 26 ] = 0x85 # R5 = -2
+    program[ 27 ] = 0b1111110
+    program[ 28 ] = 0x84 # R4 = 294
+    program[ 29 ] = (294 >> 7) | 0x80
+    program[ 30 ] = (294 & 0x7f)
+    program[ 31 ] = 0xff # NOP
+    program[ 32 ] = 0xff # NOP
+    program[ 33 ] = 0xff # NOP
+    program[ 34 ] = 0x03 # R3 = A
+    program[ 35 ] = 0x92 # A = 2
+    program[ 36 ] = 0x08 # R8 = A
+    program[ 37 ] = 0x13 # A = R3
+    program[ 38 ] = 0xb8 # A = A + R8
     imem_load = tuple(program)
 
     imem = memory(
@@ -622,6 +711,20 @@ def cpu_top( clk, rstn ):
         load_done,
         imem_load )
     
+    dmem = memory(
+        idata = dmem_din,
+        odata = dmem_dout,
+        raddr = dmem_adr,
+        waddr = dmem_adr,
+        renable = dmem_rd,
+        wenable = dmem_wr,
+        clk = clk,
+        rstn = rstn,
+        depth = dmem_depth,
+        input_flops = 0,
+        output_flops = 0,
+        name = 'dmem')
+
 
     icpu = cpu(
         clk = clk,
@@ -629,6 +732,11 @@ def cpu_top( clk, rstn ):
         imem_dout = imem_dout,
         imem_adr = imem_radr,
         imem_rd = imem_rd,
+        dmem_din = dmem_din,
+        dmem_dout = dmem_dout,
+        dmem_adr = dmem_adr,
+        dmem_rd = dmem_rd,
+        dmem_wr = dmem_wr,
         halt = halt
     )
 
@@ -670,7 +778,7 @@ def main():
         traceSignals.filename = 'trace'
         itb = traceSignals( tb ) 
         sim = Simulation( itb )
-        sim.run( 1000 )
+        sim.run( 2000 )
     else:
         clk = Signal(bool())
         rstn = Signal(intbv(0)[1:0])
