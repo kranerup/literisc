@@ -13,6 +13,9 @@ def cpu( clk, rstn,
          dmem_rd,
          dmem_wr,
          halt,
+         enable_obs,
+         obs_regs,
+         obs_acc,
          sim_print):
 
     pc = Signal(modbv(0)[16:])
@@ -41,7 +44,9 @@ def cpu( clk, rstn,
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
     load_pc = Signal(modbv(0)[1:])
+    direct_load_imm = Signal(modbv(0)[1:])
     load_imm = Signal(modbv(0)[1:])
+    n_load_imm = Signal(modbv(0)[1:])
     load_more = Signal(modbv(0)[1:])
     imm_more = Signal(modbv(0)[1:])
     op_sel_rx = Signal(modbv(0)[1:])
@@ -69,9 +74,10 @@ def cpu( clk, rstn,
     SP = 14
     SRP = 15
     # state
-    NEXT_INSTR = 0
-    DECODE_INSTR = 1
-    READ_IMM = 2
+    RESET = 0
+    NEXT_INSTR = 1
+    DECODE_INSTR = 2
+    READ_IMM = 3
     # sel_imem
     PC = 0
     # ALU operations
@@ -152,17 +158,18 @@ def cpu( clk, rstn,
     OPC_STW_RX     = 15 # M[Rx].w = A
 
 
-    ist = multiflop( next_state, state, clk, rstn )
+    ist = multiflop( next_state, state, clk, rstn, reset_value=RESET )
     iir = multiflop( next_ir, ir, clk, rstn )
     irc = multiflop( load_ir, new_ir, clk, rstn )
     idf = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
     idr = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
+    ili = multiflop( n_load_imm, load_imm, clk, rstn )
 
     @always_comb
     def ctrl():
         inc_pc.next = 0
         load_ir.next = 0
-        load_imm.next = 0
+        n_load_imm.next = 0
         next_state.next = NEXT_INSTR
         sel_imem.next = 0
         load_more.next = 0
@@ -170,33 +177,40 @@ def cpu( clk, rstn,
         if halt == 1:
             next_state.next = NEXT_INSTR
             load_ir.next = 1
-            load_imm.next = 1
+            n_load_imm.next = 1
             inc_pc.next = 1
         else:
-            if state == NEXT_INSTR:
+            if state == RESET:
+                load_ir.next = 1
+                n_load_imm.next = 0
+                inc_pc.next = 0
+                load_pc.next = 0
+                sel_imem.next = PC
+                next_state.next = NEXT_INSTR
+            elif state == NEXT_INSTR:
                 if op == OPC_MVI or op == OPC_JMP:
                     load_ir.next = 0
-                    load_imm.next = 1
+                    n_load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = READ_IMM
                 else:
                     load_ir.next = 1
-                    load_imm.next = 1
+                    n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = NEXT_INSTR
             elif state == READ_IMM:
                 if imm_more:
                     load_ir.next = 0
-                    load_imm.next = 0
+                    n_load_imm.next = 0
                     load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = READ_IMM
                 else:
                     load_ir.next = 1
-                    load_imm.next = 1
+                    n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = NEXT_INSTR
@@ -235,6 +249,7 @@ def cpu( clk, rstn,
         wr_reg.next = 0
         dmem_wr_acc.next = 0
         dmem_adr_sel.next = 0
+        direct_load_imm.next = 0
  
         if op == OPC_A_RX:
             alu_oper.next = ALU_PASS_Y
@@ -274,6 +289,7 @@ def cpu( clk, rstn,
             alu_oper.next = ALU_PASS_X
             op_sel_rx.next = 0
             alu_x_imm.next = 1
+            direct_load_imm.next = 1
             alu_imm_width.next = 0 # 4 bits from first instr byte
             wr_acc.next = 1
             alu_y_pc.next = 0 # D.C.
@@ -464,12 +480,12 @@ def cpu( clk, rstn,
         imm_next.next = 0
         ext = modbv(0)[32:]
         ext[:] = 0
-        if load_imm:
+        if load_imm or direct_load_imm:
             if imem_dout[6]:
                 ext[:] = 0xffffffff
             ext[7:] = imem_dout[7:]
             imm_next.next = ext
-        elif load_more:
+        else:
             imm_next.next = imm << 7 | imem_dout[7:]
         imm_more.next = imem_dout[7]
 
@@ -595,6 +611,13 @@ def cpu( clk, rstn,
             if wr_reg:
                 print("wr R",reg_dest,"=",reg_wr_op)
 
+    if enable_obs:
+        @always_comb
+        def obsreg():
+            for i in range(16):
+                obs_regs[i].next = reg_bank[i]
+                obs_acc.next = acc
+
     @always_comb
     def extr_instr():
         # [ o o o o  r r r r ]
@@ -653,6 +676,113 @@ def mem_loader( clk, rstn, waddr, wdata, wenable, done, content ):
 
     return instances()
 
+def cpu_tester( clk, programs ):
+
+    rstn = Signal(modbv(0)[1:])
+
+    imem_radr = Signal(modbv(0)[16:])
+    imem_wadr = Signal(modbv(0)[16:])
+    imem_din = Signal(modbv(0)[8:])
+    imem_dout = Signal(modbv(0)[8:])
+    imem_rd = Signal(modbv(0)[1:])
+    imem_wr = Signal(modbv(0)[1:])
+
+    dmem_adr = Signal(modbv(0)[16:])
+    dmem_din = Signal(modbv(0)[32:])
+    dmem_dout = Signal(modbv(0)[32:])
+    dmem_rd = Signal(modbv(0)[1:])
+    dmem_wr = Signal(modbv(0)[1:])
+
+    load_done = Signal(modbv(0)[1:])
+    halt = Signal(modbv(0)[1:])
+
+    imem_depth = 64
+    dmem_depth = 1024 
+
+    @instance
+    def progdriver():
+        for prog in programs:
+            print("============= program start ===============")
+            imem = prog['imem'] # dict with adr -> data
+            expect_reg = prog['expect'] # dict adr -> dict reg-nr -> value
+
+            rstn.next = 0
+            yield clk.posedge
+            yield clk.posedge
+            rstn.next = 1 
+            halt.next = 0 
+            no_more_instr = False
+           
+            while True:
+                adr = int(imem_radr.val)
+                print("imem_adr",adr)
+                if adr in imem:
+                    imem_dout.next = imem[ adr ]
+                    print("imem_dout", imem[adr])
+                else:
+                    no_more_instr = True
+
+                if adr in expect_reg:
+                    for r in expect_reg[ adr ]:
+                        print(f"expect at {adr}: {r}")
+                        if r == 'A':
+                            if obs_acc == expect_reg[ adr ]['A']:
+                                print("check A OK", obs_acc)
+                            else:
+                                print(f"check A MISS act:",obs_acc,
+                                       "exp:", expect_reg[ adr ][ 'A' ])
+                        else:
+                            if obs_regs[ r ] == expect_reg[ adr ][ r ]:
+                                print(f"check r{r} OK", obs_regs[r])
+                            else:
+                                print(f"check r{r} MISS act:",obs_regs[r],
+                                       "exp:", expect_reg[ adr ][ r ])
+
+                if no_more_instr:
+                    print("========== end of program =================")
+                    break
+                yield clk.posedge
+        print("============= no more programs ===============")
+        raise StopSimulation
+
+
+    dmem = memory(
+        idata = dmem_din,
+        odata = dmem_dout,
+        raddr = dmem_adr,
+        waddr = dmem_adr,
+        renable = dmem_rd,
+        wenable = dmem_wr,
+        clk = clk,
+        rstn = rstn,
+        depth = dmem_depth,
+        input_flops = 0,
+        output_flops = 0,
+        name = 'dmem')
+
+    obs_regs = [ Signal(modbv(0)[32:]) for _ in range(16) ]
+    obs_acc = Signal(modbv(0)[32:])
+
+    icpu = cpu(
+        clk = clk,
+        rstn = rstn,
+        imem_dout = imem_dout,
+        imem_adr = imem_radr,
+        imem_rd = imem_rd,
+        dmem_din = dmem_din,
+        dmem_dout = dmem_dout,
+        dmem_adr = dmem_adr,
+        dmem_rd = dmem_rd,
+        dmem_wr = dmem_wr,
+        halt = halt,
+        enable_obs = True,
+        obs_regs = obs_regs,
+        obs_acc = obs_acc,
+        sim_print = True
+    )
+
+    return instances()
+
 def cpu_top( clk, rstn ):
 
     imem_radr = Signal(modbv(0)[16:])
@@ -680,11 +810,11 @@ def cpu_top( clk, rstn ):
     # a test should be a few instr then a new program is used an cpu reset
 
     program = [ 0 for i in range(imem_depth) ]
-    program[ 0  ] = 0x81 # R1 = 10
-    program[ 1  ] = 10
-    program[ 2  ] = 0x82 # R2 = 20
-    program[ 3  ] = 20
-    program[ 4  ] = 0x97 # A = 7 
+    #program[ 0  ] = 0x81 # R1 = 10
+    #program[ 1  ] = 10
+    #program[ 2  ] = 0x82 # R2 = 20
+    #program[ 3  ] = 20
+    #program[ 4  ] = 0x97 # A = 7 
     program[ 5  ] = 0x62 # M[A].l = R2
     program[ 6  ] = 0x31 # R1 = M[ A ].l
     program[ 7  ] = 0x13 # A = R1 ; forward mem data to reg operand
@@ -702,23 +832,23 @@ def cpu_top( clk, rstn ):
     program[ 19 ] = 0
     program[ 20 ] = 0x82 # R2 = 33
     program[ 21 ] = 33
-    program[ 22 ] = 0x97 # A = 7 
-    program[ 23 ] = 0x9f # A = -1
-    program[ 24 ] = 0x84 # R4 = -1
-    program[ 25 ] = 0b1111111
-    program[ 26 ] = 0x85 # R5 = -2
-    program[ 27 ] = 0b1111110
-    program[ 28 ] = 0x84 # R4 = 294
-    program[ 29 ] = (294 >> 7) | 0x80
-    program[ 30 ] = (294 & 0x7f)
+    #program[ 22 ] = 0x97 # A = 7 
+    #program[ 23 ] = 0x9f # A = -1
+    #program[ 24 ] = 0x84 # R4 = -1
+    #program[ 25 ] = 0b1111111
+    #program[ 26 ] = 0x85 # R5 = -2
+    #program[ 27 ] = 0b1111110
+    #program[ 28 ] = 0x84 # R4 = 294
+    #program[ 29 ] = (294 >> 7) | 0x80
+    #program[ 30 ] = (294 & 0x7f)
     program[ 31 ] = 0xff # NOP
     program[ 32 ] = 0xff # NOP
     program[ 33 ] = 0xff # NOP
-    program[ 34 ] = 0x03 # R3 = A
-    program[ 35 ] = 0x92 # A = 2
-    program[ 36 ] = 0x08 # R8 = A
-    program[ 37 ] = 0x13 # A = R3
-    program[ 38 ] = 0xb8 # A = A + R8
+    #program[ 34 ] = 0x03 # R3 = A
+    #program[ 35 ] = 0x92 # A = 2
+    #program[ 36 ] = 0x08 # R8 = A
+    #program[ 37 ] = 0x13 # A = R3
+    #program[ 38 ] = 0xb8 # A = A + R8
     imem_load = tuple(program)
 
     imem = memory(
@@ -805,11 +935,88 @@ def tb():
 
     return instances()
 
+def tb2():
+
+    clk = Signal(bool())
+
+    progs = []
+
+    # ---- test immediate ------
+    expect = dict()
+    program = dict()
+    program[ 0  ] = 0x81 # R1 = 10
+    program[ 1  ] = 10
+    expect[ 3 ] = { 1 : 10 }
+
+    program[ 2  ] = 0x82 # R2 = 20
+    program[ 3  ] = 20
+    expect[ 5 ] = { 1 : 10, 2: 20 }
+
+    program[ 4  ] = 0x97 # A = 7 
+    program[ 5  ] = 0xff # NOP
+    expect[ 6 ] = { 1 : 10, 2: 20, 'A': 7 }
+
+    program[ 6  ] = 0x9f # A = -1
+    expect[ 8 ] = { 1 : 10, 2: 20, 'A': 0xffffffff }
+
+    program[ 7  ] = 0x84 # R4 = -1
+    program[ 8  ] = 0b1111111
+    expect[ 10 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff }
+
+    program[ 9  ] = 0x85 # R5 = -2
+    program[ 10 ] = 0b1111110
+    expect[ 12 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff, 5: 0xfffffffe }
+
+    program[ 11 ] = 0x84 # R4 = 294
+    program[ 12 ] = (294 >> 7) | 0x80
+    program[ 13 ] = (294 & 0x7f)
+    expect[ 15 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 294, 5: 0xfffffffe }
+    program[ 14 ] = 0xff # NOP
+
+    progs.append( { 'imem': program,
+                    'expect': expect } )
+
+    # ---- test mv and add ----------
+    expect = dict()
+    program = dict()
+    program[ 0 ] = 0x95 # A = 5 
+    expect[ 2 ] = { 'A': 5 }
+
+    program[ 1 ] = 0x03 # R3 = A
+    expect[ 3 ] = { 'A': 5, 3: 5 }
+
+    program[ 2 ] = 0x92 # A = 2
+    expect[ 4 ] = { 'A': 2, 3: 5 }
+
+    program[ 3 ] = 0x08 # R8 = A
+    expect[ 5 ] = { 'A': 2, 3: 5, 8: 2 }
+
+    program[ 4 ] = 0x13 # A = R3
+    expect[ 6 ] = { 'A': 5, 3: 5, 8: 2 }
+
+    program[ 5 ] = 0xb8 # A = A + R8
+    expect[ 7 ] = { 'A': 7, 3: 5, 8: 2 }
+
+    program[ 6 ] = 0xff # NOP
+    program[ 7 ] = 0xff # NOP
+
+    progs.append( { 'imem': program,
+                    'expect': expect } )
+
+    icpu_tester = cpu_tester( clk, progs )
+  
+    @always(delay(10))
+    def stim():
+      print("=========== CLOCK ============")
+      clk.next = not clk
+
+    return instances()
+
 def main():
     if run_sim:
         #itb = tb()
         traceSignals.filename = 'trace'
-        itb = traceSignals( tb ) 
+        itb = traceSignals( tb2 ) 
         sim = Simulation( itb )
         sim.run( 2000 )
     else:
