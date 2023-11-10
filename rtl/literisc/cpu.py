@@ -16,6 +16,7 @@ def cpu( clk, rstn,
          enable_obs,
          obs_regs,
          obs_acc,
+         obs_cc,
          sim_print):
 
     pc = Signal(modbv(0)[16:])
@@ -24,6 +25,28 @@ def cpu( clk, rstn,
     reg_bank = [ Signal(modbv(0)[32:]) for _ in range(16) ]
     acc = Signal(modbv(0)[32:])
     acc_next = Signal(modbv(0)[32:])
+
+    n_n = Signal(modbv(0)[1:]) 
+    n_c = Signal(modbv(0)[1:]) 
+    n_z = Signal(modbv(0)[1:]) 
+    n_v = Signal(modbv(0)[1:]) 
+    n_c8 = Signal(modbv(0)[1:]) 
+    n_z8 = Signal(modbv(0)[1:]) 
+    n_c16 = Signal(modbv(0)[1:]) 
+    n_z16 = Signal(modbv(0)[1:]) 
+
+    n_cc = Signal(modbv(0)[8:])
+
+    n = Signal(modbv(0)[1:]) 
+    c = Signal(modbv(0)[1:]) 
+    z = Signal(modbv(0)[1:]) 
+    v = Signal(modbv(0)[1:]) 
+    c8 = Signal(modbv(0)[1:]) 
+    z8 = Signal(modbv(0)[1:]) 
+    c16 = Signal(modbv(0)[1:]) 
+    z16 = Signal(modbv(0)[1:]) 
+
+    cc = Signal(modbv(0)[8:])
 
     next_ir = Signal(modbv(0)[8:])
     curr_ir = Signal(modbv(0)[8:])
@@ -184,7 +207,6 @@ def cpu( clk, rstn,
                 load_ir.next = 1
                 n_load_imm.next = 0
                 inc_pc.next = 0
-                load_pc.next = 0
                 sel_imem.next = PC
                 next_state.next = NEXT_INSTR
             elif state == NEXT_INSTR:
@@ -355,6 +377,13 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
+        elif op == OPC_SUB:
+            alu_oper.next = ALU_SUB
+            op_sel_rx.next = 1
+            alu_x_imm.next = 0
+            wr_acc.next = 1
+            alu_y_pc.next = 0 # acc
+            reg_wr_alu.next = 1
         elif op == OPC_NEXT:
             # the reg field is secondary opcode
             if r_field == OPCI_NOP:
@@ -389,6 +418,8 @@ def cpu( clk, rstn,
                     print("EXE A=RX",rx)
                 elif op == OPC_ADD:
                     print("EXE A=A+Rx",rx)
+                elif op == OPC_SUB:
+                    print("EXE A=A-Rx",rx)
                 elif op == OPC_NEXT:
                     if r_field == OPCI_NOP:
                         print("EXE NOP")
@@ -421,6 +452,8 @@ def cpu( clk, rstn,
                     print("alu PASS_Y",alu_op_y)
                 elif alu_oper == ALU_ADD:
                     print("alu ADD",alu_op_x,alu_op_y,alu_op_x+alu_op_y)
+                elif alu_oper == ALU_SUB:
+                    print("alu SUB",alu_op_x,alu_op_y,alu_op_x+alu_op_y)
 
                 if op_sel_rx:
                     print("rx",r_field, reg_bank[r_field])
@@ -480,7 +513,7 @@ def cpu( clk, rstn,
         imm_next.next = 0
         ext = modbv(0)[32:]
         ext[:] = 0
-        if load_imm or direct_load_imm:
+        if load_imm==1 or direct_load_imm==1:
             if imem_dout[6]:
                 ext[:] = 0xffffffff
             ext[7:] = imem_dout[7:]
@@ -514,8 +547,46 @@ def cpu( clk, rstn,
         else:
             alu_op_y.next = acc
 
+    @inline
+    def sub( x, y, res, extended_x, extended_y, width=32 ) :
+        extended_x[:] = x
+        extended_x[width] = extended_x[width-1]
+
+        extended_y[:] = y
+        extended_y[width] = extended_y[width-1]
+
+        res[:] = extended_x - extended_y;
+
+    @inline
+    def flags( x, y, ext_res, n, z, v, c, width ):
+        c[:] = ~ext_res[width]
+        # Overflow occurs when the sign of the operands are different and
+        # the sign of the result is different from the sign of a
+        v[:] = ((x[width-1] ^ y[width-1]) & (x[width-1] ^ ext_res[width-1]));
+        n[:] = ext_res[width-1]
+        z[:] = ext_res[width-1:] == 0
+
     @always_comb
     def alu():
+        ln = modbv(0)[1:]
+        lz = modbv(0)[1:]
+        lv = modbv(0)[1:]
+        lc = modbv(0)[1:]
+        lc8 = modbv(0)[1:]
+        lz8 = modbv(0)[1:]
+        lc16 = modbv(0)[1:]
+        lz16 = modbv(0)[1:]
+        extended_x = modbv(0)[32+1:]
+        extended_y = modbv(0)[32+1:]
+        n_n.next   = 0
+        n_z.next   = 0 
+        n_v.next   = 0 
+        n_c.next   = 0 
+        n_c8.next  = 0 
+        n_z8.next  = 0 
+        n_c16.next = 0 
+        n_z16.next = 0 
+
         alu_out.next = ALU_PASS_X
         tmp = modbv(0)[33:]
         if alu_oper == ALU_PASS_X:
@@ -532,12 +603,35 @@ def cpu( clk, rstn,
             alu_out.next = tmp
         elif alu_oper == ALU_ADD:
             alu_out.next = alu_op_x + alu_op_y
+        elif alu_oper == ALU_SUB:
+
+
+            sub( alu_op_y, alu_op_x, tmp, extended_x, extended_y )
+            flags( alu_op_y, alu_op_x, tmp, ln, lz8,  lv, lc8,  8 )
+            flags( alu_op_y, alu_op_x, tmp, ln, lz16, lv, lc16, 16 )
+            flags( alu_op_y, alu_op_x, tmp, ln, lz,   lv, lc,   32 )
+
+            n_n.next = ln
+            n_z.next = lz
+            n_v.next = lv
+            n_c.next = lc
+            n_c8.next = lc8
+            n_z8.next = lz8
+            n_c16.next = lc16
+            n_z16.next = lz16
+            alu_out.next = tmp
         elif alu_oper == ALU_AND:
             alu_out.next = alu_op_x & alu_op_y
         elif alu_oper == ALU_OR:
             alu_out.next = alu_op_x | alu_op_y
         elif alu_oper == ALU_NOT:
             alu_out.next = ~alu_op_y
+
+    @always_comb
+    def ccreg():
+        n_cc.next = concat( n_n,n_c,n_z,n_v,n_c8,n_z8,n_c16,n_z16 )
+
+    cc_ff = multiflop( n_cc, cc, clk, rstn )
 
     @always_comb
     def wrback():
@@ -616,7 +710,8 @@ def cpu( clk, rstn,
         def obsreg():
             for i in range(16):
                 obs_regs[i].next = reg_bank[i]
-                obs_acc.next = acc
+            obs_acc.next = acc
+            obs_cc.next = cc
 
     @always_comb
     def extr_instr():
@@ -706,6 +801,11 @@ def cpu_tester( clk, programs ):
             imem = prog['imem'] # dict with adr -> data
             expect_reg = prog['expect'] # dict adr -> dict reg-nr -> value
 
+            exp_seq = []
+            if 'pc' in prog:
+                exp_seq = prog['pc']
+            pc_sequence = []
+
             rstn.next = 0
             yield clk.posedge
             yield clk.posedge
@@ -721,6 +821,19 @@ def cpu_tester( clk, programs ):
                     print("imem_dout", imem[adr])
                 else:
                     no_more_instr = True
+    
+                # check ongoing sequence
+                if pc_sequence:
+                    if adr == pc_sequence[0]:
+                        print("check PC ok", adr)
+                    else:
+                        print("check PC MISS act",adr,"exp:",pc_sequence[0])
+                    pc_sequence = pc_sequence[1:]
+
+                # start a new sequence
+                if adr in exp_seq:
+                    print("load sequence",exp_seq[adr])
+                    pc_sequence = exp_seq[ adr ]
 
                 if adr in expect_reg:
                     for r in expect_reg[ adr ]:
@@ -762,6 +875,7 @@ def cpu_tester( clk, programs ):
 
     obs_regs = [ Signal(modbv(0)[32:]) for _ in range(16) ]
     obs_acc = Signal(modbv(0)[32:])
+    obs_cc = Signal(modbv(0)[8:])
 
     icpu = cpu(
         clk = clk,
@@ -778,6 +892,7 @@ def cpu_tester( clk, programs ):
         enable_obs = True,
         obs_regs = obs_regs,
         obs_acc = obs_acc,
+        obs_cc = obs_cc,
         sim_print = True
     )
 
@@ -804,11 +919,6 @@ def cpu_top( clk, rstn ):
     imem_depth = 64
     dmem_depth = 1024 
 
-    # add a checker, when imem_addr equal a value a dict with expected reg
-    # values are compared
-
-    # a test should be a few instr then a new program is used an cpu reset
-
     program = [ 0 for i in range(imem_depth) ]
     #program[ 0  ] = 0x81 # R1 = 10
     #program[ 1  ] = 10
@@ -820,16 +930,16 @@ def cpu_top( clk, rstn ):
     program[ 7  ] = 0x13 # A = R1 ; forward mem data to reg operand
     program[ 8  ] = 0xff # NOP
     program[ 9  ] = 0xff # NOP
-    program[ 10 ] = 0xaf # JSR 1 # JMP 1
-    program[ 11 ] = 1
-    program[ 12 ] = 0xff # NOP - skipped
+    #program[ 10 ] = 0xaf # JSR 1 # JMP 1
+    #program[ 11 ] = 1
+    #program[ 12 ] = 0xff # NOP - skipped
     program[ 13 ] = 0x1f # A = SRP
     program[ 14 ] = 0xfe # J A
     program[ 15 ] = 0x88 # R8 = 33
     program[ 16 ] = 22
     program[ 17 ] = 0xff # NOP
-    program[ 18 ] = 0xa0 # JMP 0
-    program[ 19 ] = 0
+    #program[ 18 ] = 0xa0 # JMP 0
+    #program[ 19 ] = 0
     program[ 20 ] = 0x82 # R2 = 33
     program[ 21 ] = 33
     #program[ 22 ] = 0x97 # A = 7 
@@ -841,9 +951,9 @@ def cpu_top( clk, rstn ):
     #program[ 28 ] = 0x84 # R4 = 294
     #program[ 29 ] = (294 >> 7) | 0x80
     #program[ 30 ] = (294 & 0x7f)
-    program[ 31 ] = 0xff # NOP
-    program[ 32 ] = 0xff # NOP
-    program[ 33 ] = 0xff # NOP
+    #program[ 31 ] = 0xff # NOP
+    #program[ 32 ] = 0xff # NOP
+    #program[ 33 ] = 0xff # NOP
     #program[ 34 ] = 0x03 # R3 = A
     #program[ 35 ] = 0x92 # A = 2
     #program[ 36 ] = 0x08 # R8 = A
@@ -941,67 +1051,161 @@ def tb2():
 
     progs = []
 
+    tests = [ 5 ]
+
     # ---- test immediate ------
-    expect = dict()
-    program = dict()
-    program[ 0  ] = 0x81 # R1 = 10
-    program[ 1  ] = 10
-    expect[ 3 ] = { 1 : 10 }
+    if 1 in tests:
+        expect = dict()
+        program = dict()
+        program[ 0  ] = 0x81 # R1 = 10
+        program[ 1  ] = 10
+        expect[ 3 ] = { 1 : 10 }
 
-    program[ 2  ] = 0x82 # R2 = 20
-    program[ 3  ] = 20
-    expect[ 5 ] = { 1 : 10, 2: 20 }
+        program[ 2  ] = 0x82 # R2 = 20
+        program[ 3  ] = 20
+        expect[ 5 ] = { 1 : 10, 2: 20 }
 
-    program[ 4  ] = 0x97 # A = 7 
-    program[ 5  ] = 0xff # NOP
-    expect[ 6 ] = { 1 : 10, 2: 20, 'A': 7 }
+        program[ 4  ] = 0x97 # A = 7 
+        program[ 5  ] = 0xff # NOP
+        expect[ 6 ] = { 1 : 10, 2: 20, 'A': 7 }
 
-    program[ 6  ] = 0x9f # A = -1
-    expect[ 8 ] = { 1 : 10, 2: 20, 'A': 0xffffffff }
+        program[ 6  ] = 0x9f # A = -1
+        expect[ 8 ] = { 1 : 10, 2: 20, 'A': 0xffffffff }
 
-    program[ 7  ] = 0x84 # R4 = -1
-    program[ 8  ] = 0b1111111
-    expect[ 10 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff }
+        program[ 7  ] = 0x84 # R4 = -1
+        program[ 8  ] = 0b1111111
+        expect[ 10 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff }
 
-    program[ 9  ] = 0x85 # R5 = -2
-    program[ 10 ] = 0b1111110
-    expect[ 12 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff, 5: 0xfffffffe }
+        program[ 9  ] = 0x85 # R5 = -2
+        program[ 10 ] = 0b1111110
+        expect[ 12 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 0xffffffff, 5: 0xfffffffe }
 
-    program[ 11 ] = 0x84 # R4 = 294
-    program[ 12 ] = (294 >> 7) | 0x80
-    program[ 13 ] = (294 & 0x7f)
-    expect[ 15 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 294, 5: 0xfffffffe }
-    program[ 14 ] = 0xff # NOP
+        program[ 11 ] = 0x84 # R4 = 294
+        program[ 12 ] = (294 >> 7) | 0x80
+        program[ 13 ] = (294 & 0x7f)
+        expect[ 15 ] = { 1 : 10, 2: 20, 'A': 0xffffffff, 4: 294, 5: 0xfffffffe }
+        program[ 14 ] = 0xff # NOP
 
-    progs.append( { 'imem': program,
-                    'expect': expect } )
+        progs.append( { 'imem': program,
+                        'expect': expect } )
 
     # ---- test mv and add ----------
-    expect = dict()
-    program = dict()
-    program[ 0 ] = 0x95 # A = 5 
-    expect[ 2 ] = { 'A': 5 }
+    if 2 in tests:
+        expect = dict()
+        program = dict()
+        program[ 0 ] = 0x95 # A = 5 
+        expect[ 2 ] = { 'A': 5 }
 
-    program[ 1 ] = 0x03 # R3 = A
-    expect[ 3 ] = { 'A': 5, 3: 5 }
+        program[ 1 ] = 0x03 # R3 = A
+        expect[ 3 ] = { 'A': 5, 3: 5 }
 
-    program[ 2 ] = 0x92 # A = 2
-    expect[ 4 ] = { 'A': 2, 3: 5 }
+        program[ 2 ] = 0x92 # A = 2
+        expect[ 4 ] = { 'A': 2, 3: 5 }
 
-    program[ 3 ] = 0x08 # R8 = A
-    expect[ 5 ] = { 'A': 2, 3: 5, 8: 2 }
+        program[ 3 ] = 0x08 # R8 = A
+        expect[ 5 ] = { 'A': 2, 3: 5, 8: 2 }
 
-    program[ 4 ] = 0x13 # A = R3
-    expect[ 6 ] = { 'A': 5, 3: 5, 8: 2 }
+        program[ 4 ] = 0x13 # A = R3
+        expect[ 6 ] = { 'A': 5, 3: 5, 8: 2 }
 
-    program[ 5 ] = 0xb8 # A = A + R8
-    expect[ 7 ] = { 'A': 7, 3: 5, 8: 2 }
+        program[ 5 ] = 0xb8 # A = A + R8
+        expect[ 7 ] = { 'A': 7, 3: 5, 8: 2 }
 
-    program[ 6 ] = 0xff # NOP
-    program[ 7 ] = 0xff # NOP
+        program[ 6 ] = 0xff # NOP
+        program[ 7 ] = 0xff # NOP
 
-    progs.append( { 'imem': program,
-                    'expect': expect } )
+        progs.append( { 'imem': program,
+                        'expect': expect } )
+
+    # ---- test jumps ----------
+    if 3 in tests:
+        expect = dict()
+        program = dict()
+        pc = dict()
+        program[ 0 ] = 0xff # NOP
+        program[ 1 ] = 0xaf # JSR 1
+        program[ 2 ] = 1
+        pc[2] = [4] # load at 2, expect next is 4
+        expect[ 5 ] = { 15: 3 }
+
+        program[ 4 ] = 0xa0 # JMP 1
+        program[ 5 ] = 1
+        pc[5] = [7]
+
+        program[ 7 ] = 0xa0 # JMP 0
+        program[ 8 ] = 0
+        pc[8] = [9]
+
+        program[ 9  ] = 0xa0 # JMP -2
+        program[ 10 ] = 0x7e # -2 
+        pc[10] = [9]
+
+
+    if 4 in tests:
+        expect = dict()
+        program = dict()
+        pc = dict()
+        program[ 0 ] = 0xff # NOP
+        program[ 1 ] = 0xa0 # JMP 
+        program[ 2 ] = (294 >> 7) | 0x80
+        program[ 3 ] = (294 & 0x7f)
+        pc[3] = [ 294 + 4]
+
+        program[ 298 ] = 0xff # NOP
+        program[ 299 ] = 0xff # NOP
+
+        progs.append( { 'imem': program,
+                        'expect': expect,
+                        'pc' : pc} )
+
+    # ---- test sub ----------
+    if 5 in tests:
+        expect = dict()
+        program = dict()
+        program[ 0 ] = 0x92 # A = 2 
+        expect[ 2 ] = { 'A': 2 }
+
+        program[ 1 ] = 0x03 # R3 = A
+        expect[ 3 ] = { 'A': 2, 3: 2 }
+
+        program[ 2 ] = 0x97 # A = 7 
+        expect[ 4 ] = { 'A': 7 }
+
+        program[ 3 ] = 0xc3 # A = A - R3
+        expect[ 5 ] = { 'A': 5 }
+
+        program[ 4 ] = 0xc3 # A = A - R3
+        expect[ 6 ] = { 'A': 3 }
+
+        program[ 5 ] = 0xc3 # A = A - R3
+        expect[ 7 ] = { 'A': 1 }
+
+        program[ 6 ] = 0xc3 # A = A - R3
+        expect[ 8 ] = { 'A': 0xffffffff }
+
+        r3 = 1
+        program[ 7 ] = 0x83 # R3 = 1
+        program[ 8 ] = r3
+
+        r4 = 0x0f01
+        program[ 9 ] = 0x84 # R4 = 0x0f01
+        program[ 10 ] = (r4 >> 7) | 0x80
+        program[ 11 ] = (r4 & 0x7f)
+        program[ 12 ] = 0x14 # A = R4
+        program[ 13 ] = 0xc3 # A = A - R3
+        expect[ 15 ] = { 'A': 0x0f00, 3: 1, 4: 0x0f01 }
+
+        program[ 14 ] = 0xff # NOP
+        program[ 15 ] = 0xff # NOP
+
+
+
+
+        progs.append( { 'imem': program,
+                        'expect': expect } )
+
+
+
 
     icpu_tester = cpu_tester( clk, progs )
   
@@ -1048,6 +1252,10 @@ def main():
                 dmem_rd,
                 dmem_wr,
                 halt,
+                False,
+                None,
+                None,
+                None,
                 False)
     
 run_sim = False
