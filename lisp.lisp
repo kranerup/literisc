@@ -196,6 +196,7 @@
 ;(set-program dmem (string-to-mem "symbol") sym-string-start)
 
 
+
 ;;; read-c keeps it's state in global memory variables relative
 ;;; reader-state base address.
 ;;; 
@@ -656,6 +657,17 @@
      (j-a)
 ))
 
+(defvar func-read nil)
+(setq func-read
+  '( ;; read
+     ;; output: P0 - cons ptr to read result
+     (label l-read)
+     (push-srp)
+     (jsr f-scan)
+     (jsr l-parse)
+     (pop-a)
+     (j-a)))
+     
 (defvar func-rplca nil)
 (setq func-rplca
   '( ;; rplca
@@ -963,10 +975,9 @@
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
-     (jsr f-scan) ; -> P0 = read obj type, P1 = num (if type is num)
-     
-     (jsr l-parse) ; P0= obj type from scan, P1 = num -> object (cons ptr)
-     (r->a P0) (a->r R0)
+     ;(jsr f-scan) ; -> P0 = read obj type, P1 = num (if type is num)
+     ;(jsr l-parse) ; P0= obj type from scan, P1 = num -> object (cons ptr)
+     (jsr l-read)
      ;; [ sym1 | . ]
      ;;          |
      ;;          +->[ sym2 | . ]
@@ -1430,9 +1441,7 @@
         (add-symbol dmem "sym1" 0)
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
-                     ;(string-to-mem "(sym1 (sym2 sym1))") 
-                     ;(string-to-mem "(123 (sym2 sym1))") 
-                     (string-to-mem "123") 
+                     (string-to-mem "(123 (sym2 sym1))") 
                      n-source-start))))
 
 (defun t8 ()
@@ -1483,7 +1492,7 @@
               func-car func-parse func-rplca func-rplcd
               func-cons func-print-symbol func-print
               func-print-list func-str2num func-div10
-              func-print-number))
+              func-print-number func-read))
   (setf e (make-emulator *hello-world* dmem 200 debug))
   (if setup (funcall setup dmem))
   (run-with-curses e *symtab*))

@@ -844,6 +844,14 @@ def cpu_tester( clk, programs ):
                             else:
                                 print(f"check A MISS act:",obs_acc,
                                        "exp:", expect_reg[ adr ][ 'A' ])
+                        elif r == 'cc':
+                            if obs_cc == expect_reg[ adr ]['cc']:
+                                print("check cc OK ",print_cc(obs_cc))
+                            else:
+                                exp = expect_reg[ adr ]['cc']
+                                print("check cc MISS act:",print_cc(obs_cc),
+                                      "exp:",print_cc(exp))
+
                         else:
                             if obs_regs[ r ] == expect_reg[ adr ][ r ]:
                                 print(f"check r{r} OK", obs_regs[r])
@@ -1045,6 +1053,13 @@ def tb():
 
     return instances()
 
+def print_cc( cc ):
+    v = int(cc)
+    cc = modbv(v)[8:]
+    return "CC n:{} c:{} z:{} v:{} c8:{} z8:{} c16:{} z16:{}".format(
+            int(cc[7]), int(cc[6]), int(cc[5]), int(cc[4]), int(cc[3]), int(cc[2]), int(cc[1]), int(cc[0]) )
+
+
 def tb2():
 
     clk = Signal(bool())
@@ -1165,14 +1180,17 @@ def tb2():
         program[ 0 ] = 0x92 # A = 2 
         expect[ 2 ] = { 'A': 2 }
 
-        program[ 1 ] = 0x03 # R3 = A
+        program[ 1 ] = 0x03 # R3 = A = 2
         expect[ 3 ] = { 'A': 2, 3: 2 }
 
         program[ 2 ] = 0x97 # A = 7 
         expect[ 4 ] = { 'A': 7 }
 
-        program[ 3 ] = 0xc3 # A = A - R3
-        expect[ 5 ] = { 'A': 5 }
+        program[ 3 ] = 0xc3 # A = A - R3 = 7 - 2 = 5
+        expect[ 5 ] = { 'A': 5,
+                       #            8 16
+                       #        nczvczcz
+                       'cc' : 0b01001010 }
 
         program[ 4 ] = 0xc3 # A = A - R3
         expect[ 6 ] = { 'A': 3 }
@@ -1181,7 +1199,10 @@ def tb2():
         expect[ 7 ] = { 'A': 1 }
 
         program[ 6 ] = 0xc3 # A = A - R3
-        expect[ 8 ] = { 'A': 0xffffffff }
+        expect[ 8 ] = { 'A': 0xffffffff,
+                       #            8 16
+                       #        nczvczcz
+                       'cc' : 0b10000000 }
 
         r3 = 1
         program[ 7 ] = 0x83 # R3 = 1
@@ -1192,8 +1213,13 @@ def tb2():
         program[ 10 ] = (r4 >> 7) | 0x80
         program[ 11 ] = (r4 & 0x7f)
         program[ 12 ] = 0x14 # A = R4
-        program[ 13 ] = 0xc3 # A = A - R3
-        expect[ 15 ] = { 'A': 0x0f00, 3: 1, 4: 0x0f01 }
+        program[ 13 ] = 0xc3 # A = A - R3 = 0x0f01 - 1 = 0x0f00
+        expect[ 15 ] = { 'A': 0x0f00, \
+                         3: 1,
+                         4: 0x0f01,
+                         #            8 16
+                         #        nczvczcz
+                         'cc' : 0b01000110 }
 
         program[ 14 ] = 0xff # NOP
         program[ 15 ] = 0xff # NOP
