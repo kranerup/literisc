@@ -141,9 +141,11 @@ def cpu( clk, rstn,
 
     cc = Signal(modbv(0)[8:])
 
-    next_ir = Signal(modbv(0)[8:])
+    n_ir = Signal(modbv(0)[8:])
     curr_ir = Signal(modbv(0)[8:])
     ir = Signal(modbv(0)[8:])
+    n_ir2 = Signal(modbv(0)[8:])
+    ir2 = Signal(modbv(0)[8:])
     imm = Signal(modbv(0)[32:])
     imm_next = Signal(modbv(0)[32:])
     op = Signal(modbv(0)[4:])
@@ -154,8 +156,10 @@ def cpu( clk, rstn,
     alu_oper = Signal(modbv(0)[4:])
 
     sel_imem = Signal(modbv(0)[4:])
+    n_load_ir = Signal(modbv(0)[1:])
     load_ir = Signal(modbv(0)[1:])
-    new_ir = Signal(modbv(0)[1:])
+    n_load_ir2 = Signal(modbv(0)[1:])
+    load_ir2 = Signal(modbv(0)[1:])
     inc_pc = Signal(modbv(0)[1:])
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
@@ -188,6 +192,10 @@ def cpu( clk, rstn,
     reg_dest_srp  = Signal(modbv(0)[1:])
     dmem_adr_sel = Signal(modbv(0)[1:])
     dmem_wr_acc = Signal(modbv(0)[1:])
+    sel_reg_cnt = Signal(modbv(0)[1:])
+    load_reg_cnt = Signal(modbv(0)[1:])
+    n_reg_cnt  = Signal(modbv(0)[4:])
+    reg_cnt  = Signal(modbv(0)[4:])
 
     SP = 14
     SRP = 15
@@ -196,6 +204,9 @@ def cpu( clk, rstn,
     NEXT_INSTR = 1
     DECODE_INSTR = 2
     READ_IMM = 3
+    READ_PART2 = 4
+    REG_CNT = 5
+
     # sel_imem
     PC = 0
     # ALU operations
@@ -211,62 +222,87 @@ def cpu( clk, rstn,
     ALU_SUB    = 9
     # op code outer
 
-    ist = multiflop( next_state, state, clk, rstn, reset_value=RESET )
-    iir = multiflop( next_ir, ir, clk, rstn )
-    irc = multiflop( load_ir, new_ir, clk, rstn )
-    idf = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
-    ida = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
-    idr = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
-    ili = multiflop( n_load_imm, load_imm, clk, rstn )
+    ist  = multiflop( next_state, state, clk, rstn, reset_value=RESET )
+    iir  = multiflop( n_ir, ir, clk, rstn )
+    iir2 = multiflop( n_ir2, ir2, clk, rstn )
+    irc  = multiflop( n_load_ir, load_ir, clk, rstn )
+    irc2 = multiflop( n_load_ir2, load_ir2, clk, rstn )
+    idf  = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
+    ida  = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
+    idr  = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
+    ili  = multiflop( n_load_imm, load_imm, clk, rstn )
 
     @always_comb
     def ctrl():
         inc_pc.next = 0
-        load_ir.next = 0
+        n_load_ir.next = 0
         n_load_imm.next = 0
         next_state.next = NEXT_INSTR
         sel_imem.next = 0
         load_more.next = 0
+        load_reg_cnt.next = 0
 
         if halt == 1:
             next_state.next = NEXT_INSTR
-            load_ir.next = 1
+            n_load_ir.next = 1
             n_load_imm.next = 1
             inc_pc.next = 1
         else:
             if state == RESET:
-                load_ir.next = 1
+                n_load_ir.next = 1
                 n_load_imm.next = 0
                 inc_pc.next = 0
                 sel_imem.next = PC
                 next_state.next = NEXT_INSTR
             elif state == NEXT_INSTR:
                 if op == OPC_MVI or op == OPC_JMP:
-                    load_ir.next = 0
+                    n_load_ir.next = 0
                     n_load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = READ_IMM
+                elif op == OPC_NEXT and r_field == OPCI_POP_R:
+                    n_load_ir.next = 0
+                    n_load_ir2.next = 1
+                    inc_pc.next = 1
+                    sel_imem.next = PC
+                    next_state.next = READ_PART2
                 else:
-                    load_ir.next = 1
+                    n_load_ir.next = 1
                     n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = NEXT_INSTR
             elif state == READ_IMM:
                 if imm_more:
-                    load_ir.next = 0
+                    n_load_ir.next = 0
                     n_load_imm.next = 0
                     load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = READ_IMM
                 else:
-                    load_ir.next = 1
+                    n_load_ir.next = 1
                     n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = NEXT_INSTR
+            elif state == READ_PART2:
+                if op == OPC_NEXT and r_field == OPCI_POP_R:
+                    n_load_ir.next = 0
+                    inc_pc.next = 0
+                    load_reg_cnt.next = 1
+                    next_state.next = REG_CNT
+            elif state == REG_CNT:
+                if n_reg_cnt == 0:
+                    n_load_ir.next = 1
+                    inc_pc.next = 1
+                    sel_imem.next = PC
+                    next_state.next = NEXT_INSTR
+                else:
+                    n_load_ir.next = 0
+                    inc_pc.next = 0
+                    next_state.next = REG_CNT
 
     if sim_print:
         @always(clk.negedge)
@@ -464,6 +500,15 @@ def cpu( clk, rstn,
                 dmem_rd.next = 1
                 dmem_adr_sel.next = 1 # SP
                 inc_sp.next = 1
+            elif r_field == OPCI_POP_R: # for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
+                alu_oper.next = ALU_PASS_X
+                dmem_adr_sel.next = 1 # SP
+                if state == REG_CNT or state == READ_PART2:
+                    inc_sp.next = 1
+                    dmem_rd.next = 1
+                    sel_reg_cnt.next = 1
+                    n_reg_wr_deferred.next = 1
+                    n_reg_ld_rx.next = n_reg_cnt
 
 
     if sim_print:
@@ -504,7 +549,7 @@ def cpu( clk, rstn,
                     "sel_imem",sel_imem)
                 print(
                     "load_pc",load_pc,
-                    "load_ir",load_ir,
+                    "n_load_ir",n_load_ir,
                     "load_imm",load_imm,
                     "load_more",load_more)
 
@@ -551,11 +596,16 @@ def cpu( clk, rstn,
 
     @always_comb
     def irctrl():
-        if new_ir == 1:
+        if load_ir == 1:
             curr_ir.next = imem_dout[8:]
         else:
             curr_ir.next = ir
-        next_ir.next = curr_ir
+        n_ir.next = curr_ir
+
+        if load_ir2 == 1:
+            n_ir2.next = imem_dout[8:]
+        else:
+            n_ir2.next = ir2
 
     @always_comb
     def selrx():
@@ -595,6 +645,16 @@ def cpu( clk, rstn,
         imm_more.next = imem_dout[7]
 
     imm_ff = multiflop( imm_next, imm, clk, rstn )
+
+    rc_ff = multiflop( n_reg_cnt, reg_cnt, clk, rstn )
+
+    @always_comb
+    def rcnt():
+        if load_reg_cnt == 1:
+            n_reg_cnt.next = n_ir2[4:]
+        else:
+            n_reg_cnt.next = reg_cnt - 1
+
 
     @always_comb
     def selalu():
@@ -1513,14 +1573,30 @@ def test_12(program,expect,pc,dmem):
     program[ 10 ] = 0xff # NOP
     program[ 11 ] = 0xff # NOP
 
+def test_13(program,expect,pc,dmem):
+    # ---- test pop A --------
+    program[ 0 ] = 0x8e # SP = 294
+    program[ 1 ] = (294 >> 7) | 0x80
+    program[ 2 ] = (294 & 0x7f)
+    program[ 3 ] = 0xf5 # POP R3
+    program[ 4 ] = 0x03 # ...
+    dmem.append({'rd':1, 'adr':294, 'data':0x11 })
+    dmem.append({'rd':1, 'adr':298, 'data':0x22 })
+    dmem.append({'rd':1, 'adr':302, 'data':0x33 })
+    dmem.append({'rd':1, 'adr':306, 'data':0x44 })
+    expect[7] = { 3:0x11, 2:0x22, 1:0x33, 0:0x44, 'A':0x44 }
+    program[ 5 ] = 0x10 # A = R0 ; forward mem data to reg operand
+    program[ 6 ] = 0xff # NOP
+    program[ 7 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = list(range(1,13))
-    tests = [12]
+    tests = [13]
+    tests = list(range(1,13+1))
 
     for tid in tests:
         expect = dict()
