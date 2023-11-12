@@ -46,7 +46,7 @@ OPCI_ASR     = 3  # c = A, A = A >> 1, A<31> = A<30>
 OPCI_PUSH_R  = 4  # for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
 OPCI_POP_R   = 5  # for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
 OPCI_ST_SRP  = 6  # M[sp].l = srp
-OPCI_POP_A   = 7  # a = M[sp].l, sp = sp + 4
+OPCI_POP_A   = 7  # A = M[sp].l, sp = sp + 4
 OPCI_NEXT    = 8 
 OPCI_UNUSED1 = 9 
 OPCI_MASKB   = 10 # A = A & 0xff
@@ -116,6 +116,7 @@ def cpu( clk, rstn,
     pc_inc = Signal(modbv(0)[16:])
     reg_bank = [ Signal(modbv(0)[32:]) for _ in range(16) ]
     acc = Signal(modbv(0)[32:])
+    acc_ff = Signal(modbv(0)[32:])
     acc_next = Signal(modbv(0)[32:])
 
     n_n = Signal(modbv(0)[1:]) 
@@ -177,6 +178,8 @@ def cpu( clk, rstn,
     reg_wr_dmem = Signal(modbv(0)[1:])
     n_reg_wr_deferred = Signal(modbv(0)[1:])
     reg_wr_deferred = Signal(modbv(0)[1:])
+    n_acc_wr_deferred = Signal(modbv(0)[1:])
+    acc_wr_deferred = Signal(modbv(0)[1:])
     n_reg_ld_rx = Signal(modbv(0)[4:])
     reg_ld_rx = Signal(modbv(0)[4:])
     wr_acc = Signal(modbv(0)[1:])
@@ -212,6 +215,7 @@ def cpu( clk, rstn,
     iir = multiflop( next_ir, ir, clk, rstn )
     irc = multiflop( load_ir, new_ir, clk, rstn )
     idf = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
+    ida = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
     idr = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
     ili = multiflop( n_load_imm, load_imm, clk, rstn )
 
@@ -299,6 +303,7 @@ def cpu( clk, rstn,
         dmem_wr_acc.next = 0
         dmem_adr_sel.next = 0
         direct_load_imm.next = 0
+        n_acc_wr_deferred.next = 0
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -318,7 +323,7 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
-        elif op == OPC_LD_A:
+        elif op == OPC_LD_A: # Rx = M[A].l
             alu_oper.next = ALU_PASS_Y
             op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0 # D.C.
@@ -326,6 +331,15 @@ def cpu( clk, rstn,
             alu_y_pc.next = 0 # acc
             n_reg_wr_deferred.next = 1
             n_reg_ld_rx.next = r_field
+            dmem_rd.next = 1
+            dmem_adr_sel.next = 0 # ALU
+        elif op == OPC_LD_RX: # A = M[Rx].l
+            alu_oper.next = ALU_PASS_X
+            op_sel_rx.next = 0 # D.C.
+            alu_x_imm.next = 0
+            wr_acc.next = 0
+            alu_y_pc.next = 0 # acc
+            n_acc_wr_deferred.next = 1
             dmem_rd.next = 1
             dmem_adr_sel.next = 0 # ALU
         elif op == OPC_ST_A:
@@ -440,6 +454,16 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 0
+            elif r_field == OPCI_POP_A: # A = M[sp].l, sp = sp + 4
+                alu_oper.next = ALU_PASS_X
+                op_sel_rx.next = 0 # D.C.
+                alu_x_imm.next = 0
+                wr_acc.next = 0
+                alu_y_pc.next = 0 # acc
+                n_acc_wr_deferred.next = 1
+                dmem_rd.next = 1
+                dmem_adr_sel.next = 1 # SP
+                inc_sp.next = 1
 
 
     if sim_print:
@@ -540,6 +564,13 @@ def cpu( clk, rstn,
             rx.next = dmem_dout
         else:
             rx.next = reg_bank[ r_field ]
+
+    @always_comb
+    def accforw():
+        if acc_wr_deferred==1:
+            acc.next = dmem_dout
+        else:
+            acc.next = acc_ff
 
     # 7-bits
     #   [    instr        ]
@@ -697,9 +728,10 @@ def cpu( clk, rstn,
     @always_comb
     def dmema():
         dmem_adr.next = 0
-        if dmem_adr_sel == 0:
+        if dmem_adr_sel == 0: # ACC
             dmem_adr.next = alu_out
-        # else: SP
+        elif dmem_adr_sel == 1: # SP
+            dmem_adr.next = reg_bank[ SP ]
 
     @always_comb
     def dmemd():
@@ -712,6 +744,8 @@ def cpu( clk, rstn,
     def to_acc():
         if wr_acc:
             acc_next.next = reg_wr_op
+        elif acc_wr_deferred==1:
+            acc_next.next = dmem_dout
         else:
             acc_next.next = acc
 
@@ -726,7 +760,7 @@ def cpu( clk, rstn,
                 print("wr_acc",reg_wr_op)
 
 
-    iacc_ff = multiflop( acc_next, acc, clk, rstn )
+    iacc_ff = multiflop( acc_next, acc_ff, clk, rstn )
 
     @always_comb
     def regd():
@@ -1442,14 +1476,51 @@ def test_10(program,expect,pc,dmem):
     pc[1] = [ 7 ]
     program[ 7 ] = 0xff # NOP
 
+def test_11(program,expect,pc,dmem):
+    # ---- test load to A --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0x03 # R3 = A = 7
+    program[ 2 ] = 0x43 # A = M[ R3 ].l
+    dmem.append({'rd':1, 'adr':7, 'data':123 })
+    expect[5] = { 'A': 123, 3: 7 }
+    program[ 3 ] = 0xff # NOP
+    program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0x43 # A = M[ R3 ].l
+    dmem.append({'rd':1, 'adr':7, 'data':33 })
+    program[ 6 ] = 0x01 # R1 = A = 7, use A directly after load
+    expect[8] = { 'A': 33, 1: 33, 3: 7 }
+    program[ 7 ] = 0xff # NOP
+    program[ 8 ] = 0xff # NOP
+
+def test_12(program,expect,pc,dmem):
+    # ---- test pop A --------
+    program[ 0 ] = 0x8e # SP = 294
+    program[ 1 ] = (294 >> 7) | 0x80
+    program[ 2 ] = (294 & 0x7f)
+    program[ 3 ] = 0xff # NOP
+    program[ 4 ] = 0xf7 # POP A
+    dmem.append({'rd':1, 'adr':294, 'data':123 })
+    expect[6] = { 'A': 123, 14: 298 }
+    program[ 5 ] = 0x01 # R1 = A = 123, use A directly after load
+    expect[7] = { 'A': 123, 1: 123, 14: 298 }
+    program[ 6 ] = 0xff # NOP
+    program[ 7 ] = 0xff # NOP
+    program[ 8 ] = 0xf7 # POP A
+    dmem.append({'rd':1, 'adr':298, 'data':32 })
+    expect[10] = { 'A': 32, 14: 302 }
+    program[ 9 ] = 0x1e # A = SP
+    expect[11] = { 'A': 302, 14: 302 }
+    program[ 10 ] = 0xff # NOP
+    program[ 11 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [10]
-    tests = list(range(1,11))
+    tests = list(range(1,13))
+    tests = [12]
 
     for tid in tests:
         expect = dict()
@@ -1482,7 +1553,7 @@ def main():
         traceSignals.filename = 'trace'
         itb = traceSignals( tb2 ) 
         sim = Simulation( itb )
-        sim.run( 2000 )
+        sim.run( 20000 )
     else:
         clk = Signal(bool())
         rstn = Signal(intbv(0)[1:0])
