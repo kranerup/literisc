@@ -46,7 +46,7 @@ OPCI_LSR     = 2  # c = A, A = A >> 1, A<31> = 0
 OPCI_ASR     = 3  # c = A, A = A >> 1, A<31> = A<30>
 OPCI_PUSH_R  = 4  # for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
 OPCI_POP_R   = 5  # for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
-OPCI_ST_SRP  = 6  # M[sp].l = srp
+OPCI_PUSH_SRP= 6  # sp = sp -4, M[sp] = srp
 OPCI_POP_A   = 7  # A = M[sp].l, sp = sp + 4
 OPCI_NEXT    = 8 
 OPCI_UNUSED1 = 9 
@@ -198,6 +198,7 @@ def cpu( clk, rstn,
     n_reg_cnt  = Signal(modbv(0)[4:])
     reg_cnt  = Signal(modbv(0)[4:])
     n_sp = Signal(modbv(0)[32:])
+    sel_srp = Signal(modbv(0)[1:])
 
     SP = 14
     SRP = 15
@@ -361,6 +362,7 @@ def cpu( clk, rstn,
         dmem_adr_sel.next = 0
         direct_load_imm.next = 0
         n_acc_wr_deferred.next = 0
+        sel_srp.next = 0
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -511,6 +513,12 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 0
+            elif r_field == OPCI_PUSH_SRP: # sp = sp -4, M[sp] = srp
+                dmem_wr.next = 1
+                dmem_adr_sel.next = 2 # next SP
+                dmem_wr_acc.next = 0 # Rx
+                dec_sp.next = 1
+                sel_srp.next = 1
             elif r_field == OPCI_POP_A: # A = M[sp].l, sp = sp + 4
                 alu_oper.next = ALU_PASS_X
                 op_sel_rx.next = 0 # D.C.
@@ -638,6 +646,8 @@ def cpu( clk, rstn,
     def rxidx():
         if sel_reg_cnt == 1:
             rx_idx.next = n_reg_cnt
+        elif sel_srp == 1:
+            rx_idx.next = SRP
         else:
             rx_idx.next = r_field
 

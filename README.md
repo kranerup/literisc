@@ -90,8 +90,7 @@ instruction that could address three registers.
     3        asr   A                 c = A, A = A >> 1, A<31> = A<30>
     4 see below
     5 see below
-    (6    stst  srp           M[sp].l = srp)
-    6        push srp        sp = sp - 4, M[sp].l = srp
+    6        push srp                sp = sp - 4, M[sp].l = srp
     7        popa                    a = M[sp].l, sp = sp + 4
     8 
        [ o o o o  r r r r ]

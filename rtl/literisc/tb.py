@@ -735,14 +735,27 @@ def test_14(program,expect,pc,dmem):
     program[ 13 ] = 0xff # NOP
     program[ 14 ] = 0xff # NOP
 
+def test_15(program,expect,pc,dmem):
+    # ---- test push srp --------
+    program[ 0 ] = 0x8e # SP = 294
+    program[ 1 ] = (294 >> 7) | 0x80
+    program[ 2 ] = (294 & 0x7f)
+    program[ 3  ] = 0x8f # SRP = 0x34
+    program[ 4  ] = 0x34
+    program[ 5  ] = 0xf6 # PUSH SRP
+    dmem.append({'rd':0, 'adr':290, 'data':0x34 })
+    expect[7] = { 14: 290 }
+    program[ 6  ] = 0xff # NOP
+    program[ 7  ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = list(range(1,14+1))
-    tests = [14]
+    tests = [15]
+    tests = list(range(1,15+1))
 
     for tid in tests:
         expect = dict()
