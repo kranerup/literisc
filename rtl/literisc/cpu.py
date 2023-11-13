@@ -20,6 +20,7 @@ OPC_SUB       = 12 # A = A - Rx
 OPC_AND       = 13 # A = A & Rx
 OPC_OR        = 14 # A = A | Rx
 OPC_NEXT      = 15
+
 # op code jump
 OPCJ_J        = 0  # jump always
 OPCJ_JLT      = 1  # jump <   signed      n ^ v
@@ -55,6 +56,7 @@ OPCI_SEXB    = 12 # A<31:8>  = A<7>
 OPCI_SEXW    = 13 # A<31:16> = A<15>
 OPCI_J_A     = 14 # PC = A
 OPCI_NOP     = 15 # NOP
+
 # op code inner 2
 OPCI2_LDB_A_OFFS = 2  # Rx = M[A+nn].b
 OPCI2_LDB_A      = 3  # Rx = M[A].b
@@ -187,7 +189,7 @@ def cpu( clk, rstn,
     wr_reg = Signal(modbv(0)[1:])
     reg_dest  = Signal(modbv(0)[4:])
     reg_dest_srp  = Signal(modbv(0)[1:])
-    dmem_adr_sel = Signal(modbv(0)[1:])
+    dmem_adr_sel = Signal(modbv(0)[2:])
     dmem_wr_acc = Signal(modbv(0)[1:])
     sel_reg_cnt = Signal(modbv(0)[1:])
     load_reg_cnt = Signal(modbv(0)[1:])
@@ -195,6 +197,7 @@ def cpu( clk, rstn,
     inc_reg_cnt = Signal(modbv(0)[1:])
     n_reg_cnt  = Signal(modbv(0)[4:])
     reg_cnt  = Signal(modbv(0)[4:])
+    n_sp = Signal(modbv(0)[32:])
 
     SP = 14
     SRP = 15
@@ -527,7 +530,7 @@ def cpu( clk, rstn,
                     n_reg_wr_deferred.next = 1
                     n_reg_ld_rx.next = n_reg_cnt
             elif r_field == OPCI_PUSH_R:  # for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
-                dmem_adr_sel.next = 1 # SP
+                dmem_adr_sel.next = 2 # next SP
                 inc_reg_cnt.next = 1
                 if state == REG_CNT or state == READ_PART2:
                     dec_sp.next = 1
@@ -826,6 +829,8 @@ def cpu( clk, rstn,
             dmem_adr.next = alu_out
         elif dmem_adr_sel == 1: # SP
             dmem_adr.next = reg_bank[ SP ]
+        elif dmem_adr_sel == 2: # next SP
+            dmem_adr.next = n_sp
 
     @always_comb
     def dmemd():
@@ -863,6 +868,13 @@ def cpu( clk, rstn,
         else:
             reg_dest.next = r_field
 
+    @always_comb
+    def spinc():
+        if inc_sp:
+            n_sp.next = reg_bank[ SP ] + 4
+        elif dec_sp:
+            n_sp.next = reg_bank[ SP ] - 4
+
     @always(clk.posedge, rstn.negedge)
     def reg_wr():
         if rstn == 0:
@@ -874,10 +886,9 @@ def cpu( clk, rstn,
 
             if wr_reg:
                 reg_bank[ reg_dest ].next = reg_wr_op
-            if inc_sp:
-                reg_bank[ SP ].next = reg_bank[ SP ] + 4
-            elif dec_sp:
-                reg_bank[ SP ].next = reg_bank[ SP ] - 4
+
+            if inc_sp == 1 or dec_sp == 1:
+                reg_bank[ SP ].next = n_sp
 
     if sim_print:
         @always(clk.negedge)

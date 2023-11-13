@@ -715,21 +715,22 @@ def test_14(program,expect,pc,dmem):
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
     
-    program[ 3  ] = 0x83 # R3 = 0x33
-    program[ 4  ] = 0x33
-    program[ 5  ] = 0x82 # R2 = 0x22
-    program[ 6  ] = 0x22
-    program[ 7  ] = 0x81 # R1 = 0x11
-    program[ 8  ] = 0x11
-    program[ 9  ] = 0x80 # R0 = 0x00
-    program[ 10 ] = 0x00
+    program[ 3  ] = 0x83 # R3 = 0x34
+    program[ 4  ] = 0x34
+    program[ 5  ] = 0x82 # R2 = 0x33
+    program[ 6  ] = 0x33
+    program[ 7  ] = 0x81 # R1 = 0x22
+    program[ 8  ] = 0x22
+    program[ 9  ] = 0x97 # A = 7
+    program[ 10 ] = 0x00 # R0 = A # R0 is first to be pushed
 
     program[ 11 ] = 0xf4 # PUSH R3
     program[ 12 ] = 0x03 # ...
-    dmem.append({'rd':0, 'adr':294, 'data':0x00 })
-    dmem.append({'rd':0, 'adr':290, 'data':0x11 })
+    dmem.append({'rd':0, 'adr':290, 'data':7 })
     dmem.append({'rd':0, 'adr':286, 'data':0x22 })
     dmem.append({'rd':0, 'adr':282, 'data':0x33 })
+    dmem.append({'rd':0, 'adr':278, 'data':0x34 })
+    expect[14] = { 14: 278 }
 
     program[ 13 ] = 0xff # NOP
     program[ 14 ] = 0xff # NOP
@@ -740,8 +741,8 @@ def tb2():
 
     progs = []
 
-    tests = [14]
     tests = list(range(1,14+1))
+    tests = [14]
 
     for tid in tests:
         expect = dict()
