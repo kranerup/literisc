@@ -240,6 +240,7 @@ def cpu( clk, rstn,
         inc_pc.next = 0
         n_load_ir.next = 0
         n_load_imm.next = 0
+        n_load_ir2.next = 0
         next_state.next = NEXT_INSTR
         sel_imem.next = 0
         load_more.next = 0
@@ -363,6 +364,8 @@ def cpu( clk, rstn,
         direct_load_imm.next = 0
         n_acc_wr_deferred.next = 0
         sel_srp.next = 0
+        inc_reg_cnt.next = 0
+        sel_reg_cnt.next = 0
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -489,6 +492,20 @@ def cpu( clk, rstn,
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
+        elif op == OPC_AND:
+            alu_oper.next = ALU_AND
+            op_sel_rx.next = 1
+            alu_x_imm.next = 0
+            wr_acc.next = 1
+            alu_y_pc.next = 0 # acc
+            reg_wr_alu.next = 1
+        elif op == OPC_OR:
+            alu_oper.next = ALU_OR
+            op_sel_rx.next = 1
+            alu_x_imm.next = 0
+            wr_acc.next = 1
+            alu_y_pc.next = 0 # acc
+            reg_wr_alu.next = 1
         elif op == OPC_SUB:
             alu_oper.next = ALU_SUB
             op_sel_rx.next = 1
@@ -503,6 +520,26 @@ def cpu( clk, rstn,
                 op_sel_rx.next = 1
                 alu_x_imm.next = 0
                 wr_acc.next = 0
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_NOT:
+                alu_oper.next = ALU_NOT
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_LSL:
+                alu_oper.next = ALU_LSL
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_LSR:
+                alu_oper.next = ALU_LSR
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_ASR:
+                alu_oper.next = ALU_ASR
+                wr_acc.next = 1
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 1
             elif r_field == OPCI_J_A:
@@ -784,7 +821,6 @@ def cpu( clk, rstn,
             alu_out.next = alu_op_x + alu_op_y
         elif alu_oper == ALU_SUB:
 
-
             sub( alu_op_y, alu_op_x, tmp, extended_x, extended_y )
             flags( alu_op_y, alu_op_x, tmp, ln, lz8,  lv, lc8,  8 )
             flags( alu_op_y, alu_op_x, tmp, ln, lz16, lv, lc16, 16 )
@@ -799,6 +835,7 @@ def cpu( clk, rstn,
             n_c16.next = lc16
             n_z16.next = lz16
             alu_out.next = tmp
+
         elif alu_oper == ALU_AND:
             alu_out.next = alu_op_x & alu_op_y
         elif alu_oper == ALU_OR:
@@ -880,6 +917,7 @@ def cpu( clk, rstn,
 
     @always_comb
     def spinc():
+        n_sp.next = 0
         if inc_sp:
             n_sp.next = reg_bank[ SP ] + 4
         elif dec_sp:

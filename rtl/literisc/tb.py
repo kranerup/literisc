@@ -748,14 +748,50 @@ def test_15(program,expect,pc,dmem):
     program[ 6  ] = 0xff # NOP
     program[ 7  ] = 0xff # NOP
 
+def test_16(program,expect,pc,dmem):
+    # ---- test not, shifts --------
+    program[ 0 ] = 0x82 # R2 = 294
+    program[ 1 ] = (294 >> 7) | 0x80
+    program[ 2 ] = (294 & 0x7f)
+    program[ 3  ] = 0x12 # A = R2
+    program[ 4  ] = 0xf0 # A = ~A
+    v = ( ~294 & 0xffffffff ) # 0xfffffed9
+    expect[6] = { 'A': v , 2: 294 }
+    program[ 5  ] = 0xff # NOP
+    program[ 6  ] = 0xff # NOP
+    program[ 7  ] = 0xf1 # A <<= 1
+    expect[9] = { 'A': 0xfffffdb2, 2: 294 }
+    program[ 8  ] = 0xff # NOP
+    program[ 9  ] = 0xff # NOP
+    program[ 10 ] = 0xf3 # A >>= 1 (arithmetic)
+    expect[12] = { 'A': 0xfffffed9, 2: 294 }
+    program[ 11 ] = 0xff # NOP
+    program[ 12 ] = 0xff # NOP
+    program[ 13 ] = 0xf2 # A >>= 1
+    expect[15] = { 'A': 0x7fffff6c, 2: 294 }
+    program[ 14 ] = 0xff # NOP
+    program[ 15 ] = 0xff # NOP
+
+def test_17(program,expect,pc,dmem):
+    # ---- test and/or --------
+    program[ 0  ] = 0x9d # A = -3
+    program[ 1  ] = 0x83 # R3 = 0x3f
+    program[ 2  ] = 0x3f
+    program[ 3  ] = 0xd3 # A = A & R3
+    expect[5] = { 'A': (-3 & 0xffffffff) & 0x3f, 3: 0x3f }
+    program[ 4  ] = 0xe3 # A = A | R3
+    expect[6] = { 'A': 0x3f, 3: 0x3f }
+    program[ 5  ] = 0xff # NOP
+    program[ 6  ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [15]
-    tests = list(range(1,15+1))
+    tests = [17]
+    tests = list(range(1,17+1))
 
     for tid in tests:
         expect = dict()
