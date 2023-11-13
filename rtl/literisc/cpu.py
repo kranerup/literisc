@@ -90,14 +90,6 @@ for s,v in curr_globs.items():
         inner_to_sym[v] = s
         sym_to_op[s] = v
 
-class InstrCov(Struct):
-    def __init__(self):
-        self.valid     = Signal(modbv(0)[1:])
-        self.op        = Signal(modbv(0)[4:])
-        self.op_jmp    = Signal(modbv(0)[4:])
-        self.op_inner  = Signal(modbv(0)[4:])
-        self.op_inner2 = Signal(modbv(0)[4:])
-
 def cpu( clk, rstn,
          imem_dout,
          imem_adr,
@@ -155,6 +147,7 @@ def cpu( clk, rstn,
     op = Signal(modbv(0)[4:])
     rx = Signal(modbv(0)[32:])
     r_field  = Signal(modbv(0)[4:])
+    rx_idx  = Signal(modbv(0)[4:])
     state = Signal(modbv(0)[4:])
     next_state = Signal(modbv(0)[4:])
     alu_oper = Signal(modbv(0)[4:])
@@ -198,6 +191,8 @@ def cpu( clk, rstn,
     dmem_wr_acc = Signal(modbv(0)[1:])
     sel_reg_cnt = Signal(modbv(0)[1:])
     load_reg_cnt = Signal(modbv(0)[1:])
+    clear_reg_cnt = Signal(modbv(0)[1:])
+    inc_reg_cnt = Signal(modbv(0)[1:])
     n_reg_cnt  = Signal(modbv(0)[4:])
     reg_cnt  = Signal(modbv(0)[4:])
 
@@ -245,6 +240,7 @@ def cpu( clk, rstn,
         sel_imem.next = 0
         load_more.next = 0
         load_reg_cnt.next = 0
+        clear_reg_cnt.next = 0
 
         if halt == 1:
             next_state.next = NEXT_INSTR
@@ -265,7 +261,9 @@ def cpu( clk, rstn,
                     inc_pc.next = 1
                     sel_imem.next = PC
                     next_state.next = READ_IMM
-                elif op == OPC_NEXT and r_field == OPCI_POP_R:
+                elif op == OPC_NEXT and (
+                        r_field == OPCI_POP_R or
+                        r_field == OPCI_PUSH_R ):
                     n_load_ir.next = 0
                     n_load_ir2.next = 1
                     inc_pc.next = 1
@@ -297,16 +295,32 @@ def cpu( clk, rstn,
                     inc_pc.next = 0
                     load_reg_cnt.next = 1
                     next_state.next = REG_CNT
-            elif state == REG_CNT:
-                if n_reg_cnt == 0:
-                    n_load_ir.next = 1
-                    inc_pc.next = 1
-                    sel_imem.next = PC
-                    next_state.next = NEXT_INSTR
-                else:
+                elif op == OPC_NEXT and r_field == OPCI_PUSH_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
+                    clear_reg_cnt.next = 1
                     next_state.next = REG_CNT
+            elif state == REG_CNT:
+                if r_field == OPCI_POP_R:
+                    if n_reg_cnt == 0:
+                        n_load_ir.next = 1
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        next_state.next = NEXT_INSTR
+                    else:
+                        n_load_ir.next = 0
+                        inc_pc.next = 0
+                        next_state.next = REG_CNT
+                elif r_field == OPCI_PUSH_R:
+                    if n_reg_cnt == ir2[4:]:
+                        n_load_ir.next = 1
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        next_state.next = NEXT_INSTR
+                    else:
+                        n_load_ir.next = 0
+                        inc_pc.next = 0
+                        next_state.next = REG_CNT
 
     if sim_print:
         @always(clk.negedge)
@@ -510,9 +524,15 @@ def cpu( clk, rstn,
                 if state == REG_CNT or state == READ_PART2:
                     inc_sp.next = 1
                     dmem_rd.next = 1
-                    sel_reg_cnt.next = 1
                     n_reg_wr_deferred.next = 1
                     n_reg_ld_rx.next = n_reg_cnt
+            elif r_field == OPCI_PUSH_R:  # for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
+                dmem_adr_sel.next = 1 # SP
+                inc_reg_cnt.next = 1
+                if state == REG_CNT or state == READ_PART2:
+                    dec_sp.next = 1
+                    dmem_wr.next = 1
+                    sel_reg_cnt.next = 1
 
 
     if sim_print:
@@ -612,12 +632,18 @@ def cpu( clk, rstn,
             n_ir2.next = ir2
 
     @always_comb
+    def rxidx():
+        if sel_reg_cnt == 1:
+            rx_idx.next = n_reg_cnt
+        else:
+            rx_idx.next = r_field
+
+    @always_comb
     def selrx():
-        #if op_sel_rx:
         if reg_wr_deferred==1 and reg_ld_rx == r_field:
             rx.next = dmem_dout
         else:
-            rx.next = reg_bank[ r_field ]
+            rx.next = reg_bank[ rx_idx ]
 
     @always_comb
     def accforw():
@@ -656,6 +682,10 @@ def cpu( clk, rstn,
     def rcnt():
         if load_reg_cnt == 1:
             n_reg_cnt.next = n_ir2[4:]
+        elif clear_reg_cnt == 1:
+            n_reg_cnt.next = 0
+        elif inc_reg_cnt == 1:
+            n_reg_cnt.next = reg_cnt + 1
         else:
             n_reg_cnt.next = reg_cnt - 1
 

@@ -161,6 +161,12 @@ def cpu_tester( clk, programs ):
                             else:
                                 print("check dmem wr adr MISS act:", dadr, "exp:", exp_dmem['adr'])
                                 any_fail = True
+                            if dmem_din.val == exp_dmem['data']:
+                                print("check dmem wr data ok", dmem_din.val)
+                            else:
+                                print("check dmem wr data MISS act:",
+                                      dmem_din.val, "exp:", exp_dmem['data'])
+
                         else:
                             print("check dmem MISS act: wr exp: rd")
                             any_fail = True
@@ -688,7 +694,7 @@ def test_12(program,expect,pc,dmem):
     program[ 11 ] = 0xff # NOP
 
 def test_13(program,expect,pc,dmem):
-    # ---- test pop A --------
+    # ---- test pop Rx --------
     program[ 0 ] = 0x8e # SP = 294
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
@@ -703,14 +709,39 @@ def test_13(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
+def test_14(program,expect,pc,dmem):
+    # ---- test push Rx --------
+    program[ 0 ] = 0x8e # SP = 294
+    program[ 1 ] = (294 >> 7) | 0x80
+    program[ 2 ] = (294 & 0x7f)
+    
+    program[ 3  ] = 0x83 # R3 = 0x33
+    program[ 4  ] = 0x33
+    program[ 5  ] = 0x82 # R2 = 0x22
+    program[ 6  ] = 0x22
+    program[ 7  ] = 0x81 # R1 = 0x11
+    program[ 8  ] = 0x11
+    program[ 9  ] = 0x80 # R0 = 0x00
+    program[ 10 ] = 0x00
+
+    program[ 11 ] = 0xf4 # PUSH R3
+    program[ 12 ] = 0x03 # ...
+    dmem.append({'rd':0, 'adr':294, 'data':0x00 })
+    dmem.append({'rd':0, 'adr':290, 'data':0x11 })
+    dmem.append({'rd':0, 'adr':286, 'data':0x22 })
+    dmem.append({'rd':0, 'adr':282, 'data':0x33 })
+
+    program[ 13 ] = 0xff # NOP
+    program[ 14 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [13]
-    tests = list(range(1,13+1))
+    tests = [14]
+    tests = list(range(1,14+1))
 
     for tid in tests:
         expect = dict()
