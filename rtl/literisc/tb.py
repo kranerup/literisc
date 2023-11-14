@@ -784,14 +784,30 @@ def test_17(program,expect,pc,dmem):
     program[ 5  ] = 0xff # NOP
     program[ 6  ] = 0xff # NOP
 
+def test_18(program,expect,pc,dmem):
+    # ---- test and/or --------
+    program[ 0  ] = 0x9d # A = -3
+    program[ 1  ] = 0xfa # A = A & 0xff = 0xfd
+    expect[3] = { 'A': 0xfd }
+    program[ 2  ] = 0x9d # A = -3
+    program[ 3  ] = 0xfb # A = A & 0xffff = 0xfffd
+    expect[5] = { 'A': 0xfffd }
+    program[ 4  ] = 0xfc # A<31:8>  = A<7>
+    expect[6] = { 'A': 0xfffffffd }
+    program[ 5  ] = 0xfb # A = A & 0xffff = 0xfffd
+    program[ 6  ] = 0xfd # A<31:8>  = A<7>
+    expect[8] = { 'A': 0xfffffffd }
+    program[ 7  ] = 0xff # NOP
+    program[ 8  ] = 0xff # NOP
+    
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [17]
-    tests = list(range(1,17+1))
+    tests = [18]
+    tests = list(range(1,18+1))
 
     for tid in tests:
         expect = dict()

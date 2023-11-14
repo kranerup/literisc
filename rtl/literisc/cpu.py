@@ -223,6 +223,11 @@ def cpu( clk, rstn,
     ALU_OR     = 7
     ALU_NOT    = 8
     ALU_SUB    = 9
+    ALU_MASKB  = 10
+    ALU_MASKW  = 11
+    ALU_SEXB   = 12
+    ALU_SEXW   = 13
+
     # op code outer
 
     ist  = multiflop( next_state, state, clk, rstn, reset_value=RESET )
@@ -542,6 +547,26 @@ def cpu( clk, rstn,
                 wr_acc.next = 1
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 1
+            elif r_field == OPCI_MASKB:
+                alu_oper.next = ALU_MASKB
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_MASKW:
+                alu_oper.next = ALU_MASKW
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_SEXB:
+                alu_oper.next = ALU_SEXB
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
+            elif r_field == OPCI_SEXW:
+                alu_oper.next = ALU_SEXW
+                wr_acc.next = 1
+                alu_y_pc.next = 0 # acc
+                reg_wr_alu.next = 1
             elif r_field == OPCI_J_A:
                 load_pc.next = 1
                 alu_oper.next = ALU_PASS_Y
@@ -842,6 +867,24 @@ def cpu( clk, rstn,
             alu_out.next = alu_op_x | alu_op_y
         elif alu_oper == ALU_NOT:
             alu_out.next = ~alu_op_y
+        elif alu_oper == ALU_MASKB:
+            alu_out.next = alu_op_y[8:]
+        elif alu_oper == ALU_MASKW:
+            alu_out.next = alu_op_y[16:]
+        elif alu_oper == ALU_SEXB:
+            tmp[:] = alu_op_y[8:]
+            if alu_op_y[7] == 1:
+                tmp[32:8] = 0xffffff
+            else:
+                tmp[32:8] = 0
+            alu_out.next = tmp
+        elif alu_oper == ALU_SEXW:
+            tmp[:] = alu_op_y[16:]
+            if alu_op_y[15] == 1:
+                tmp[32:16] = 0xffff
+            else:
+                tmp[32:16] = 0
+            alu_out.next = tmp
 
     @always_comb
     def ccreg():
