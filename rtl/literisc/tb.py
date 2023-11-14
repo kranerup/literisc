@@ -800,14 +800,25 @@ def test_18(program,expect,pc,dmem):
     program[ 7  ] = 0xff # NOP
     program[ 8  ] = 0xff # NOP
     
+def test_19(program,expect,pc,dmem):
+    # ---- test load w offs --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0x21 # R1 = M[ A + 23 ].l
+    program[ 2 ] = 23
+    dmem.append({'rd':1, 'adr':30, 'data':0x1234 })
+    expect[5] = { 'A': 0x1234, 1: 0x1234 }
+    program[ 3 ] = 0x11 # A = R1 ; forward mem data to reg operand
+    program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [18]
-    tests = list(range(1,18+1))
+    tests = [19]
+    tests = list(range(1,19+1))
 
     for tid in tests:
         expect = dict()

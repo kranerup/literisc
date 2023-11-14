@@ -71,26 +71,55 @@ OPCI2_STW_A_OFFS = 13 # M[A+nn].w = Rx
 OPCI2_STW_A      = 14 # M[A].w = Rx
 OPCI2_STW_RX     = 15 # M[Rx].w = A
 
+# state
+ST_RESET = 0
+ST_NEXT_INSTR = 1
+ST_DECODE_INSTR = 2
+ST_READ_IMM = 3
+ST_READ_PART2 = 4
+ST_REG_CNT = 5
+
+# ALU operations
+ALU_PASS_X = 0
+ALU_PASS_Y = 1
+ALU_LSL    = 2
+ALU_LSR    = 3
+ALU_ASR    = 4
+ALU_ADD    = 5
+ALU_AND    = 6
+ALU_OR     = 7
+ALU_NOT    = 8
+ALU_SUB    = 9
+ALU_MASKB  = 10
+ALU_MASKW  = 11
+ALU_SEXB   = 12
+ALU_SEXW   = 13
+
 # create symbolic names mapping from the constants
+curr_globs = dict(globals())
+
+state_to_sym = {}
 sym_to_op = {}
 op_to_sym = {}
-curr_globs = dict(globals())
+alu_to_sym = {}
+inner_to_sym = {}
+jmp_to_sym = {}
+
 for s,v in curr_globs.items():
     if s.startswith("OPC_"):
         op_to_sym[v] = s
         sym_to_op[s] = v
-
-jmp_to_sym = {}
-for s,v in curr_globs.items():
     if s.startswith("OPCJ_"):
         jmp_to_sym[v] = s
         sym_to_op[s] = v
-
-inner_to_sym = {}
-for s,v in curr_globs.items():
     if s.startswith("OPCI_"):
         inner_to_sym[v] = s
         sym_to_op[s] = v
+    if s.startswith("ST_"):
+        state_to_sym[v] = s
+    if s.startswith("ALU_"):
+        alu_to_sym[v] = s
+
 
 def cpu( clk, rstn,
          imem_dout,
@@ -202,35 +231,13 @@ def cpu( clk, rstn,
 
     SP = 14
     SRP = 15
-    # state
-    RESET = 0
-    NEXT_INSTR = 1
-    DECODE_INSTR = 2
-    READ_IMM = 3
-    READ_PART2 = 4
-    REG_CNT = 5
 
     # sel_imem
     PC = 0
-    # ALU operations
-    ALU_PASS_X = 0
-    ALU_PASS_Y = 1
-    ALU_LSL    = 2
-    ALU_LSR    = 3
-    ALU_ASR    = 4
-    ALU_ADD    = 5
-    ALU_AND    = 6
-    ALU_OR     = 7
-    ALU_NOT    = 8
-    ALU_SUB    = 9
-    ALU_MASKB  = 10
-    ALU_MASKW  = 11
-    ALU_SEXB   = 12
-    ALU_SEXW   = 13
 
     # op code outer
 
-    ist  = multiflop( next_state, state, clk, rstn, reset_value=RESET )
+    ist  = multiflop( next_state, state, clk, rstn, reset_value=ST_RESET )
     iir  = multiflop( n_ir, ir, clk, rstn )
     iir2 = multiflop( n_ir2, ir2, clk, rstn )
     irc  = multiflop( n_load_ir, load_ir, clk, rstn )
@@ -246,31 +253,31 @@ def cpu( clk, rstn,
         n_load_ir.next = 0
         n_load_imm.next = 0
         n_load_ir2.next = 0
-        next_state.next = NEXT_INSTR
+        next_state.next = ST_NEXT_INSTR
         sel_imem.next = 0
         load_more.next = 0
         load_reg_cnt.next = 0
         clear_reg_cnt.next = 0
 
         if halt == 1:
-            next_state.next = NEXT_INSTR
+            next_state.next = ST_NEXT_INSTR
             n_load_ir.next = 1
             n_load_imm.next = 1
             inc_pc.next = 1
         else:
-            if state == RESET:
+            if state == ST_RESET:
                 n_load_ir.next = 1
                 n_load_imm.next = 0
                 inc_pc.next = 0
                 sel_imem.next = PC
-                next_state.next = NEXT_INSTR
-            elif state == NEXT_INSTR:
-                if op == OPC_MVI or op == OPC_JMP:
+                next_state.next = ST_NEXT_INSTR
+            elif state == ST_NEXT_INSTR:
+                if op == OPC_MVI or op == OPC_JMP or op == OPC_LD_A_OFFS:
                     n_load_ir.next = 0
                     n_load_imm.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    next_state.next = READ_IMM
+                    next_state.next = ST_READ_IMM
                 elif op == OPC_NEXT and (
                         r_field == OPCI_POP_R or
                         r_field == OPCI_PUSH_R ):
@@ -278,70 +285,70 @@ def cpu( clk, rstn,
                     n_load_ir2.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    next_state.next = READ_PART2
+                    next_state.next = ST_READ_PART2
                 else:
                     n_load_ir.next = 1
                     n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    next_state.next = NEXT_INSTR
-            elif state == READ_IMM:
+                    next_state.next = ST_NEXT_INSTR
+            elif state == ST_READ_IMM:
                 if imm_more:
                     n_load_ir.next = 0
                     n_load_imm.next = 0
                     load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    next_state.next = READ_IMM
+                    next_state.next = ST_READ_IMM
                 else:
                     n_load_ir.next = 1
                     n_load_imm.next = 0
                     inc_pc.next = 1
                     sel_imem.next = PC
-                    next_state.next = NEXT_INSTR
-            elif state == READ_PART2:
+                    next_state.next = ST_NEXT_INSTR
+            elif state == ST_READ_PART2:
                 if op == OPC_NEXT and r_field == OPCI_POP_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
                     load_reg_cnt.next = 1
-                    next_state.next = REG_CNT
+                    next_state.next = ST_REG_CNT 
                 elif op == OPC_NEXT and r_field == OPCI_PUSH_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
                     clear_reg_cnt.next = 1
-                    next_state.next = REG_CNT
-            elif state == REG_CNT:
+                    next_state.next = ST_REG_CNT 
+            elif state == ST_REG_CNT:
                 if r_field == OPCI_POP_R:
                     if n_reg_cnt == 0:
                         n_load_ir.next = 1
                         inc_pc.next = 1
                         sel_imem.next = PC
-                        next_state.next = NEXT_INSTR
+                        next_state.next = ST_NEXT_INSTR
                     else:
                         n_load_ir.next = 0
                         inc_pc.next = 0
-                        next_state.next = REG_CNT
+                        next_state.next = ST_REG_CNT
                 elif r_field == OPCI_PUSH_R:
                     if n_reg_cnt == ir2[4:]:
                         n_load_ir.next = 1
                         inc_pc.next = 1
                         sel_imem.next = PC
-                        next_state.next = NEXT_INSTR
+                        next_state.next = ST_NEXT_INSTR
                     else:
                         n_load_ir.next = 0
                         inc_pc.next = 0
-                        next_state.next = REG_CNT
+                        next_state.next = ST_REG_CNT
 
     if sim_print:
         @always(clk.negedge)
         def prt_state():
             print("state:",state)
-            if state == NEXT_INSTR:
-                print("NEXT_INSTR")
+            if state == ST_NEXT_INSTR:
+                print("ST_NEXT_INSTR")
                 if op == OPC_MVI or op == OPC_JMP:
                     print("- OPC_MVI/JMP")
-            elif state == READ_IMM:
-                print("READ_IMM")
+            elif state == ST_READ_IMM:
+                print("ST_READ_IMM")
                 if imm_more:
                     print("- imm_more")
 
@@ -428,14 +435,14 @@ def cpu( clk, rstn,
             alu_y_pc.next = 0 # D.C.
             reg_wr_alu.next = 1
         elif op == OPC_JMP or op == OPCJ_JNZ:
-            if state == NEXT_INSTR:
+            if state == ST_NEXT_INSTR:
                 op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
                 wr_acc.next = 0
                 alu_y_pc.next = 1
                 reg_wr_alu.next = 0
-            elif state == READ_IMM:
+            elif state == ST_READ_IMM:
                 op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
@@ -465,7 +472,7 @@ def cpu( clk, rstn,
                     wr_reg.next = 1
 
         elif op == OPC_MVI: # Rx = sex(nn)
-            if state == NEXT_INSTR:
+            if state == ST_NEXT_INSTR:
                 alu_oper.next = ALU_PASS_X
                 op_sel_rx.next = 0
                 alu_x_imm.next = 1
@@ -473,7 +480,7 @@ def cpu( clk, rstn,
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # D.C.
                 reg_wr_alu.next = 1
-            elif state == READ_IMM:
+            elif state == ST_READ_IMM:
                 alu_oper.next = ALU_PASS_X
                 op_sel_rx.next = 0
                 alu_x_imm.next = 1
@@ -482,6 +489,25 @@ def cpu( clk, rstn,
                 alu_y_pc.next = 0 # D.C.
                 reg_wr_alu.next = 1
                 wr_reg.next = 1
+
+        elif op == OPC_LD_A_OFFS: # Rx = M[A+nn].l
+            if state == ST_NEXT_INSTR:
+                alu_oper.next = ALU_PASS_X
+                alu_x_imm.next = 1
+                alu_imm_width.next = 1 # 7 bits from instr byte
+            elif state == ST_READ_IMM:
+                if imm_more == 0:
+                    alu_oper.next = ALU_ADD
+                    alu_x_imm.next = 1
+                    alu_imm_width.next = 1 # 7 bits from instr byte
+                    n_reg_wr_deferred.next = 1
+                    n_reg_ld_rx.next = r_field
+                    dmem_rd.next = 1
+                    dmem_adr_sel.next = 0 # ALU
+                else:
+                    alu_oper.next = ALU_PASS_X
+                    alu_x_imm.next = 1
+                    alu_imm_width.next = 1 # 7 bits from instr byte
 
         elif op == OPC_RX_A:
             alu_oper.next = ALU_PASS_X
@@ -594,7 +620,7 @@ def cpu( clk, rstn,
             elif r_field == OPCI_POP_R: # for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
                 alu_oper.next = ALU_PASS_X
                 dmem_adr_sel.next = 1 # SP
-                if state == REG_CNT or state == READ_PART2:
+                if state == ST_REG_CNT or state == ST_READ_PART2:
                     inc_sp.next = 1
                     dmem_rd.next = 1
                     n_reg_wr_deferred.next = 1
@@ -602,7 +628,7 @@ def cpu( clk, rstn,
             elif r_field == OPCI_PUSH_R:  # for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
                 dmem_adr_sel.next = 2 # next SP
                 inc_reg_cnt.next = 1
-                if state == REG_CNT or state == READ_PART2:
+                if state == ST_REG_CNT or state == ST_READ_PART2:
                     dec_sp.next = 1
                     dmem_wr.next = 1
                     sel_reg_cnt.next = 1
@@ -998,7 +1024,7 @@ def cpu( clk, rstn,
         @always(clk.posedge, rstn.negedge)
         def obsff():
             obs_op.valid.next = 0
-            if state == NEXT_INSTR:
+            if state == ST_NEXT_INSTR:
                 obs_op.valid.next = 1
                 obs_op.op.next = op
                 obs_op.op_jmp.next = r_field
