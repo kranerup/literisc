@@ -537,9 +537,7 @@ def test_4(program,expect,pc,dmem):
     program[ 299 ] = 0xff # NOP
 
 def test_5(program,expect,pc,dmem):
-    # ---- test sub ----------
-    expect = dict()
-    program = dict()
+# ---- test sub ----------
     program[ 0 ] = 0x92 # A = 2 
     expect[ 2 ] = { 'A': 2 }
 
@@ -804,12 +802,102 @@ def test_19(program,expect,pc,dmem):
     # ---- test load w offs --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x21 # R1 = M[ A + 23 ].l
-    program[ 2 ] = 23
+    program[ 2 ] = 23 # single byte immediate offset
     dmem.append({'rd':1, 'adr':30, 'data':0x1234 })
     expect[5] = { 'A': 0x1234, 1: 0x1234 }
     program[ 3 ] = 0x11 # A = R1 ; forward mem data to reg operand
     program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0x97 # A = 7 
+    program[ 6 ] = 0x21 # R1 = M[ A + 151 ].l
+    program[ 7 ] = 1 | 0x80 # two byte immediate offset
+    program[ 8 ] = 23
+    dmem.append({'rd':1, 'adr':158, 'data':0x789a })
+    expect[11] = { 'A': 7, 1: 0x789a }
+    program[ 9 ] = 0xff # NOP
+    program[10 ] = 0xff # NOP
+    program[11 ] = 0xff # NOP
+
+def test_20(program,expect,pc,dmem):
+    # ---- test store w offs --------
+    program[ 0 ] = 0x93 # A = 3 
+    program[ 1 ] = 0x03 # R3 = A = 3
+    program[ 2 ] = 0x97 # A = 7 
+    program[ 3  ] = 0x53 # M[ A + 23 ].l = R3 -> M[30]=3
+    dmem.append({'rd':0, 'adr':7+23, 'data':3 })
+    program[ 4 ] = 23 # single byte immediate offset
     program[ 5 ] = 0xff # NOP
+    program[ 6 ] = 0xff # NOP
+    program[ 7  ] = 0x53 # M[ A + 151 ].l = R3 -> M[158]=3
+    program[ 8 ] = 1 | 0x80
+    program[ 9 ] = 23 # two byte immediate offset
+    dmem.append({'rd':0, 'adr':(1<<7)|23 + 7, 'data':3 })
+    program[ 10] = 0xff # NOP
+    program[ 11] = 0xff # NOP
+
+def test_21(program,expect,pc,dmem):
+    # ---- test store M[Rx]  --------
+    program[ 0 ] = 0x93 # A = 3 
+    program[ 1 ] = 0x03 # R3 = A = 3
+    program[ 2 ] = 0x97 # A = 7 
+    program[ 3  ] = 0x73 # M[R3].l = A -> M[3]=7
+    dmem.append({'rd':0, 'adr':3, 'data':7 })
+    program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0xff # NOP
+
+def load_a_rx( a_val, rx, rx_val, pc ):
+    program = dict()
+    program[ pc  ] = 0x80 | rx # Rx = a_val
+    program[ pc+1   ] = ((a_val>>28) & 0xf ) | 0x80  # 31:28
+    program[ pc+2   ] = ((a_val>>21) & 0x7f ) | 0x80  # 27:21
+    program[ pc+3   ] = ((a_val>>14) & 0x7f ) | 0x80  # 20:14
+    program[ pc+4   ] = ((a_val>>7) & 0x7f ) | 0x80  # 13:7
+    program[ pc+5   ] = (a_val & 0x7f )         # 6:0
+
+    program[ pc+6   ] = 0x10 | rx # A = Rx
+
+    program[ pc+7   ] = 0x80 | rx # Rx = rx_val
+    program[ pc+8   ] = ((rx_val>>28) & 0xf ) | 0x80  # 31:28
+    program[ pc+9   ] = ((rx_val>>21) & 0x7f ) | 0x80  # 27:21
+    program[ pc+10  ] = ((rx_val>>14) & 0x7f ) | 0x80  # 20:14
+    program[ pc+11  ] = ((rx_val>>7) & 0x7f ) | 0x80  # 13:7
+    program[ pc+12  ] = (rx_val & 0x7f )         # 6:0
+
+    return program, pc+12+1
+
+def test_22(program,expect,pc,dmem):
+# ---- test sub ----------
+    p, n_pc = load_a_rx( a_val=121, rx=2, rx_val=0x7fffffff, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2 =  121 - 2147483647
+    expect[ n_pc+2 ] = { 'A': 2147483770 }
+    #expect[ 5 ] = { 'A': 5,
+    #               #            8 16
+    #               #        nczvczcz
+    #               'cc' : 0b01001010 }
+    program[ n_pc+1 ] = 0xff # NOP
+    program[ n_pc+2 ] = 0xff # NOP
+
+def test_23(program,expect,pc,dmem):
+# ---- test sub ----------
+    p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val=100001, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2
+    expect[ n_pc+2 ] = {
+        'A': 1,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b01001010 }
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    program[ jmp_to   ] = 0xff # NOP
+    program[ jmp_to+1 ] = 0xff # NOP
+    print("program:",program)
 
 def tb2():
 
@@ -817,8 +905,8 @@ def tb2():
 
     progs = []
 
-    tests = [19]
-    tests = list(range(1,19+1))
+    tests = [23]
+    tests = list(range(1,23+1))
 
     for tid in tests:
         expect = dict()

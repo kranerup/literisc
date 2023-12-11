@@ -272,7 +272,10 @@ def cpu( clk, rstn,
                 sel_imem.next = PC
                 next_state.next = ST_NEXT_INSTR
             elif state == ST_NEXT_INSTR:
-                if op == OPC_MVI or op == OPC_JMP or op == OPC_LD_A_OFFS:
+                if ( op == OPC_MVI or
+                     op == OPC_JMP or
+                     op == OPC_LD_A_OFFS or
+                     op == OPC_ST_A_OFFS ):
                     n_load_ir.next = 0
                     n_load_imm.next = 1
                     inc_pc.next = 1
@@ -425,6 +428,13 @@ def cpu( clk, rstn,
             dmem_wr.next = 1
             dmem_adr_sel.next = 0 # ALU
             dmem_wr_acc.next = 0 # Rx
+        elif op == OPC_ST_RX: # M[Rx].l = A
+            alu_oper.next = ALU_PASS_X # Rx
+            op_sel_rx.next = 0 # D.C.
+            alu_x_imm.next = 0 # D.C.
+            dmem_wr.next = 1
+            dmem_adr_sel.next = 0 # ALU
+            dmem_wr_acc.next = 1 # Acc
         elif op == OPC_MVIA:
             alu_oper.next = ALU_PASS_X
             op_sel_rx.next = 0
@@ -453,10 +463,35 @@ def cpu( clk, rstn,
                 take_jump[:] = 1
                 if imm_more == 0:
                     if r_field == OPCJ_JNZ:
-                        if cc_z == 0:
-                            take_jump[:] = 1
-                        else:
-                            take_jump[:] = 0
+                        take_jump[:] = cc_z == 0
+                    elif r_field == OPCJ_JNZ8:
+                        take_jump[:] = cc_z8 == 0
+                    elif r_field == OPCJ_JNZ16:
+                        take_jump[:] = cc_z16 == 0
+                    elif r_field == OPCJ_JZ:
+                        take_jump[:] = cc_z == 1
+                    elif r_field == OPCJ_JZ8:
+                        take_jump[:] = cc_z8 == 1
+                    elif r_field == OPCJ_JZ16:
+                        take_jump[:] = cc_z16 == 1
+                    elif r_field == OPCJ_JHS:
+                        take_jump[:] = cc_c == 0
+                    elif r_field == OPCJ_JHS8:
+                        take_jump[:] = cc_c8 == 0
+                    elif r_field == OPCJ_JHS16:
+                        take_jump[:] = cc_c16 == 0
+                    elif r_field == OPCJ_JLO:
+                        take_jump[:] = cc_c == 1
+                    elif r_field == OPCJ_JLO8:
+                        take_jump[:] = cc_c8 == 1
+                    elif r_field == OPCJ_JLO16:
+                        take_jump[:] = cc_c16 == 1
+                    elif r_field == OPCJ_JLT:
+                        take_jump[:] = cc_n ^ cc_v
+                    elif r_field == OPCJ_JGE:
+                        take_jump[:] = (cc_n ^ cc_v) == 0
+                    elif r_field == OPCJ_J:
+                        take_jump[:] = 1
 
                 if imm_more:
                     alu_oper.next = ALU_PASS_X
@@ -509,6 +544,24 @@ def cpu( clk, rstn,
                     alu_x_imm.next = 1
                     alu_imm_width.next = 1 # 7 bits from instr byte
 
+        elif op == OPC_ST_A_OFFS: # M[A+nn].l = Rx
+            if state == ST_NEXT_INSTR:
+                alu_oper.next = ALU_PASS_X
+                alu_x_imm.next = 1
+                alu_imm_width.next = 1 # 7 bits from instr byte
+            elif state == ST_READ_IMM:
+                if imm_more == 0:
+                    alu_oper.next = ALU_ADD
+                    alu_x_imm.next = 1
+                    alu_imm_width.next = 1 # 7 bits from instr byte
+                    alu_y_pc.next = 0 # acc
+                    dmem_wr.next = 1
+                    dmem_adr_sel.next = 0 # ALU
+                    dmem_wr_acc.next = 0 # Rx
+                else:
+                    alu_oper.next = ALU_PASS_X
+                    alu_x_imm.next = 1
+                    alu_imm_width.next = 1 # 7 bits from instr byte
         elif op == OPC_RX_A:
             alu_oper.next = ALU_PASS_X
             op_sel_rx.next = 1
@@ -795,7 +848,7 @@ def cpu( clk, rstn,
     def selalu():
         ext = modbv(0)[32:]
         ext[:] = 0
-        # alu op X
+        # alu op X - immediate / Rx
         alu_op_x.next = 0
         if alu_x_imm:
             if alu_imm_width == 0:
@@ -807,7 +860,7 @@ def cpu( clk, rstn,
                 alu_op_x.next = imm_next # TBD sex
         else:
             alu_op_x.next = rx
-        # alu op Y (ACC)
+        # alu op Y (ACC) - A / PC+1
         alu_op_y.next = 0
         if alu_y_pc:
             alu_op_y.next = pc + 1
@@ -826,9 +879,13 @@ def cpu( clk, rstn,
 
     @inline
     def flags( x, y, ext_res, n, z, v, c, width ):
-        c[:] = ~ext_res[width]
+        # subtract with carry:
+        # a - b -> a + (~b) + 1 -> a + ~b + carry-in
+        # carry in = 1, unless we implement chaining
+        # carry out:
+        c[:] = ext_res[width]
         # Overflow occurs when the sign of the operands are different and
-        # the sign of the result is different from the sign of a
+        # the sign of the result is different from the sign of operand x
         v[:] = ((x[width-1] ^ y[width-1]) & (x[width-1] ^ ext_res[width-1]));
         n[:] = ext_res[width-1]
         z[:] = ext_res[width-1:] == 0
@@ -941,7 +998,7 @@ def cpu( clk, rstn,
     @always_comb
     def dmema():
         dmem_adr.next = 0
-        if dmem_adr_sel == 0: # ACC
+        if dmem_adr_sel == 0: # ALU
             dmem_adr.next = alu_out
         elif dmem_adr_sel == 1: # SP
             dmem_adr.next = reg_bank[ SP ]
