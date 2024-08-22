@@ -19,13 +19,12 @@ def sub_w( x, y, res, borrow_in, borrow_out, v, n, z, width ) :
     #print("sub_w",bin(x),bin(y),bin(res),z)
 
 
-def sub2_w( x, y, res, borrow_in, borrow_out,
-           v_hi, n_hi, z_hi,
-           v_lo, n_lo, z_lo,
+def sub2_w( x, y, res, borrow_in,
+           b_out_hi, v_hi, n_hi, z_hi,
+           b_out_lo, v_lo, n_lo, z_lo,
            rwidth, width ):
 
     res_lo = modbv(0)[width:]
-    b_out_lo = modbv(0)[1:]
     x_lo = modbv(0)[width:]
     x_lo[:] = x[width:0]
     y_lo = modbv(0)[width:]
@@ -33,7 +32,6 @@ def sub2_w( x, y, res, borrow_in, borrow_out,
     sub_w( x_lo, y_lo, res_lo, borrow_in, b_out_lo, v_lo, n_lo, z_lo, width )
 
     res_hi = modbv(0)[width:]
-    b_out_hi = modbv(0)[1:]
     x_hi = modbv(0)[width:]
     x_hi[:] = x[rwidth:width]
     y_hi = modbv(0)[width:]
@@ -43,52 +41,51 @@ def sub2_w( x, y, res, borrow_in, borrow_out,
 
     res[width:0] = res_lo
     res[rwidth:width] = res_hi
-    borrow_out[:] = b_out_hi
 
     z_hi[:] = z_hi & z_lo
     #print("sub2_w z",z_hi,z_lo)
 
-def sub3_w( x, y, res, borrow_in, borrow_out,
-           v_hi, n_hi, z_hi,
-           v_mid, n_mid, z_mid,
-           v_lo, n_lo, z_lo,
+def sub3_w( x, y, res, borrow_in,
+           b_out_hi,  v_hi,  n_hi,  z_hi,
+           b_out_mid, v_mid, n_mid, z_mid,
+           b_out_lo,  v_lo,  n_lo,  z_lo,
            rwidth, width, lwidth ):
 
     res_lo = modbv(0)[width:]
-    b_out_lo = modbv(0)[1:]
     x_lo = modbv(0)[width:]
     x_lo[:] = x[width:0]
     y_lo = modbv(0)[width:]
     y_lo[:] = y[width:0]
-    sub2_w( x_lo, y_lo, res_lo, borrow_in, b_out_lo,
-           v_mid, n_mid, z_mid,
-           v_lo, n_lo, z_lo,
+    sub2_w( x_lo, y_lo, res_lo, borrow_in,
+           b_out_mid, v_mid, n_mid, z_mid,
+           b_out_lo,  v_lo,  n_lo,  z_lo,
            width, lwidth  )
 
     res_hi = modbv(0)[width:]
-    b_out_hi = modbv(0)[1:]
     x_hi = modbv(0)[width:]
     x_hi[:] = x[rwidth:width]
     y_hi = modbv(0)[width:]
     y_hi[:] = y[rwidth:width]
+    b_out_hi2 = modbv(0)[1:]
+    b_out_lo2 = modbv(0)[1:]
     v_hi2 = modbv(0)[1:]
     n_hi2 = modbv(0)[1:]
     z_hi2 = modbv(0)[1:]
     v_lo2 = modbv(0)[1:]
     n_lo2 = modbv(0)[1:]
     z_lo2 = modbv(0)[1:]
-    sub2_w( x_hi, y_hi, res_hi, b_out_lo, b_out_hi, 
-           v_hi2, n_hi2, z_hi2,
-           v_lo2, n_lo2, z_lo2,
+    sub2_w( x_hi, y_hi, res_hi, b_out_mid,
+           b_out_hi2, v_hi2, n_hi2, z_hi2,
+           b_out_lo2, v_lo2, n_lo2, z_lo2,
            width, lwidth  )
 
     res[width:0] = res_lo
     res[rwidth:width] = res_hi
-    borrow_out[:] = b_out_hi
 
     v_hi[:] = v_hi2
     n_hi[:] = n_hi2
     z_hi[:] = z_mid & z_lo & z_lo2 & z_hi2
+    b_out_hi[:] = b_out_hi2
 
     #print("sub3 z",z_lo, z_mid, z_lo2, z_hi2, z_hi )
 
