@@ -107,7 +107,8 @@ def cpu_tester( clk, programs ):
         nr_fails = 0
 
         for prog in programs:
-            print("============= program start ===============")
+            prog_id = prog['id']
+            print(f"============= program start {prog_id} ===============")
             any_fail = False
             imem = prog['imem'] # dict with adr -> data
             expect_reg = prog['expect'] # dict adr -> dict reg-nr -> value
@@ -217,7 +218,7 @@ def cpu_tester( clk, programs ):
                                 any_fail = True
 
                 if no_more_instr or end_test:
-                    print("========== end of program =================")
+                    print(f"========== end of program {prog_id} =================")
                     if any_fail:
                         nr_fails += 1
                     else:
@@ -575,12 +576,13 @@ def test_5(program,expect,pc,dmem):
     program[ 11 ] = (r4 & 0x7f)
     program[ 12 ] = 0x14 # A = R4
     program[ 13 ] = 0xc3 # A = A - R3 = 0x0f01 - 1 = 0x0f00
-    expect[ 15 ] = { 'A': 0x0f00, \
+
+    expect[ 15 ] = { 'A': 0x0f00,
                      3: 1,
                      4: 0x0f01,
                      #            8 16
                      #        nczvczcz
-                     'cc' : 0b01000110 }
+                     'cc' : 0b01001110 }
 
     expect[ 15 ] = no_side_effect( expect[ 15 ] )
 
@@ -879,24 +881,273 @@ def test_22(program,expect,pc,dmem):
     program[ n_pc+2 ] = 0xff # NOP
 
 def test_23(program,expect,pc,dmem):
-# ---- test sub ----------
+# ---- test unsigned jumps with carry=0 ----------
     p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val=100001, pc=0 )
     program.update( p )
 
-    program[ n_pc ] = 0xc2 # A = A - R2
+    # This subtraction will result in c,c8,c16=0 which is then used
+    # to test all jump instructions that depends on carry flag.
+    program[ n_pc ] = 0xc2 # A = A - R2 = 100000 - 100001 = -1
+    # A = A - R2 = 100000 - 100001 = -1 -> z=0 v=0 c32=0 n=1
+    # byte: 0xa0 - 0xa1 = -96 - -95 = -1 -> z=0 v=0
+    #       0xa0 + ( (~0xa1) & 0xff ) + 1 = 0xff -> c8=0
+    # 16-bit:  0x86a0 + (~0x86a1 & 0xffff) + 1 = 0xffff -> z=0 v=0 c16=0
     expect[ n_pc+2 ] = {
-        'A': 1,
+        'A': 0xffffffff,
         #            8 16
         #        nczvczcz
-        'cc' : 0b01001010 }
+        'cc' : 0b10000000 }
+    # jhs, jump >=  unsigned  !c, i.e. if A >= R2, take jump
     program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS'])
     program[ n_pc+2 ] = (294 >> 7) | 0x80
     program[ n_pc+3 ] = (294 & 0x7f)
     jmp_to = 294 + n_pc+3+1
     pc[ n_pc+3] = [ jmp_to ]
 
-    program[ jmp_to   ] = 0xff # NOP
-    program[ jmp_to+1 ] = 0xff # NOP
+    # jhs.b, jump >=  unsigned  !c8, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS8'])
+    program[ n_pc+1 ] = (394 >> 7) | 0x80
+    program[ n_pc+2 ] = (394 & 0x7f)
+    jmp_to = 394 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jhs.w, jump >=  unsigned  !c16, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS16'])
+    program[ n_pc+1 ] = (271 >> 7) | 0x80
+    program[ n_pc+2 ] = (271 & 0x7f)
+    jmp_to = 271 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jlo, jump <   unsigned  c, i.e. if A <  R2, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jlo.b, jump <   unsigned  c8, i.e. if A <  R2, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO8'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jlo.w, jump <   unsigned  c16, i.e. if A <  R2, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO16'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
+    print("program:",program)
+
+def test_24(program,expect,pc,dmem):
+# ---- test unsigned jumps with carry=1 ----------
+    p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val= 99999, pc=0 )
+    program.update( p )
+
+    # This subtraction will result in c,c8,c16=1 which is then used
+    # to test all jump instructions that depends on carry flag.
+    program[ n_pc ] = 0xc2 # A = A - R2 = 100000 - 99999 = 1
+    # A = A - R2 = 100000 - 99999 = 1 -> z=0 v=0 c32=1 n=0
+    # byte: 0xa0 + (~0x9f & 0xff) + 1 = 0x101 -> c8=1
+    # 16-bit:  0x86a0 + (~0x869f & 0xffff) + 1 = 0x10001 -> z=0 v=0 c16=1
+    expect[ n_pc+2 ] = {
+        'A': 1,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b01001010 }
+
+    # jlo, jump <   unsigned  c, i.e. if A <  R2, take jump
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    # jlo.b, jump <   unsigned  c8, i.e. if A <  R2, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO8'])
+    program[ n_pc+1 ] = (394 >> 7) | 0x80
+    program[ n_pc+2 ] = (394 & 0x7f)
+    jmp_to = 394 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jlo.w, jump <   unsigned  c16, i.e. if A <  R2, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLO16'])
+    program[ n_pc+1 ] = (271 >> 7) | 0x80
+    program[ n_pc+2 ] = (271 & 0x7f)
+    jmp_to = 271 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jhs, jump >=  unsigned  !c, i.e. if A >= R2, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jhs.b, jump >=  unsigned  !c8, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS8'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jhs.w, jump >=  unsigned  !c16, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JHS16'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
+    print("program:",program)
+
+def test_25(program,expect,pc,dmem):
+# ---- test signed jumps ----------
+    p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val=99999, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2 = 100000 - 99999 = 1
+    # v=0 n=0 z=0
+    expect[ n_pc+2 ] = {
+        'A': 1,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b01001010 }
+    # jge jump >=  signed    !(n ^ v), i.e. if A >= R2, take jump
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JGE'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    # jlt, jump < signed      n ^ v , i.e. if A <  R2, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLT'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
+    print("program:",program)
+
+def test_26(program,expect,pc,dmem):
+# ---- test signed jumps with n=1 ----------
+    p, n_pc = load_a_rx( a_val=99999, rx=2, rx_val=100000, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2 = 99999 - 100000 = -1
+    # v=0 n=0 z=0
+    expect[ n_pc+2 ] = {
+        'A': 0xffffffff,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b10000000 }
+    # jlt, jump < signed      n ^ v , i.e. if A <  R2, take jump
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLT'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    # jge jump >=  signed    !(n ^ v), i.e. if A >= R2, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JGE'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
+    print("program:",program)
+
+def test_27(program,expect,pc,dmem):
+# ---- test signed jumps with n=v=1 ----------
+    p, n_pc = load_a_rx( a_val=1, rx=2, rx_val=0x80000000, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2 = 1 - -2147483648 = 2147483649
+    # v=0 n=0 z=0
+    expect[ n_pc+2 ] = {
+       'A': 0x80000001,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b10011010 }
+
+    # jge jump >=  signed    !(n ^ v), i.e. if A >= R2, take jump
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JGE'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    # jlt, jump < signed      n ^ v , i.e. if A <  R2, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JLT'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
+    print("program:",program)
+
+def test_28(program,expect,pc,dmem):
+# ---- test eq/ne jumps ----------------
+    p, n_pc = load_a_rx( a_val=0x80000000, rx=2, rx_val=0x80000000, pc=0 )
+    program.update( p )
+
+    program[ n_pc ] = 0xc2 # A = A - R2 = 0
+    # v=0 n=0 z=0
+    expect[ n_pc+2 ] = {
+       'A': 0x00000000,
+        #            8 16
+        #        nczvczcz
+        'cc' : 0b01101111 }
+
+    # jz on zero i.e. if A - R2 == 0, take jump
+    program[ n_pc+1 ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JZ'])
+    program[ n_pc+2 ] = (294 >> 7) | 0x80
+    program[ n_pc+3 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+3+1
+    pc[ n_pc+3] = [ jmp_to ]
+
+    # jz.b on zero i.e. if A - R2 == 0, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JZ8'])
+    program[ n_pc+1 ] = (294 >> 7) | 0x80
+    program[ n_pc+2 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jz.w on zero i.e. if A - R2 == 0, take jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JZ16'])
+    program[ n_pc+1 ] = (294 >> 7) | 0x80
+    program[ n_pc+2 ] = (294 & 0x7f)
+    jmp_to = 294 + n_pc+2+1
+    pc[ n_pc+2] = [ jmp_to ]
+
+    # jnz, on not zero, i.e. if A - R2 != 0, skip jump
+    n_pc = jmp_to
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JNZ'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jnz.b, on not zero, i.e. if A - R2 != 0, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JNZ8'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    # jnz.w, on not zero, i.e. if A - R2 != 0, skip jump
+    n_pc = n_pc+2
+    program[ n_pc ] = (sym_to_op['OPC_JMP'] << 4 | sym_to_op['OPCJ_JNZ16'])
+    program[ n_pc+1 ] = (100 & 0x7f)
+    pc[ n_pc+1] = [ n_pc+2 ]
+
+    program[ n_pc+2   ] = 0xff # NOP
+    program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
 def tb2():
@@ -905,8 +1156,8 @@ def tb2():
 
     progs = []
 
-    tests = [23]
-    tests = list(range(1,23+1))
+    tests = [28]
+    tests = list(range(1,28+1))
 
     for tid in tests:
         expect = dict()
@@ -917,7 +1168,8 @@ def tb2():
         print(f"===== add test {tid} =====")
         eval(f"test_{tid}(program,expect,pc,dmem)")
 
-        progs.append( { 'imem': program,
+        progs.append( { 'id': tid,
+                        'imem': program,
                         'dmem': dmem,
                         'expect': expect,
                         'pc' : pc} )
