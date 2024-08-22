@@ -3,6 +3,7 @@ from myhdl import Struct, unpack_struct
 
 from modules.common.memory import memory
 from modules.common.Common import copySignal, multiflop
+from sub import sub3_w
 
 OPC_A_RX      = 0  # Rx = A
 OPC_RX_A      = 1  # A = Rx
@@ -902,6 +903,13 @@ def cpu( clk, rstn,
         lz16 = modbv(0)[1:]
         extended_x = modbv(0)[32+1:]
         extended_y = modbv(0)[32+1:]
+        b_in = modbv(1)[1:]
+
+        v_mid = modbv(0)[1:] # unused
+        n_mid = modbv(0)[1:] # unused
+        v_lo = modbv(0)[1:] # unused
+        n_lo = modbv(0)[1:]  # unused
+
         n_n.next   = cc_n
         n_z.next   = cc_z
         n_v.next   = cc_v
@@ -929,10 +937,12 @@ def cpu( clk, rstn,
             alu_out.next = alu_op_x + alu_op_y
         elif alu_oper == ALU_SUB:
 
-            sub( alu_op_y, alu_op_x, tmp, extended_x, extended_y )
-            flags( alu_op_y, alu_op_x, tmp, ln, lz8,  lv, lc8,  8 )
-            flags( alu_op_y, alu_op_x, tmp, ln, lz16, lv, lc16, 16 )
-            flags( alu_op_y, alu_op_x, tmp, ln, lz,   lv, lc,   32 )
+            sub3_w( alu_op_y, alu_op_x, tmp,
+                   b_in, 
+                   lc,   lv,    ln,    lz,
+                   lc16, v_mid, n_mid, lz16,
+                   lc8,  v_lo,  n_lo,  lz8,
+                   32, 16, 8 )
 
             n_n.next = ln
             n_z.next = lz
