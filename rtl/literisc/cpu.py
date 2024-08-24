@@ -169,6 +169,18 @@ def cpu( clk, rstn,
 
     cc = Signal(modbv(0)[8:])
 
+    # IR - first instruction word, held till loading next instruction
+    #   the ir fields are extracted into (available during the whole
+    #   instruction):
+    #   - op
+    #   - r_field
+    #   if op == OPC_NEXT then r_field is secondary op code
+    # IR2 - some OPC_NEXT instructions has a second instruction word loaded here
+    #   the ir2 fields are extracted into (available when ir2 loaded until end
+    #   of instruction):
+    #   - op2
+    #   - r_field2
+
     n_ir = Signal(modbv(0)[8:])
     curr_ir = Signal(modbv(0)[8:])
     ir = Signal(modbv(0)[8:])
@@ -177,8 +189,10 @@ def cpu( clk, rstn,
     imm = Signal(modbv(0)[32:])
     imm_next = Signal(modbv(0)[32:])
     op = Signal(modbv(0)[4:])
+    op2 = Signal(modbv(0)[4:])
     rx = Signal(modbv(0)[32:])
     r_field  = Signal(modbv(0)[4:])
+    r_field2  = Signal(modbv(0)[4:])
     rx_idx  = Signal(modbv(0)[4:])
     state = Signal(modbv(0)[4:])
     next_state = Signal(modbv(0)[4:])
@@ -214,7 +228,11 @@ def cpu( clk, rstn,
     n_acc_wr_deferred = Signal(modbv(0)[1:])
     acc_wr_deferred = Signal(modbv(0)[1:])
     n_reg_ld_rx = Signal(modbv(0)[4:])
+    n_reg_ld_maskb = Signal(modbv(0)[4:])
+    n_reg_ld_maskw = Signal(modbv(0)[4:])
     reg_ld_rx = Signal(modbv(0)[4:])
+    reg_ld_maskb = Signal(modbv(0)[4:])
+    reg_ld_maskw = Signal(modbv(0)[4:])
     wr_acc = Signal(modbv(0)[1:])
     wr_reg = Signal(modbv(0)[1:])
     reg_dest  = Signal(modbv(0)[4:])
@@ -246,6 +264,8 @@ def cpu( clk, rstn,
     idf  = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
     ida  = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
     idr  = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
+    idrm = multiflop( n_reg_ld_maskb, reg_ld_maskb, clk, rstn )
+    idrmw= multiflop( n_reg_ld_maskw, reg_ld_maskw, clk, rstn )
     ili  = multiflop( n_load_imm, load_imm, clk, rstn )
 
     @always_comb
@@ -284,7 +304,8 @@ def cpu( clk, rstn,
                     next_state.next = ST_READ_IMM
                 elif op == OPC_NEXT and (
                         r_field == OPCI_POP_R or
-                        r_field == OPCI_PUSH_R ):
+                        r_field == OPCI_PUSH_R or
+                        r_field == OPCI_NEXT):
                     n_load_ir.next = 0
                     n_load_ir2.next = 1
                     inc_pc.next = 1
@@ -321,6 +342,12 @@ def cpu( clk, rstn,
                     inc_pc.next = 0
                     clear_reg_cnt.next = 1
                     next_state.next = ST_REG_CNT 
+                elif op == OPC_NEXT and r_field == OPCI_NEXT:
+                    n_load_ir.next = 1
+                    n_load_imm.next = 0
+                    inc_pc.next = 1
+                    sel_imem.next = PC
+                    next_state.next = ST_NEXT_INSTR
             elif state == ST_REG_CNT:
                 if r_field == OPCI_POP_R:
                     if n_reg_cnt == 0:
@@ -368,6 +395,7 @@ def cpu( clk, rstn,
         inc_sp.next = 0
         load_pc.next = 0
         n_reg_ld_rx.next = 0
+        n_reg_ld_maskb.next = 0
         n_reg_wr_deferred.next = 0
         op_sel_rx.next = 0
         reg_dest_srp.next = 0
@@ -686,13 +714,25 @@ def cpu( clk, rstn,
                     dec_sp.next = 1
                     dmem_wr.next = 1
                     sel_reg_cnt.next = 1
-
+            elif r_field == OPCI_NEXT:
+                if op2 == OPCI2_LDB_A or op2 == OPCI2_LDW_A: # Rx = M[A].b/w
+                    alu_oper.next = ALU_PASS_Y
+                    op_sel_rx.next = 0 # D.C.
+                    alu_x_imm.next = 0 # D.C.
+                    wr_acc.next = 0
+                    alu_y_pc.next = 0 # acc
+                    n_reg_wr_deferred.next = 1
+                    n_reg_ld_rx.next = r_field2
+                    n_reg_ld_maskb.next = op2 == OPCI2_LDB_A
+                    n_reg_ld_maskw.next = op2 == OPCI2_LDW_A
+                    dmem_rd.next = 1
+                    dmem_adr_sel.next = 0 # ALU
 
     if sim_print:
         @always(clk.negedge)
         def dbgprint():
             if halt == 0:
-                print("ir:", ir, "op:", ir[8:] >> 4, "r:", ir[4:])
+                print("ir:", ir, "op:", ir[8:] >> 4, "r:", ir[4:], "ir2:", ir2, "op2:", op2,"r2:",r_field2)
                 if op == OPC_A_RX:
                     print("EXE RX",rx,"=A",acc)
                 elif op == OPC_MVIA:
@@ -727,6 +767,7 @@ def cpu( clk, rstn,
                 print(
                     "load_pc",load_pc,
                     "n_load_ir",n_load_ir,
+                    "n_load_ir2",n_load_ir2,
                     "load_imm",load_imm,
                     "load_more",load_more)
 
@@ -795,8 +836,17 @@ def cpu( clk, rstn,
 
     @always_comb
     def selrx():
+        # - duplicated code from reg_wr, should be merged
+        masked_dout = modbv(0)[32:]
+        if reg_ld_maskb == 1:
+            masked_dout = dmem_dout[8:]
+        elif reg_ld_maskw == 1:
+            masked_dout = dmem_dout[16:]
+        else:
+            masked_dout = dmem_dout
+
         if reg_wr_deferred==1 and reg_ld_rx == r_field:
-            rx.next = dmem_dout
+            rx.next = masked_dout
         else:
             rx.next = reg_bank[ rx_idx ]
 
@@ -1061,12 +1111,20 @@ def cpu( clk, rstn,
 
     @always(clk.posedge, rstn.negedge)
     def reg_wr():
+        masked_dout = modbv(0)[32:]
         if rstn == 0:
             for i in range(16):
                 reg_bank[i].next = 0
         else:
+            if reg_ld_maskb == 1:
+                masked_dout = dmem_dout[8:]
+            elif reg_ld_maskw == 1:
+                masked_dout = dmem_dout[16:]
+            else:
+                masked_dout = dmem_dout
+
             if reg_wr_deferred:
-                reg_bank[ reg_ld_rx ].next = dmem_dout
+                reg_bank[ reg_ld_rx ].next = masked_dout
 
             if wr_reg:
                 reg_bank[ reg_dest ].next = reg_wr_op
@@ -1102,6 +1160,8 @@ def cpu( clk, rstn,
         # [ o o o o  r r r r ]
         op.next = curr_ir[8:] >> 4
         r_field.next = curr_ir[4:]
+        op2.next = n_ir2[8:] >> 4
+        r_field2.next = n_ir2[4:]
 
     if sim_print:
         @always(clk.negedge)

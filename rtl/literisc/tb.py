@@ -1150,14 +1150,40 @@ def test_28(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
+def test_29(program,expect,pc,dmem):
+    # ---- test load --------
+    program[ 0 ] = 0x93 # A = 3 
+    program[ 1 ] = 0x03 # R3 = A = 3
+    program[ 2 ] = 0x97 # A = 7 
+    program[ 3 ] = 0xf8 # R1 = M[ A ].b
+    program[ 4 ] = 0x31 # -"-
+    dmem.append({'rd':1, 'adr':7, 'data':0x1122ff7b })
+    program[ 5 ] = 0x11 # A = R1 ; forward mem data to reg operand
+    expect[7] = { 'A': 0x7b, 1: 0x7b }
+    program[ 6 ] = 0xff # NOP
+    program[ 7 ] = 0xff # NOP
+
+def test_30(program,expect,pc,dmem):
+    # ---- test load --------
+    program[ 0 ] = 0x93 # A = 3 
+    program[ 1 ] = 0x03 # R3 = A = 3
+    program[ 2 ] = 0x97 # A = 7 
+    program[ 3 ] = 0xf8 # R1 = M[ A ].w
+    program[ 4 ] = 0xb1 # -"-
+    dmem.append({'rd':1, 'adr':7, 'data':0x1122897b })
+    program[ 5 ] = 0x11 # A = R1 ; forward mem data to reg operand
+    expect[7] = { 'A': 0x897b, 1: 0x897b }
+    program[ 6 ] = 0xff # NOP
+    program[ 7 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [28]
     tests = list(range(1,28+1))
+    tests = [30]
 
     for tid in tests:
         expect = dict()
