@@ -1250,7 +1250,7 @@ def test_33(program,expect,pc,dmem):
     program[ 10 ] = 0xff # NOP
 
 def test_34(program,expect,pc,dmem):
-    # ---- test load to A --------
+    # ---- test word load to A --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x03 # R3 = A = 7
     program[ 2 ] = 0xf8 # A = M[ R3 ].b

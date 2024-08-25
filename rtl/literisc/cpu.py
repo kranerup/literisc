@@ -222,9 +222,7 @@ def cpu( clk, rstn,
     direct_load_imm = Signal(modbv(0)[1:])
     load_imm = Signal(modbv(0)[1:])
     n_load_imm = Signal(modbv(0)[1:])
-    load_more = Signal(modbv(0)[1:])
     imm_more = Signal(modbv(0)[1:])
-    op_sel_rx = Signal(modbv(0)[1:]) # TODO: not used, remove
     alu_x_imm = Signal(modbv(0)[1:])
     alu_imm_width = Signal(modbv(0)[2:])
     alu_y_pc = Signal(modbv(0)[1:])
@@ -297,7 +295,6 @@ def cpu( clk, rstn,
         n_op2_valid.next = 0
         next_state.next = ST_NEXT_INSTR
         sel_imem.next = 0
-        load_more.next = 0
         load_reg_cnt.next = 0
         clear_reg_cnt.next = 0
 
@@ -343,7 +340,6 @@ def cpu( clk, rstn,
                 if imm_more:
                     n_load_ir.next = 0
                     n_load_imm.next = 0
-                    load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
                     n_op2_valid.next = op2_valid
@@ -429,7 +425,6 @@ def cpu( clk, rstn,
         n_reg_ld_rx.next = 0
         n_reg_ld_maskb.next = 0
         n_reg_wr_deferred.next = 0
-        op_sel_rx.next = 0
         reg_dest_srp.next = 0
         reg_wr_alu.next = 0
         reg_wr_pc.next = 0
@@ -449,7 +444,6 @@ def cpu( clk, rstn,
  
         if op == OPC_A_RX:
             alu_oper.next = ALU_PASS_Y
-            op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0 # D.C.
             wr_acc.next = 0
             alu_y_pc.next = 0 # acc
@@ -457,14 +451,12 @@ def cpu( clk, rstn,
             wr_reg.next = 1
         elif op == OPC_RX_A:
             alu_oper.next = ALU_PASS_X
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_LD_A: # Rx = M[A].l
             alu_oper.next = ALU_PASS_Y
-            op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0 # D.C.
             wr_acc.next = 0
             alu_y_pc.next = 0 # acc
@@ -474,7 +466,6 @@ def cpu( clk, rstn,
             dmem_adr_sel.next = 0 # ALU
         elif op == OPC_LD_RX: # A = M[Rx].l
             alu_oper.next = ALU_PASS_X
-            op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0
             wr_acc.next = 0
             alu_y_pc.next = 0 # acc
@@ -483,7 +474,6 @@ def cpu( clk, rstn,
             dmem_adr_sel.next = 0 # ALU
         elif op == OPC_ST_A:
             alu_oper.next = ALU_PASS_Y
-            op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0 # D.C.
             wr_acc.next = 0
             alu_y_pc.next = 0 # acc
@@ -492,14 +482,12 @@ def cpu( clk, rstn,
             dmem_wr_acc.next = 0 # Rx
         elif op == OPC_ST_RX: # M[Rx].l = A
             alu_oper.next = ALU_PASS_X # Rx
-            op_sel_rx.next = 0 # D.C.
             alu_x_imm.next = 0 # D.C.
             dmem_wr.next = 1
             dmem_adr_sel.next = 0 # ALU
             dmem_wr_acc.next = 1 # Acc
         elif op == OPC_MVIA:
             alu_oper.next = ALU_PASS_X
-            op_sel_rx.next = 0
             alu_x_imm.next = 1
             direct_load_imm.next = 1
             alu_imm_width.next = 0 # 4 bits from first instr byte
@@ -508,14 +496,12 @@ def cpu( clk, rstn,
             reg_wr_alu.next = 1
         elif op == OPC_JMP or op == OPCJ_JNZ:
             if state == ST_NEXT_INSTR:
-                op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
                 wr_acc.next = 0
                 alu_y_pc.next = 1
                 reg_wr_alu.next = 0
             elif state == ST_READ_IMM:
-                op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
                 wr_acc.next = 0
@@ -571,7 +557,6 @@ def cpu( clk, rstn,
         elif op == OPC_MVI: # Rx = sex(nn)
             if state == ST_NEXT_INSTR:
                 alu_oper.next = ALU_PASS_X
-                op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
                 wr_acc.next = 0
@@ -579,7 +564,6 @@ def cpu( clk, rstn,
                 reg_wr_alu.next = 1
             elif state == ST_READ_IMM:
                 alu_oper.next = ALU_PASS_X
-                op_sel_rx.next = 0
                 alu_x_imm.next = 1
                 alu_imm_width.next = 1 # 7 bits from instr byte
                 wr_acc.next = 0
@@ -626,35 +610,30 @@ def cpu( clk, rstn,
                     alu_imm_width.next = 1 # 7 bits from instr byte
         elif op == OPC_RX_A:
             alu_oper.next = ALU_PASS_X
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_ADD:
             alu_oper.next = ALU_ADD
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_AND:
             alu_oper.next = ALU_AND
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_OR:
             alu_oper.next = ALU_OR
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_SUB:
             alu_oper.next = ALU_SUB
-            op_sel_rx.next = 1
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
@@ -663,7 +642,6 @@ def cpu( clk, rstn,
             # the reg field is secondary opcode
             if r_field == OPCI_NOP:
                 alu_oper.next = ALU_PASS_Y
-                op_sel_rx.next = 1
                 alu_x_imm.next = 0
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
@@ -711,7 +689,6 @@ def cpu( clk, rstn,
             elif r_field == OPCI_J_A:
                 load_pc.next = 1
                 alu_oper.next = ALU_PASS_Y
-                op_sel_rx.next = 0
                 alu_x_imm.next = 0
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
@@ -724,7 +701,6 @@ def cpu( clk, rstn,
                 sel_srp.next = 1
             elif r_field == OPCI_POP_A: # A = M[sp].l, sp = sp + 4
                 alu_oper.next = ALU_PASS_X
-                op_sel_rx.next = 0 # D.C.
                 alu_x_imm.next = 0
                 wr_acc.next = 0
                 alu_y_pc.next = 0 # acc
@@ -751,7 +727,6 @@ def cpu( clk, rstn,
                 rx_field2.next = 1
                 if op2 == OPCI2_LDB_A or op2 == OPCI2_LDW_A: # Rx = M[A].b/w
                     alu_oper.next = ALU_PASS_Y
-                    op_sel_rx.next = 0 # D.C.
                     alu_x_imm.next = 0 # D.C.
                     wr_acc.next = 0
                     alu_y_pc.next = 0 # acc
@@ -783,7 +758,6 @@ def cpu( clk, rstn,
                             alu_imm_width.next = 1 # 7 bits from instr byte
                 elif op2 == OPCI2_LDB_RX or op2 == OPCI2_LDW_RX: # A = M[Rx].b/w
                     alu_oper.next = ALU_PASS_X
-                    op_sel_rx.next = 0 # D.C.
                     alu_x_imm.next = 0
                     wr_acc.next = 0
                     alu_y_pc.next = 0 # acc
@@ -834,8 +808,7 @@ def cpu( clk, rstn,
                     "load_pc",load_pc,
                     "n_load_ir",n_load_ir,
                     "n_load_ir2",n_load_ir2,
-                    "load_imm",load_imm,
-                    "load_more",load_more)
+                    "load_imm",load_imm)
 
                 print("alu_op_x",alu_op_x)
                 print("alu_op_y",alu_op_y)
@@ -849,8 +822,7 @@ def cpu( clk, rstn,
                 elif alu_oper == ALU_SUB:
                     print("alu SUB",alu_op_x,alu_op_y,alu_op_x+alu_op_y)
 
-                if op_sel_rx:
-                    print("rx",r_field, reg_bank[r_field])
+                print("rx",r_field, reg_bank[r_field])
                 print("imm:",imm,"imm_next",imm_next)
                 print("imem_dout:",imem_dout)
                 print("pc_next",pc_next)
@@ -907,11 +879,11 @@ def cpu( clk, rstn,
         # - duplicated code from reg_wr, should be merged
         masked_dout = modbv(0)[32:]
         if reg_ld_maskb == 1:
-            masked_dout = dmem_dout[8:]
+            masked_dout[:] = dmem_dout[8:]
         elif reg_ld_maskw == 1:
-            masked_dout = dmem_dout[16:]
+            masked_dout[:] = dmem_dout[16:]
         else:
-            masked_dout = dmem_dout
+            masked_dout[:] = dmem_dout
 
         if reg_wr_deferred==1 and reg_ld_rx == r_field:
             rx.next = masked_dout
@@ -922,11 +894,11 @@ def cpu( clk, rstn,
     def accforw():
         masked_dout = modbv(0)[32:]
         if acc_ld_maskb == 1:
-            masked_dout = dmem_dout[8:]
+            masked_dout[:] = dmem_dout[8:]
         elif acc_ld_maskw == 1:
-            masked_dout = dmem_dout[16:]
+            masked_dout[:] = dmem_dout[16:]
         else:
-            masked_dout = dmem_dout
+            masked_dout[:] = dmem_dout
 
         if acc_wr_deferred==1:
             acc.next = masked_dout
@@ -1152,11 +1124,11 @@ def cpu( clk, rstn,
     def to_acc():
         masked_dout = modbv(0)[32:]
         if acc_ld_maskb == 1:
-            masked_dout = dmem_dout[8:]
+            masked_dout[:] = dmem_dout[8:]
         elif acc_ld_maskw == 1:
-            masked_dout = dmem_dout[16:]
+            masked_dout[:] = dmem_dout[16:]
         else:
-            masked_dout = dmem_dout
+            masked_dout[:] = dmem_dout
 
         if wr_acc:
             acc_next.next = reg_wr_op
@@ -1201,11 +1173,11 @@ def cpu( clk, rstn,
                 reg_bank[i].next = 0
         else:
             if reg_ld_maskb == 1:
-                masked_dout = dmem_dout[8:]
+                masked_dout[:] = dmem_dout[8:]
             elif reg_ld_maskw == 1:
-                masked_dout = dmem_dout[16:]
+                masked_dout[:] = dmem_dout[16:]
             else:
-                masked_dout = dmem_dout
+                masked_dout[:] = dmem_dout
 
             if reg_wr_deferred:
                 reg_bank[ reg_ld_rx ].next = masked_dout
