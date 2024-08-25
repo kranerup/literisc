@@ -22,6 +22,7 @@ OPC_AND       = 13 # A = A & Rx
 OPC_OR        = 14 # A = A | Rx
 OPC_NEXT      = 15
 
+OPCI2_UNUSED3    = 8
 # op code jump
 OPCJ_J        = 0  # jump always
 OPCJ_JLT      = 1  # jump <   signed      n ^ v
@@ -59,18 +60,23 @@ OPCI_J_A     = 14 # PC = A
 OPCI_NOP     = 15 # NOP
 
 # op code inner 2
+OPCI2_UNUSED1    = 0
+OPCI2_UNUSED2    = 1
 OPCI2_LDB_A_OFFS = 2  # Rx = M[A+nn].b
 OPCI2_LDB_A      = 3  # Rx = M[A].b
 OPCI2_LDB_RX     = 4  # A = M[Rx].b
 OPCI2_STB_A_OFFS = 5  # M[A+nn].b = Rx
 OPCI2_STB_A      = 6  # M[A].b = Rx
 OPCI2_STB_RX     = 7  # M[Rx].b = A
+OPCI2_UNUSED3    = 8
+OPCI2_UNUSED4    = 9
 OPCI2_LDW_A_OFFS = 10 # Rx = M[A+nn].w
 OPCI2_LDW_A      = 11 # Rx = M[A].w
 OPCI2_LDW_RX     = 12 # A = M[Rx].w
 OPCI2_STW_A_OFFS = 13 # M[A+nn].w = Rx
 OPCI2_STW_A      = 14 # M[A].w = Rx
 OPCI2_STW_RX     = 15 # M[Rx].w = A
+
 
 # state
 ST_RESET = 0
@@ -104,6 +110,7 @@ sym_to_op = {}
 op_to_sym = {}
 alu_to_sym = {}
 inner_to_sym = {}
+inner2_to_sym = {}
 jmp_to_sym = {}
 
 for s,v in curr_globs.items():
@@ -115,6 +122,9 @@ for s,v in curr_globs.items():
         sym_to_op[s] = v
     if s.startswith("OPCI_"):
         inner_to_sym[v] = s
+        sym_to_op[s] = v
+    if s.startswith("OPCI2_"):
+        inner2_to_sym[v] = s
         sym_to_op[s] = v
     if s.startswith("ST_"):
         state_to_sym[v] = s
@@ -332,6 +342,7 @@ def cpu( clk, rstn,
                     sel_imem.next = PC
                     next_state.next = ST_NEXT_INSTR
             elif state == ST_READ_PART2:
+                # isn't it always OPC_NEXT in this state?
                 if op == OPC_NEXT and r_field == OPCI_POP_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
@@ -343,11 +354,18 @@ def cpu( clk, rstn,
                     clear_reg_cnt.next = 1
                     next_state.next = ST_REG_CNT 
                 elif op == OPC_NEXT and r_field == OPCI_NEXT:
-                    n_load_ir.next = 1
-                    n_load_imm.next = 0
-                    inc_pc.next = 1
-                    sel_imem.next = PC
-                    next_state.next = ST_NEXT_INSTR
+                    if op2 == OPCI2_LDB_A_OFFS:
+                        n_load_ir.next = 0
+                        n_load_imm.next = 1
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        next_state.next = ST_READ_IMM
+                    else:
+                        n_load_ir.next = 1
+                        n_load_imm.next = 0
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        next_state.next = ST_NEXT_INSTR
             elif state == ST_REG_CNT:
                 if r_field == OPCI_POP_R:
                     if n_reg_cnt == 0:
@@ -727,6 +745,27 @@ def cpu( clk, rstn,
                     n_reg_ld_maskw.next = op2 == OPCI2_LDW_A
                     dmem_rd.next = 1
                     dmem_adr_sel.next = 0 # ALU
+                elif op2 == OPCI2_LDB_A_OFFS: # Rx = M[A+imm].b
+                    if state == ST_NEXT_INSTR:
+                        alu_oper.next = ALU_PASS_X
+                        alu_x_imm.next = 1
+                        alu_imm_width.next = 1 # 7 bits from instr byte
+                    elif state == ST_READ_IMM:
+                        if imm_more == 0:
+                            alu_oper.next = ALU_ADD
+                            alu_x_imm.next = 1
+                            alu_imm_width.next = 1 # 7 bits from instr byte
+                            n_reg_wr_deferred.next = 1
+                            n_reg_ld_rx.next = r_field2
+                            n_reg_ld_maskb.next = op2 == OPCI2_LDB_A_OFFS
+                            n_reg_ld_maskw.next = op2 == OPCI2_LDW_A_OFFS
+                            dmem_rd.next = 1
+                            dmem_adr_sel.next = 0 # ALU
+                        else:
+                            alu_oper.next = ALU_PASS_X
+                            alu_x_imm.next = 1
+                            alu_imm_width.next = 1 # 7 bits from instr byte
+
 
     if sim_print:
         @always(clk.negedge)
@@ -1150,10 +1189,17 @@ def cpu( clk, rstn,
         def obsff():
             obs_op.valid.next = 0
             if state == ST_NEXT_INSTR:
+                if not ( op == OPC_NEXT and r_field == OPCI_NEXT ):
+                    obs_op.valid.next = 1
+                    obs_op.op.next = op
+                    obs_op.op_jmp.next = r_field
+                    obs_op.op_inner.next = r_field
+            elif state == ST_READ_PART2:
                 obs_op.valid.next = 1
                 obs_op.op.next = op
                 obs_op.op_jmp.next = r_field
                 obs_op.op_inner.next = r_field
+                obs_op.op_inner2.next = op2
 
     @always_comb
     def extr_instr():

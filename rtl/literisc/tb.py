@@ -5,7 +5,7 @@ from modules.common.memory import memory
 from modules.common.Common import copySignal, multiflop
 
 from cpu import cpu
-from cpu import sym_to_op, op_to_sym, jmp_to_sym, inner_to_sym
+from cpu import sym_to_op, op_to_sym, jmp_to_sym, inner_to_sym, inner2_to_sym
 
 class InstrCov(Struct):
     def __init__(self):
@@ -45,6 +45,7 @@ class InstrCovCollector(object):
     covered_op = set()
     covered_jmp = set()
     covered_inner = set()
+    covered_inner2 = set()
 
     def sym_op(opl):
         return [ op_to_sym[o] for o in opl ]
@@ -52,6 +53,8 @@ class InstrCovCollector(object):
         return [ jmp_to_sym[o] for o in opl ]
     def sym_inner(opl):
         return [ inner_to_sym[o] for o in opl ]
+    def sym_inner2(opl):
+        return [ inner2_to_sym[o] for o in opl ]
 
     @classmethod
     def report(cls):
@@ -75,6 +78,13 @@ class InstrCovCollector(object):
             cls.sym_inner(
                 set(list(range(16))).difference(
                     cls.covered_inner)))
+
+        print("COV: -- inner 2 --")
+        print("COV: covered:",cls.sym_inner2(cls.covered_inner2))
+        print("COV: uncovered:",
+            cls.sym_inner2(
+                set(list(range(16))).difference(
+                    cls.covered_inner2)))
 
 def cpu_tester( clk, programs ):
 
@@ -281,8 +291,10 @@ def cpu_tester( clk, programs ):
             InstrCovCollector.covered_op.add( int(obs_op.op.val) )
             if obs_op.op == sym_to_op['OPC_JMP']:
                 InstrCovCollector.covered_jmp.add( int(obs_op.op_jmp))
-            if obs_op.op == sym_to_op['OPC_NEXT']:
+            if obs_op.op == sym_to_op['OPC_NEXT'] and obs_op.op_inner != sym_to_op['OPCI_NEXT']:
                 InstrCovCollector.covered_inner.add( int(obs_op.op_inner))
+            if obs_op.op == sym_to_op['OPC_NEXT'] and obs_op.op_inner == sym_to_op['OPCI_NEXT']:
+                InstrCovCollector.covered_inner2.add( int(obs_op.op_inner2))
 
 
     return instances()
@@ -1176,14 +1188,35 @@ def test_30(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
+def test_31(program,expect,pc,dmem):
+    # ---- test load word offs --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0xf8 # R1 = M[ A + 23 ].b
+    program[ 2 ] = 0x21 # -"-
+    program[ 3 ] = 23 # single byte immediate offset
+    dmem.append({'rd':1, 'adr':30, 'data':0x1234 })
+    expect[6] = { 'A': 0x34, 1: 0x34 }
+    program[ 4 ] = 0x11 # A = R1 ; forward mem data to reg operand
+    program[ 5 ] = 0xff # NOP
+    program[ 6 ] = 0x97 # A = 7 
+    program[ 7 ] = 0xf8 # R1 = M[ A + 151 ].b
+    program[ 8 ] = 0x21 # -"-
+    program[ 9 ] = 1 | 0x80 # two byte immediate offset
+    program[ 10 ] = 23
+    dmem.append({'rd':1, 'adr':158, 'data':0x789a })
+    expect[13] = { 'A': 7, 1: 0x9a }
+    program[11 ] = 0xff # NOP
+    program[12 ] = 0xff # NOP
+    program[13 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = list(range(1,28+1))
-    tests = [30]
+    tests = [31]
+    tests = list(range(1,31+1))
 
     for tid in tests:
         expect = dict()
