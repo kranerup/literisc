@@ -1189,7 +1189,7 @@ def test_30(program,expect,pc,dmem):
     program[ 7 ] = 0xff # NOP
 
 def test_31(program,expect,pc,dmem):
-    # ---- test load word offs --------
+    # ---- test load byte with offs --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0xf8 # R1 = M[ A + 23 ].b
     program[ 2 ] = 0x21 # -"-
@@ -1209,13 +1209,34 @@ def test_31(program,expect,pc,dmem):
     program[12 ] = 0xff # NOP
     program[13 ] = 0xff # NOP
 
+def test_32(program,expect,pc,dmem):
+    # ---- test load word with offs --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0xf8 # R1 = M[ A + 23 ].w
+    program[ 2 ] = 0xa1 # -"-
+    program[ 3 ] = 23 # single byte immediate offset
+    dmem.append({'rd':1, 'adr':30, 'data':0xffff1234 })
+    expect[6] = { 'A': 0x1234, 1: 0x1234 }
+    program[ 4 ] = 0x11 # A = R1 ; forward mem data to reg operand
+    program[ 5 ] = 0xff # NOP
+    program[ 6 ] = 0x97 # A = 7 
+    program[ 7 ] = 0xf8 # R1 = M[ A + 151 ].b
+    program[ 8 ] = 0xa1 # -"-
+    program[ 9 ] = 1 | 0x80 # two byte immediate offset
+    program[ 10 ] = 23
+    dmem.append({'rd':1, 'adr':158, 'data':0xffff789a })
+    expect[13] = { 'A': 7, 1: 0x789a }
+    program[11 ] = 0xff # NOP
+    program[12 ] = 0xff # NOP
+    program[13 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [31]
+    tests = [32]
     tests = list(range(1,31+1))
 
     for tid in tests:

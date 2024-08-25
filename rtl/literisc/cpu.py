@@ -354,7 +354,7 @@ def cpu( clk, rstn,
                     clear_reg_cnt.next = 1
                     next_state.next = ST_REG_CNT 
                 elif op == OPC_NEXT and r_field == OPCI_NEXT:
-                    if op2 == OPCI2_LDB_A_OFFS:
+                    if op2 == OPCI2_LDB_A_OFFS or op2 == OPCI2_LDW_A_OFFS :
                         n_load_ir.next = 0
                         n_load_imm.next = 1
                         inc_pc.next = 1
@@ -745,7 +745,7 @@ def cpu( clk, rstn,
                     n_reg_ld_maskw.next = op2 == OPCI2_LDW_A
                     dmem_rd.next = 1
                     dmem_adr_sel.next = 0 # ALU
-                elif op2 == OPCI2_LDB_A_OFFS: # Rx = M[A+imm].b
+                elif op2 == OPCI2_LDB_A_OFFS or op2 == OPCI2_LDW_A_OFFS: # Rx = M[A+imm].b
                     if state == ST_NEXT_INSTR:
                         alu_oper.next = ALU_PASS_X
                         alu_x_imm.next = 1
