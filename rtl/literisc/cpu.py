@@ -213,6 +213,8 @@ def cpu( clk, rstn,
     load_ir = Signal(modbv(0)[1:])
     n_load_ir2 = Signal(modbv(0)[1:])
     load_ir2 = Signal(modbv(0)[1:])
+    n_op2_valid = Signal(modbv(0)[1:])
+    op2_valid = Signal(modbv(0)[1:])
     inc_pc = Signal(modbv(0)[1:])
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
@@ -222,7 +224,7 @@ def cpu( clk, rstn,
     n_load_imm = Signal(modbv(0)[1:])
     load_more = Signal(modbv(0)[1:])
     imm_more = Signal(modbv(0)[1:])
-    op_sel_rx = Signal(modbv(0)[1:])
+    op_sel_rx = Signal(modbv(0)[1:]) # TODO: not used, remove
     alu_x_imm = Signal(modbv(0)[1:])
     alu_imm_width = Signal(modbv(0)[2:])
     alu_y_pc = Signal(modbv(0)[1:])
@@ -240,9 +242,13 @@ def cpu( clk, rstn,
     n_reg_ld_rx = Signal(modbv(0)[4:])
     n_reg_ld_maskb = Signal(modbv(0)[4:])
     n_reg_ld_maskw = Signal(modbv(0)[4:])
+    n_acc_ld_maskb = Signal(modbv(0)[4:])
+    n_acc_ld_maskw = Signal(modbv(0)[4:])
     reg_ld_rx = Signal(modbv(0)[4:])
     reg_ld_maskb = Signal(modbv(0)[4:])
     reg_ld_maskw = Signal(modbv(0)[4:])
+    acc_ld_maskb = Signal(modbv(0)[4:])
+    acc_ld_maskw = Signal(modbv(0)[4:])
     wr_acc = Signal(modbv(0)[1:])
     wr_reg = Signal(modbv(0)[1:])
     reg_dest  = Signal(modbv(0)[4:])
@@ -257,6 +263,7 @@ def cpu( clk, rstn,
     reg_cnt  = Signal(modbv(0)[4:])
     n_sp = Signal(modbv(0)[32:])
     sel_srp = Signal(modbv(0)[1:])
+    rx_field2 = Signal(modbv(0)[1:])
 
     SP = 14
     SRP = 15
@@ -271,11 +278,14 @@ def cpu( clk, rstn,
     iir2 = multiflop( n_ir2, ir2, clk, rstn )
     irc  = multiflop( n_load_ir, load_ir, clk, rstn )
     irc2 = multiflop( n_load_ir2, load_ir2, clk, rstn )
+    iop2 = multiflop( n_op2_valid, op2_valid, clk, rstn )
     idf  = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
     ida  = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
     idr  = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
     idrm = multiflop( n_reg_ld_maskb, reg_ld_maskb, clk, rstn )
     idrmw= multiflop( n_reg_ld_maskw, reg_ld_maskw, clk, rstn )
+    idam = multiflop( n_acc_ld_maskb, acc_ld_maskb, clk, rstn )
+    idamw= multiflop( n_acc_ld_maskw, acc_ld_maskw, clk, rstn )
     ili  = multiflop( n_load_imm, load_imm, clk, rstn )
 
     @always_comb
@@ -284,6 +294,7 @@ def cpu( clk, rstn,
         n_load_ir.next = 0
         n_load_imm.next = 0
         n_load_ir2.next = 0
+        n_op2_valid.next = 0
         next_state.next = ST_NEXT_INSTR
         sel_imem.next = 0
         load_more.next = 0
@@ -320,6 +331,7 @@ def cpu( clk, rstn,
                     n_load_ir2.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
+                    n_op2_valid.next = r_field == OPCI_NEXT
                     next_state.next = ST_READ_PART2
                 else:
                     n_load_ir.next = 1
@@ -334,6 +346,7 @@ def cpu( clk, rstn,
                     load_more.next = 1
                     inc_pc.next = 1
                     sel_imem.next = PC
+                    n_op2_valid.next = op2_valid
                     next_state.next = ST_READ_IMM
                 else:
                     n_load_ir.next = 1
@@ -359,6 +372,7 @@ def cpu( clk, rstn,
                         n_load_imm.next = 1
                         inc_pc.next = 1
                         sel_imem.next = PC
+                        n_op2_valid.next = 1
                         next_state.next = ST_READ_IMM
                     else:
                         n_load_ir.next = 1
@@ -428,6 +442,7 @@ def cpu( clk, rstn,
         sel_srp.next = 0
         inc_reg_cnt.next = 0
         sel_reg_cnt.next = 0
+        rx_field2.next = 9
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -732,7 +747,8 @@ def cpu( clk, rstn,
                     dec_sp.next = 1
                     dmem_wr.next = 1
                     sel_reg_cnt.next = 1
-            elif r_field == OPCI_NEXT:
+            elif r_field == OPCI_NEXT and op2_valid == 1:
+                rx_field2.next = 1
                 if op2 == OPCI2_LDB_A or op2 == OPCI2_LDW_A: # Rx = M[A].b/w
                     alu_oper.next = ALU_PASS_Y
                     op_sel_rx.next = 0 # D.C.
@@ -765,6 +781,17 @@ def cpu( clk, rstn,
                             alu_oper.next = ALU_PASS_X
                             alu_x_imm.next = 1
                             alu_imm_width.next = 1 # 7 bits from instr byte
+                elif op2 == OPCI2_LDB_RX or op2 == OPCI2_LDW_RX: # A = M[Rx].b/w
+                    alu_oper.next = ALU_PASS_X
+                    op_sel_rx.next = 0 # D.C.
+                    alu_x_imm.next = 0
+                    wr_acc.next = 0
+                    alu_y_pc.next = 0 # acc
+                    n_acc_wr_deferred.next = 1
+                    n_acc_ld_maskb.next = op2 == OPCI2_LDB_RX
+                    n_acc_ld_maskw.next = op2 == OPCI2_LDW_RX
+                    dmem_rd.next = 1
+                    dmem_adr_sel.next = 0 # ALU
 
 
     if sim_print:
@@ -870,6 +897,8 @@ def cpu( clk, rstn,
             rx_idx.next = n_reg_cnt
         elif sel_srp == 1:
             rx_idx.next = SRP
+        elif rx_field2 == 1:
+            rx_idx.next = r_field2
         else:
             rx_idx.next = r_field
 
@@ -891,8 +920,16 @@ def cpu( clk, rstn,
 
     @always_comb
     def accforw():
+        masked_dout = modbv(0)[32:]
+        if acc_ld_maskb == 1:
+            masked_dout = dmem_dout[8:]
+        elif acc_ld_maskw == 1:
+            masked_dout = dmem_dout[16:]
+        else:
+            masked_dout = dmem_dout
+
         if acc_wr_deferred==1:
-            acc.next = dmem_dout
+            acc.next = masked_dout
         else:
             acc.next = acc_ff
 
@@ -1113,10 +1150,18 @@ def cpu( clk, rstn,
 
     @always_comb
     def to_acc():
+        masked_dout = modbv(0)[32:]
+        if acc_ld_maskb == 1:
+            masked_dout = dmem_dout[8:]
+        elif acc_ld_maskw == 1:
+            masked_dout = dmem_dout[16:]
+        else:
+            masked_dout = dmem_dout
+
         if wr_acc:
             acc_next.next = reg_wr_op
         elif acc_wr_deferred==1:
-            acc_next.next = dmem_dout
+            acc_next.next = masked_dout
         else:
             acc_next.next = acc
 

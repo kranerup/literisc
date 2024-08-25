@@ -148,6 +148,7 @@ def cpu_tester( clk, programs ):
                     no_more_instr = True
   
                 if dmem_rd.val == 1 or dmem_wr.val == 1:
+                    print(f"dmem rd:{dmem_rd.val} wr:{dmem_wr.val}",dmem)
                     exp_dmem = dmem[0]
                     dmem = dmem[1:]
                     dadr = int(dmem_adr.val)
@@ -1230,14 +1231,50 @@ def test_32(program,expect,pc,dmem):
     program[12 ] = 0xff # NOP
     program[13 ] = 0xff # NOP
 
+def test_33(program,expect,pc,dmem):
+    # ---- test load to A --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0x03 # R3 = A = 7
+    program[ 2 ] = 0xf8 # A = M[ R3 ].b
+    program[ 3 ] = 0x43 # ...
+    dmem.append({'rd':1, 'adr':7, 'data':0xff12 })
+    expect[6] = { 'A': 0x12, 3: 7 }
+    program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0xff # NOP
+    program[ 6 ] = 0xf8 # A = M[ R3 ].l
+    program[ 7 ] = 0x43 # ...
+    dmem.append({'rd':1, 'adr':7, 'data':0xff33 })
+    program[ 8 ] = 0x01 # R1 = A = 7, use A directly after load
+    expect[10] = { 'A': 0x33, 1: 0x33, 3: 7 }
+    program[ 9 ] = 0xff # NOP
+    program[ 10 ] = 0xff # NOP
+
+def test_34(program,expect,pc,dmem):
+    # ---- test load to A --------
+    program[ 0 ] = 0x97 # A = 7 
+    program[ 1 ] = 0x03 # R3 = A = 7
+    program[ 2 ] = 0xf8 # A = M[ R3 ].b
+    program[ 3 ] = 0xc3 # ...
+    dmem.append({'rd':1, 'adr':7, 'data':0xff1234 })
+    expect[6] = { 'A': 0x1234, 3: 7 }
+    program[ 4 ] = 0xff # NOP
+    program[ 5 ] = 0xff # NOP
+    program[ 6 ] = 0xf8 # A = M[ R3 ].l
+    program[ 7 ] = 0xc3 # ...
+    dmem.append({'rd':1, 'adr':7, 'data':0xff3322 })
+    program[ 8 ] = 0x01 # R1 = A = 7, use A directly after load
+    expect[10] = { 'A': 0x3322, 1: 0x3322, 3: 7 }
+    program[ 9 ] = 0xff # NOP
+    program[ 10 ] = 0xff # NOP
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [32]
-    tests = list(range(1,31+1))
+    tests = [34]
+    tests = list(range(1,34+1))
 
     for tid in tests:
         expect = dict()
