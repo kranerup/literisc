@@ -897,7 +897,7 @@ def cpu( clk, rstn,
             rx_idx.next = n_reg_cnt
         elif sel_srp == 1:
             rx_idx.next = SRP
-        elif rx_field2 == 1:
+        elif op2_valid == 1 and rx_field2 == 1:
             rx_idx.next = r_field2
         else:
             rx_idx.next = r_field
