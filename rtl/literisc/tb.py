@@ -102,6 +102,8 @@ def cpu_tester( clk, programs ):
     dmem_dout = Signal(modbv(0)[32:])
     dmem_rd = Signal(modbv(0)[1:])
     dmem_wr = Signal(modbv(0)[1:])
+    dmem_wmask = Signal(modbv(0)[4:]) # per-byte mask for 32-bit wide memory
+    dmem_wr_sz = Signal(modbv(0)[2:])
 
     load_done = Signal(modbv(0)[1:])
     halt = Signal(modbv(0)[1:])
@@ -173,11 +175,18 @@ def cpu_tester( clk, programs ):
                             else:
                                 print("check dmem wr adr MISS act:", dadr, "exp:", exp_dmem['adr'])
                                 any_fail = True
-                            if dmem_din.val == exp_dmem['data']:
-                                print("check dmem wr data ok", dmem_din.val)
+                            if dmem_wmask.val == 0b0001:
+                                dmem_wr_masked = dmem_din.val & 0xff
+                            elif dmem_wmask.val == 0b0011:
+                                dmem_wr_masked = dmem_din.val & 0xffff
+                            elif dmem_wmask.val == 0b1111:
+                                dmem_wr_masked = dmem_din.val
+
+                            if dmem_wr_masked == exp_dmem['data']:
+                                print("check dmem wr data ok", dmem_wr_masked )
                             else:
                                 print("check dmem wr data MISS act:",
-                                      dmem_din.val, "exp:", exp_dmem['data'])
+                                      dmem_wr_masked, "exp:", exp_dmem['data'])
 
                         else:
                             print("check dmem MISS act: wr exp: rd")
@@ -243,6 +252,14 @@ def cpu_tester( clk, programs ):
 
         raise StopSimulation
 
+    @always_comb
+    def mask():
+        if dmem_wr_sz == 0:
+            dmem_wmask.next = 0b0001
+        elif dmem_wr_sz == 1:
+            dmem_wmask.next = 0b0011
+        else: # sz=2
+            dmem_wmask.next = 0b1111
 
     dmem = memory(
         idata = dmem_din,
@@ -251,6 +268,7 @@ def cpu_tester( clk, programs ):
         waddr = dmem_adr,
         renable = dmem_rd,
         wenable = dmem_wr,
+        wmask   = dmem_wmask,
         clk = clk,
         rstn = rstn,
         depth = dmem_depth,
@@ -264,23 +282,24 @@ def cpu_tester( clk, programs ):
     obs_op = InstrCov()
 
     icpu = cpu(
-        clk = clk,
-        rstn = rstn,
-        imem_dout = imem_dout,
-        imem_adr = imem_radr,
-        imem_rd = imem_rd,
-        dmem_din = dmem_din,
-        dmem_dout = dmem_dout,
-        dmem_adr = dmem_adr,
-        dmem_rd = dmem_rd,
-        dmem_wr = dmem_wr,
-        halt = halt,
+        clk        = clk,
+        rstn       = rstn,
+        imem_dout  = imem_dout,
+        imem_adr   = imem_radr,
+        imem_rd    = imem_rd,
+        dmem_din   = dmem_din,
+        dmem_dout  = dmem_dout,
+        dmem_adr   = dmem_adr,
+        dmem_rd    = dmem_rd,
+        dmem_wr    = dmem_wr,
+        dmem_wr_sz = dmem_wr_sz,
+        halt       = halt,
         enable_obs = True,
-        obs_regs = obs_regs,
-        obs_acc = obs_acc,
-        obs_cc = obs_cc,
-        obs_op = obs_op,
-        sim_print = True
+        obs_regs   = obs_regs,
+        obs_acc    = obs_acc,
+        obs_cc     = obs_cc,
+        obs_op     = obs_op,
+        sim_print  = True
     )
 
    
@@ -1267,14 +1286,104 @@ def test_34(program,expect,pc,dmem):
     program[ 9 ] = 0xff # NOP
     program[ 10 ] = 0xff # NOP
 
+def test_35(program,expect,pc,dmem):
+    # ---- test store long --------
+    p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
+    program.update( p )
+
+    program[ n_pc  ] = 0x62 # M[A].l = R2 -> M[7]=0x88776655
+    program[ n_pc+1 ] = 0xff # NOP
+    program[ n_pc+2 ] = 0xff # NOP
+    dmem.append({'rd':0, 'adr':7, 'data':0x88776655 })
+
+def test_36(program,expect,pc,dmem):
+    # ---- test store byte --------
+    p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
+    program.update( p )
+
+    program[ n_pc  ] = 0xf8 # M[A].b = R2 -> M[7]=0x55
+    program[ n_pc+1 ] = 0x62
+    program[ n_pc+2 ] = 0xff # NOP
+    program[ n_pc+3 ] = 0xff # NOP
+    dmem.append({'rd':0, 'adr':7, 'data':0x00000055 })
+
+def test_37(program,expect,pc,dmem):
+    # ---- test store byte --------
+    p, n_pc = load_a_rx( a_val=0x88776655, rx=2, rx_val=7, pc=0 )
+    program.update( p )
+
+    program[ n_pc  ] = 0xf8 # M[R2].b = A -> M[7]=0x55
+    program[ n_pc+1 ] = 0x72
+    program[ n_pc+2 ] = 0xff # NOP
+    program[ n_pc+3 ] = 0xff # NOP
+    dmem.append({'rd':0, 'adr':7, 'data':0x00000055 })
+
+def test_38(program,expect,pc,dmem):
+    # ---- test store byte w offs --------
+    p, n_pc = load_a_rx( a_val=7, rx=3, rx_val=0x88776655, pc=0 )
+    program.update( p )
+    program[ n_pc  ] = 0xf8 # M[ A + 23 ].b = R3 -> M[30]=0x55
+    program[ n_pc+1] = 0x53
+    dmem.append({'rd':0, 'adr':7+23, 'data':0x55 })
+    program[ n_pc+2 ] = 23 # single byte immediate offset
+    program[ n_pc+3 ] = 0xff # NOP
+    program[ n_pc+4 ] = 0xff # NOP
+    program[ n_pc+5  ] = 0xf8 # M[ A + 151 ].b = R3 -> M[158]=0x55
+    program[ n_pc+6] = 0x53
+    program[ n_pc+7 ] = 1 | 0x80
+    program[ n_pc+8 ] = 23 # two byte immediate offset
+    dmem.append({'rd':0, 'adr':(1<<7)|23 + 7, 'data':0x55 })
+    program[ n_pc+9] = 0xff # NOP
+    program[ n_pc+10] = 0xff # NOP
+
+def test_39(program,expect,pc,dmem):
+    # ---- test store word --------
+    p, n_pc = load_a_rx( a_val=0x88776655, rx=2, rx_val=7, pc=0 )
+    program.update( p )
+
+    program[ n_pc  ] = 0xf8 # M[R2].w = A -> M[7]=0x6655
+    program[ n_pc+1 ] = 0xf2
+    program[ n_pc+2 ] = 0xff # NOP
+    program[ n_pc+3 ] = 0xff # NOP
+    dmem.append({'rd':0, 'adr':7, 'data':0x00006655 })
+
+def test_40(program,expect,pc,dmem):
+    # ---- test store byte w offs --------
+    p, n_pc = load_a_rx( a_val=7, rx=3, rx_val=0x88776655, pc=0 )
+    program.update( p )
+    program[ n_pc  ] = 0xf8 # M[ A + 23 ].b = R3 -> M[30]=0x55
+    program[ n_pc+1] = 0xd3
+    dmem.append({'rd':0, 'adr':7+23, 'data':0x6655 })
+    program[ n_pc+2 ] = 23 # single byte immediate offset
+    program[ n_pc+3 ] = 0xff # NOP
+    program[ n_pc+4 ] = 0xff # NOP
+    program[ n_pc+5  ] = 0xf8 # M[ A + 151 ].b = R3 -> M[158]=0x55
+    program[ n_pc+6] = 0xd3
+    program[ n_pc+7 ] = 1 | 0x80
+    program[ n_pc+8 ] = 23 # two byte immediate offset
+    dmem.append({'rd':0, 'adr':(1<<7)|23 + 7, 'data':0x6655 })
+    program[ n_pc+9] = 0xff # NOP
+    program[ n_pc+10] = 0xff # NOP
+
+def test_41(program,expect,pc,dmem):
+    # ---- test store word --------
+    p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
+    program.update( p )
+
+    program[ n_pc  ] = 0xf8 # M[A].w = R2 -> M[7]=0x6655
+    program[ n_pc+1 ] = 0xe2
+    program[ n_pc+2 ] = 0xff # NOP
+    program[ n_pc+3 ] = 0xff # NOP
+    dmem.append({'rd':0, 'adr':7, 'data':0x00006655 })
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [34]
-    tests = list(range(1,34+1))
+    tests = [41]
+    tests = list(range(1,41+1))
 
     for tid in tests:
         expect = dict()
@@ -1324,6 +1433,7 @@ def main():
         dmem_dout = Signal(modbv(0)[32:])
         dmem_rd = Signal(modbv(0)[1:])
         dmem_wr = Signal(modbv(0)[1:])
+        dmem_wr_sz = Signal(modbv(0)[2:])
 
         halt = Signal(modbv(0)[1:])
 
@@ -1337,6 +1447,7 @@ def main():
                 dmem_adr,
                 dmem_rd,
                 dmem_wr,
+                dmem_wr_sz,
                 halt,
                 False,
                 None,

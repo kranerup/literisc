@@ -131,6 +131,25 @@ for s,v in curr_globs.items():
     if s.startswith("ALU_"):
         alu_to_sym[v] = s
 
+#----------------------
+# dmem interface:
+# dmem_adr: byte addresses but:
+#  - dword accesses are always word aligned [1:0]==0
+#  - byte accesses can be any alignment
+# dmem_wr_sz:  0 - byte, 1 - 16-bit word, 2 - 32-bit word
+# dmem_dout: read data from memory
+# dmem_din:  write data to memory
+#            when byte write the lowest bits [7:0] are valid
+#            when word write the lowest bits [15:0] are valid
+#----------------------
+# About dmem. There are several possibilities. The physical memory
+# is 8-bits, 16-bits or 32-bits wide.
+# The physical memory has write mask or not.
+# Write mask allows 8/16-bit writes to 16/32-bit memory in one cycle.
+# Without write mask a 16/32-bit memory requires a read/modify/write
+# sequence for byte/word write.
+#----------------------
+
 
 def cpu( clk, rstn,
          imem_dout,
@@ -141,6 +160,7 @@ def cpu( clk, rstn,
          dmem_adr,
          dmem_rd,
          dmem_wr,
+         dmem_wr_sz, # 0 - byte, 1 - 16-bit word, 2 - 32-bit word
          halt,
          enable_obs,
          obs_regs,
@@ -351,7 +371,7 @@ def cpu( clk, rstn,
                     sel_imem.next = PC
                     next_state.next = ST_NEXT_INSTR
             elif state == ST_READ_PART2:
-                # isn't it always OPC_NEXT in this state?
+                # TODO: isn't it always OPC_NEXT in this state?
                 if op == OPC_NEXT and r_field == OPCI_POP_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
@@ -364,6 +384,13 @@ def cpu( clk, rstn,
                     next_state.next = ST_REG_CNT 
                 elif op == OPC_NEXT and r_field == OPCI_NEXT:
                     if op2 == OPCI2_LDB_A_OFFS or op2 == OPCI2_LDW_A_OFFS :
+                        n_load_ir.next = 0
+                        n_load_imm.next = 1
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        n_op2_valid.next = 1
+                        next_state.next = ST_READ_IMM
+                    elif op2 == OPCI2_STB_A_OFFS or op2 == OPCI2_STW_A_OFFS :
                         n_load_ir.next = 0
                         n_load_imm.next = 1
                         inc_pc.next = 1
@@ -420,6 +447,7 @@ def cpu( clk, rstn,
         dec_sp.next = 0
         dmem_rd.next = 0
         dmem_wr.next = 0
+        dmem_wr_sz.next = 2
         inc_sp.next = 0
         load_pc.next = 0
         n_reg_ld_rx.next = 0
@@ -756,6 +784,28 @@ def cpu( clk, rstn,
                             alu_oper.next = ALU_PASS_X
                             alu_x_imm.next = 1
                             alu_imm_width.next = 1 # 7 bits from instr byte
+                elif op2 == OPCI2_STB_A_OFFS or op2 == OPCI2_STW_A_OFFS : # M[A+nn].b/w = Rx
+                    if state == ST_NEXT_INSTR:
+                        alu_oper.next = ALU_PASS_X
+                        alu_x_imm.next = 1
+                        alu_imm_width.next = 1 # 7 bits from instr byte
+                    elif state == ST_READ_IMM:
+                        if imm_more == 0:
+                            alu_oper.next = ALU_ADD
+                            alu_x_imm.next = 1
+                            alu_imm_width.next = 1 # 7 bits from instr byte
+                            alu_y_pc.next = 0 # acc
+                            dmem_wr.next = 1
+                            if op2 == OPCI2_STB_A_OFFS:
+                                dmem_wr_sz.next = 0
+                            elif op2 == OPCI2_STW_A_OFFS:
+                                dmem_wr_sz.next = 1
+                            dmem_adr_sel.next = 0 # ALU
+                            dmem_wr_acc.next = 0 # Rx
+                        else:
+                            alu_oper.next = ALU_PASS_X
+                            alu_x_imm.next = 1
+                            alu_imm_width.next = 1 # 7 bits from instr byte
                 elif op2 == OPCI2_LDB_RX or op2 == OPCI2_LDW_RX: # A = M[Rx].b/w
                     alu_oper.next = ALU_PASS_X
                     alu_x_imm.next = 0
@@ -766,6 +816,29 @@ def cpu( clk, rstn,
                     n_acc_ld_maskw.next = op2 == OPCI2_LDW_RX
                     dmem_rd.next = 1
                     dmem_adr_sel.next = 0 # ALU
+                elif op2 == OPCI2_STB_A:
+                    alu_oper.next = ALU_PASS_Y
+                    alu_x_imm.next = 0 # D.C.
+                    wr_acc.next = 0
+                    alu_y_pc.next = 0 # acc
+                    dmem_wr.next = 1
+                    dmem_adr_sel.next = 0 # ALU
+                    dmem_wr_acc.next = 0 # Rx
+                    dmem_wr_sz.next = 0 # byte
+                elif op2 == OPCI2_STB_RX: # M[Rx].b = A
+                    alu_oper.next = ALU_PASS_X # Rx
+                    alu_x_imm.next = 0 # D.C.
+                    dmem_wr.next = 1
+                    dmem_adr_sel.next = 0 # ALU
+                    dmem_wr_acc.next = 1 # Acc
+                    dmem_wr_sz.next = 0 # byte
+                elif op2 == OPCI2_STW_RX: # M[Rx].w = A
+                    alu_oper.next = ALU_PASS_X # Rx
+                    alu_x_imm.next = 0 # D.C.
+                    dmem_wr.next = 1
+                    dmem_adr_sel.next = 0 # ALU
+                    dmem_wr_acc.next = 1 # Acc
+                    dmem_wr_sz.next = 1 # word
 
 
     if sim_print:
