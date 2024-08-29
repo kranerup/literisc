@@ -14,26 +14,63 @@
 ;;; data which is variable length and follows the first byte in the instruction.
 ;;; 
 ;;; Issues:
-;;;  - CC is not part of the register bank. Awkward to save CC on interrupt,
 ;;;  - no XOR instruction
 ;;;  - should mvi really sign extend? Loading constants with upper zeros but
 ;;;    with highest immediate bit set is not possible. Instead must add another
 ;;;    immediate byte with all zeros.
 ;;;  - document this:
-;;;    But since ld/st can't do byte operations perhaps all should use word addresses.
 ;;;    - all memory accesses are 32-bit long
 ;;;    - memory addresses are byte addresses
 ;;;    - byte order is little endian (lsb is a lowest address)
 ;;;    - unaligned 32-bit access is never done. The lower 2 address bits
 ;;;      are masked before memory access, resulting in aligned access.
+;;;    - byte/word ld/st can use byte/word aligned accesses
 ;;;  - jump offset is relative the first byte after the jump instruction.
 ;;;    - j #0 is therefore a NOP
 ;;;    - j #1 skips one byte after the jump instruction
 ;;;    - j #-1 jumps to last byte in jump instruction
 ;;;    - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
-;;;  - byte operations like string ops seems inefficient
-;;;    - have added byte ld/st to solve this
-;;;  - no wait for interrupt instruction
+;;;  - interrupts
+;;;    - wait for interrupt instruction
+;;;    - CC is not part of the register bank. Awkward to save CC on interrupt,
+;;;    - interrupt action
+;;;      - save current PC, disable interrupts, save registers and cc on stack.
+;;;      - no interrupt stack, use the current stack
+;;;      - is there a way to avoid adding a full register
+;;;      - interrupt sets di state, holds PC, runs a sequence like "push R15"
+;;;        but starts with a push PC. Then jump to interrupt handler at 0 + 6.
+;;;        This allows reset to start at 0 and there place a jump instruction
+;;;        to any 32-bit location. At 6 the interrupt handler starts. Since all
+;;;        registers except A and CC are pushed they must be pushed but it's now
+;;;        allowed to clobber R0-R13:
+;;;          R0 = A
+;;;          push R0
+;;;          A = CC
+;;;          R0 = A
+;;;          push R0
+;;;        It might be easy to extend the push sequence to be "push
+;;;        PC,A,CC,R0-R15". Then interrupt handler doesn't need to do anything
+;;;        to save state.
+;;;    - return from interrupt, must be an instruction.
+;;;      pop in reverse order. But SP can't be pop:ed. Should SP be R15 instead
+;;;      then SRP is pushed and then push stops at SP?
+;;;    - di/ei
+
+;;;    ---- alt 1. implement interrupt using instructions --------
+;;;    intr: push-pc/di; jmp 6; push a; push srp; cc->a; a->r0; push r0 
+;;;    reti: pop-a; a->cc; pop srp; pop-a; pop-pc/ei
+;;;    - requires new instructions: cc->a, a->cc, pop-pc/ei
+;;;    - also swap srp/sp number
+;;;    - push-pc-di interrupt action but this is not an instruction
+;;;    --- alt 2. implement interrupt using state machine and a reti instruction -----
+;;;     Normally PC must be pushed/poped first/last but with a state machine
+;;;     the doesn't matter.
+;;;       push: R0-R14 (skip SP), A, CC, PC (with R0 first the counter
+;;;             will be the same as for push-rx instruction.
+;;;       reti just reversed order
+
+;;;  - no c32, chaining of 32-bit to 64-bit is difficult
+;;;  - only sub affects flag, but chaining of 32-bit adds is desirable
 ;;;
 ;;;
 ;;;  +------------+
@@ -47,6 +84,8 @@
 ;;;  +------------+
 ;;;  |  R15 (SRP) |
 ;;;  +------------+
+;;;
+;;;  CC: n v z c8 z8 c16 z16
 ;;; 
 ;;; [ o o o o  r r r r ]
 ;;; 
@@ -103,7 +142,7 @@
 ;;;    3        asr   A                 c = A, A = A >> 1, A<31> = A<30>
 ;;;    4 see below
 ;;;    5 see below
-;;;    6        push srp                sp = sp -4, M[sp].l = srp
+;;;    6        push  srp               sp = sp -4, M[sp] = srp
 ;;;    7        popa                    a = M[sp].l, sp = sp + 4
 ;;;    8 
 ;;;       [ o o o o  r r r r ]
@@ -749,17 +788,16 @@
         (aref (processor-state-r ps) rx)
         (processor-state-a ps))))
 
-
-; This instruction has been replaced with push-srp
-;    6    stst  srp             M[sp] = srp
-(defun i-stst-srp (ps dmem)
-  (mem-write-dword dmem (aref (processor-state-r ps) SP)
-                   (aref (processor-state-r ps) SRP)
-                   (processor-state-write-callback ps))
-  (if (processor-state-debug ps)
-      (format t "stst srp, M[~a] = ~a~%" 
-          (aref (processor-state-r ps) SP)
-          (aref (processor-state-r ps) SRP))))
+;;; replaced by push srp
+;;;;    6    stst  srp             M[sp] = srp
+;;;(defun i-stst-srp (ps dmem)
+;;;  (mem-write-dword dmem (aref (processor-state-r ps) SP)
+;;;                   (aref (processor-state-r ps) SRP)
+;;;                   (processor-state-write-callback ps))
+;;;  (if (processor-state-debug ps)
+;;;      (format t "stst srp, M[~a] = ~a~%" 
+;;;          (aref (processor-state-r ps) SP)
+;;;          (aref (processor-state-r ps) SRP))))
 
 ;    6    push  srp             sp = sp -4, M[sp] = srp
 (defun i-push-srp (ps dmem)

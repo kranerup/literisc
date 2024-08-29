@@ -6,6 +6,7 @@ from modules.common.Common import copySignal, multiflop
 
 from cpu import cpu
 from cpu import sym_to_op, op_to_sym, jmp_to_sym, inner_to_sym, inner2_to_sym
+from cpu import SP, SRP
 
 class InstrCov(Struct):
     def __init__(self):
@@ -107,6 +108,7 @@ def cpu_tester( clk, programs ):
 
     load_done = Signal(modbv(0)[1:])
     halt = Signal(modbv(0)[1:])
+    intr = Signal(modbv(0)[1:])
 
     imem_depth = 64
     dmem_depth = 1024 
@@ -126,6 +128,7 @@ def cpu_tester( clk, programs ):
             expect_reg = prog['expect'] # dict adr -> dict reg-nr -> value
             dmem = prog['dmem'] # list of dicts with { 'rd':1/0, 'adr', 'data' }
             print("expect",expect_reg)
+            irq = prog['irq']
 
             exp_seq = []
             if 'pc' in prog:
@@ -137,6 +140,7 @@ def cpu_tester( clk, programs ):
             yield clk.posedge
             rstn.next = 1 
             halt.next = 0 
+            intr.next = 0
             no_more_instr = False
             end_test = False
            
@@ -146,6 +150,9 @@ def cpu_tester( clk, programs ):
                 if adr in imem:
                     imem_dout.next = imem[ adr ]
                     print("imem_dout", imem[adr])
+
+                    if adr in irq:
+                        intr.next = ~intr
                 else:
                     no_more_instr = True
   
@@ -294,6 +301,7 @@ def cpu_tester( clk, programs ):
         dmem_wr    = dmem_wr,
         dmem_wr_sz = dmem_wr_sz,
         halt       = halt,
+        intr       = intr,
         enable_obs = True,
         obs_regs   = obs_regs,
         obs_acc    = obs_acc,
@@ -336,6 +344,7 @@ def cpu_top( clk, rstn ):
 
     load_done = Signal(modbv(0)[1:])
     halt = Signal(modbv(0)[1:])
+    intr = Signal(modbv(0)[1:])
 
     imem_depth = 64
     dmem_depth = 1024 
@@ -431,6 +440,7 @@ def cpu_top( clk, rstn ):
         dmem_rd = dmem_rd,
         dmem_wr = dmem_wr,
         halt = halt,
+        intr = intr,
         sim_print = True
     )
 
@@ -480,7 +490,7 @@ def no_side_effect( expect ):
     return expect
 
 
-def test_1(program,expect,pc,dmem):
+def test_1(program,expect,pc,dmem,irq):
     # ---- test immediate ------
     program[ 0  ] = 0x81 # R1 = 10
     program[ 1  ] = 10
@@ -512,7 +522,7 @@ def test_1(program,expect,pc,dmem):
 
     program[ 14 ] = 0xff # NOP
 
-def test_2(program,expect,pc,dmem):
+def test_2(program,expect,pc,dmem,irq):
     # ---- test mv and add ----------
     program[ 0 ] = 0x95 # A = 5 
     expect[ 2 ] = { 'A': 5 }
@@ -535,13 +545,13 @@ def test_2(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
-def test_3(program,expect,pc,dmem):
+def test_3(program,expect,pc,dmem,irq):
     # ---- test jumps ----------
     program[ 0 ] = 0xff # NOP
     program[ 1 ] = 0xaf # JSR 1
     program[ 2 ] = 1
     pc[2] = [4] # load at 2, expect next is 4
-    expect[ 5 ] = { 15: 3 }
+    expect[ 5 ] = { SRP: 3 }
 
     program[ 4 ] = 0xa0 # JMP 1
     program[ 5 ] = 1
@@ -558,7 +568,7 @@ def test_3(program,expect,pc,dmem):
     pc['loop'] = 10
 
 
-def test_4(program,expect,pc,dmem):
+def test_4(program,expect,pc,dmem,irq):
     # ---- test long jump -----
     program[ 0 ] = 0xff # NOP
     program[ 1 ] = 0xa0 # JMP 
@@ -569,7 +579,7 @@ def test_4(program,expect,pc,dmem):
     program[ 298 ] = 0xff # NOP
     program[ 299 ] = 0xff # NOP
 
-def test_5(program,expect,pc,dmem):
+def test_5(program,expect,pc,dmem,irq):
 # ---- test sub ----------
     program[ 0 ] = 0x92 # A = 2 
     expect[ 2 ] = { 'A': 2 }
@@ -621,7 +631,7 @@ def test_5(program,expect,pc,dmem):
     program[ 14 ] = 0xff # NOP
     program[ 15 ] = 0xff # NOP
 
-def test_6(program,expect,pc,dmem):
+def test_6(program,expect,pc,dmem,irq):
     # ---- test jnz ----------
     program[ 0 ] = 0x92 # A = 2 
     program[ 1 ] = 0x03 # R3 = A = 2
@@ -640,7 +650,7 @@ def test_6(program,expect,pc,dmem):
     program[ 300 ] = 0xff # NOP
     program[ 301 ] = 0xff # NOP
 
-def test_7(program,expect,pc,dmem):
+def test_7(program,expect,pc,dmem,irq):
     # ---- test jnz ----------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x03 # R3 = A = 7
@@ -659,7 +669,7 @@ def test_7(program,expect,pc,dmem):
     program[ 7 ] = 0xff # NOP
     program[ 8 ] = 0xff # NOP
 
-def test_8(program,expect,pc,dmem):
+def test_8(program,expect,pc,dmem,irq):
     # ---- test store --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -669,7 +679,7 @@ def test_8(program,expect,pc,dmem):
     program[ 5 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':3 })
 
-def test_9(program,expect,pc,dmem):
+def test_9(program,expect,pc,dmem,irq):
     # ---- test load --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -681,14 +691,14 @@ def test_9(program,expect,pc,dmem):
     program[ 5 ] = 0xff # NOP
     program[ 6 ] = 0xff # NOP
 
-def test_10(program,expect,pc,dmem):
+def test_10(program,expect,pc,dmem,irq):
     # ---- test j A --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0xfe # J A
     pc[1] = [ 7 ]
     program[ 7 ] = 0xff # NOP
 
-def test_11(program,expect,pc,dmem):
+def test_11(program,expect,pc,dmem,irq):
     # ---- test load to A --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x03 # R3 = A = 7
@@ -704,30 +714,30 @@ def test_11(program,expect,pc,dmem):
     program[ 7 ] = 0xff # NOP
     program[ 8 ] = 0xff # NOP
 
-def test_12(program,expect,pc,dmem):
+def test_12(program,expect,pc,dmem,irq):
     # ---- test pop A --------
-    program[ 0 ] = 0x8e # SP = 294
+    program[ 0 ] = 0x80 | SP # SP = 294
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
     program[ 3 ] = 0xff # NOP
     program[ 4 ] = 0xf7 # POP A
     dmem.append({'rd':1, 'adr':294, 'data':123 })
-    expect[6] = { 'A': 123, 14: 298 }
+    expect[6] = { 'A': 123, SP: 298 }
     program[ 5 ] = 0x01 # R1 = A = 123, use A directly after load
-    expect[7] = { 'A': 123, 1: 123, 14: 298 }
+    expect[7] = { 'A': 123, 1: 123, SP: 298 }
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
     program[ 8 ] = 0xf7 # POP A
     dmem.append({'rd':1, 'adr':298, 'data':32 })
-    expect[10] = { 'A': 32, 14: 302 }
-    program[ 9 ] = 0x1e # A = SP
-    expect[11] = { 'A': 302, 14: 302 }
+    expect[10] = { 'A': 32, SP: 302 }
+    program[ 9 ] = 0x10 | SP # A = SP
+    expect[11] = { 'A': 302, SP: 302 }
     program[ 10 ] = 0xff # NOP
     program[ 11 ] = 0xff # NOP
 
-def test_13(program,expect,pc,dmem):
+def test_13(program,expect,pc,dmem,irq):
     # ---- test pop Rx --------
-    program[ 0 ] = 0x8e # SP = 294
+    program[ 0 ] = 0x80 | SP # SP = 294
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
     program[ 3 ] = 0xf5 # POP R3
@@ -741,9 +751,9 @@ def test_13(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
-def test_14(program,expect,pc,dmem):
+def test_14(program,expect,pc,dmem,irq):
     # ---- test push Rx --------
-    program[ 0 ] = 0x8e # SP = 294
+    program[ 0 ] = 0x80 | SP # SP = 294
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
     
@@ -762,25 +772,25 @@ def test_14(program,expect,pc,dmem):
     dmem.append({'rd':0, 'adr':286, 'data':0x22 })
     dmem.append({'rd':0, 'adr':282, 'data':0x33 })
     dmem.append({'rd':0, 'adr':278, 'data':0x34 })
-    expect[14] = { 14: 278 }
+    expect[14] = { SP: 278 }
 
     program[ 13 ] = 0xff # NOP
     program[ 14 ] = 0xff # NOP
 
-def test_15(program,expect,pc,dmem):
+def test_15(program,expect,pc,dmem,irq):
     # ---- test push srp --------
-    program[ 0 ] = 0x8e # SP = 294
+    program[ 0 ] = 0x80 | SP # SP = 294
     program[ 1 ] = (294 >> 7) | 0x80
     program[ 2 ] = (294 & 0x7f)
-    program[ 3  ] = 0x8f # SRP = 0x34
+    program[ 3  ] = 0x80 | SRP # SRP = 0x34
     program[ 4  ] = 0x34
     program[ 5  ] = 0xf6 # PUSH SRP
     dmem.append({'rd':0, 'adr':290, 'data':0x34 })
-    expect[7] = { 14: 290 }
+    expect[7] = { SP: 290 }
     program[ 6  ] = 0xff # NOP
     program[ 7  ] = 0xff # NOP
 
-def test_16(program,expect,pc,dmem):
+def test_16(program,expect,pc,dmem,irq):
     # ---- test not, shifts --------
     program[ 0 ] = 0x82 # R2 = 294
     program[ 1 ] = (294 >> 7) | 0x80
@@ -804,7 +814,7 @@ def test_16(program,expect,pc,dmem):
     program[ 14 ] = 0xff # NOP
     program[ 15 ] = 0xff # NOP
 
-def test_17(program,expect,pc,dmem):
+def test_17(program,expect,pc,dmem,irq):
     # ---- test and/or --------
     program[ 0  ] = 0x9d # A = -3
     program[ 1  ] = 0x83 # R3 = 0x3f
@@ -816,7 +826,7 @@ def test_17(program,expect,pc,dmem):
     program[ 5  ] = 0xff # NOP
     program[ 6  ] = 0xff # NOP
 
-def test_18(program,expect,pc,dmem):
+def test_18(program,expect,pc,dmem,irq):
     # ---- test and/or --------
     program[ 0  ] = 0x9d # A = -3
     program[ 1  ] = 0xfa # A = A & 0xff = 0xfd
@@ -832,7 +842,7 @@ def test_18(program,expect,pc,dmem):
     program[ 7  ] = 0xff # NOP
     program[ 8  ] = 0xff # NOP
     
-def test_19(program,expect,pc,dmem):
+def test_19(program,expect,pc,dmem,irq):
     # ---- test load w offs --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x21 # R1 = M[ A + 23 ].l
@@ -851,7 +861,7 @@ def test_19(program,expect,pc,dmem):
     program[10 ] = 0xff # NOP
     program[11 ] = 0xff # NOP
 
-def test_20(program,expect,pc,dmem):
+def test_20(program,expect,pc,dmem,irq):
     # ---- test store w offs --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -868,7 +878,7 @@ def test_20(program,expect,pc,dmem):
     program[ 10] = 0xff # NOP
     program[ 11] = 0xff # NOP
 
-def test_21(program,expect,pc,dmem):
+def test_21(program,expect,pc,dmem,irq):
     # ---- test store M[Rx]  --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -898,7 +908,18 @@ def load_a_rx( a_val, rx, rx_val, pc ):
 
     return program, pc+12+1
 
-def test_22(program,expect,pc,dmem):
+def load_rx( rx, rx_val, pc ):
+    program = dict()
+    program[ pc+0   ] = 0x80 | rx # Rx = rx_val
+    program[ pc+1   ] = ((rx_val>>28) & 0xf ) | 0x80  # 31:28
+    program[ pc+2   ] = ((rx_val>>21) & 0x7f ) | 0x80  # 27:21
+    program[ pc+3   ] = ((rx_val>>14) & 0x7f ) | 0x80  # 20:14
+    program[ pc+4   ] = ((rx_val>>7) & 0x7f ) | 0x80  # 13:7
+    program[ pc+5   ] = (rx_val & 0x7f )         # 6:0
+
+    return program, pc+5+1
+
+def test_22(program,expect,pc,dmem,irq):
 # ---- test sub ----------
     p, n_pc = load_a_rx( a_val=121, rx=2, rx_val=0x7fffffff, pc=0 )
     program.update( p )
@@ -912,7 +933,7 @@ def test_22(program,expect,pc,dmem):
     program[ n_pc+1 ] = 0xff # NOP
     program[ n_pc+2 ] = 0xff # NOP
 
-def test_23(program,expect,pc,dmem):
+def test_23(program,expect,pc,dmem,irq):
 # ---- test unsigned jumps with carry=0 ----------
     p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val=100001, pc=0 )
     program.update( p )
@@ -974,7 +995,7 @@ def test_23(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_24(program,expect,pc,dmem):
+def test_24(program,expect,pc,dmem,irq):
 # ---- test unsigned jumps with carry=1 ----------
     p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val= 99999, pc=0 )
     program.update( p )
@@ -1036,7 +1057,7 @@ def test_24(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_25(program,expect,pc,dmem):
+def test_25(program,expect,pc,dmem,irq):
 # ---- test signed jumps ----------
     p, n_pc = load_a_rx( a_val=100000, rx=2, rx_val=99999, pc=0 )
     program.update( p )
@@ -1065,7 +1086,7 @@ def test_25(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_26(program,expect,pc,dmem):
+def test_26(program,expect,pc,dmem,irq):
 # ---- test signed jumps with n=1 ----------
     p, n_pc = load_a_rx( a_val=99999, rx=2, rx_val=100000, pc=0 )
     program.update( p )
@@ -1094,7 +1115,7 @@ def test_26(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_27(program,expect,pc,dmem):
+def test_27(program,expect,pc,dmem,irq):
 # ---- test signed jumps with n=v=1 ----------
     p, n_pc = load_a_rx( a_val=1, rx=2, rx_val=0x80000000, pc=0 )
     program.update( p )
@@ -1124,7 +1145,7 @@ def test_27(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_28(program,expect,pc,dmem):
+def test_28(program,expect,pc,dmem,irq):
 # ---- test eq/ne jumps ----------------
     p, n_pc = load_a_rx( a_val=0x80000000, rx=2, rx_val=0x80000000, pc=0 )
     program.update( p )
@@ -1182,7 +1203,7 @@ def test_28(program,expect,pc,dmem):
     program[ n_pc+3   ] = 0xff # NOP
     print("program:",program)
 
-def test_29(program,expect,pc,dmem):
+def test_29(program,expect,pc,dmem,irq):
     # ---- test load --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -1195,7 +1216,7 @@ def test_29(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
-def test_30(program,expect,pc,dmem):
+def test_30(program,expect,pc,dmem,irq):
     # ---- test load --------
     program[ 0 ] = 0x93 # A = 3 
     program[ 1 ] = 0x03 # R3 = A = 3
@@ -1208,7 +1229,7 @@ def test_30(program,expect,pc,dmem):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
-def test_31(program,expect,pc,dmem):
+def test_31(program,expect,pc,dmem,irq):
     # ---- test load byte with offs --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0xf8 # R1 = M[ A + 23 ].b
@@ -1229,7 +1250,7 @@ def test_31(program,expect,pc,dmem):
     program[12 ] = 0xff # NOP
     program[13 ] = 0xff # NOP
 
-def test_32(program,expect,pc,dmem):
+def test_32(program,expect,pc,dmem,irq):
     # ---- test load word with offs --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0xf8 # R1 = M[ A + 23 ].w
@@ -1250,7 +1271,7 @@ def test_32(program,expect,pc,dmem):
     program[12 ] = 0xff # NOP
     program[13 ] = 0xff # NOP
 
-def test_33(program,expect,pc,dmem):
+def test_33(program,expect,pc,dmem,irq):
     # ---- test load to A --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x03 # R3 = A = 7
@@ -1268,7 +1289,7 @@ def test_33(program,expect,pc,dmem):
     program[ 9 ] = 0xff # NOP
     program[ 10 ] = 0xff # NOP
 
-def test_34(program,expect,pc,dmem):
+def test_34(program,expect,pc,dmem,irq):
     # ---- test word load to A --------
     program[ 0 ] = 0x97 # A = 7 
     program[ 1 ] = 0x03 # R3 = A = 7
@@ -1286,7 +1307,7 @@ def test_34(program,expect,pc,dmem):
     program[ 9 ] = 0xff # NOP
     program[ 10 ] = 0xff # NOP
 
-def test_35(program,expect,pc,dmem):
+def test_35(program,expect,pc,dmem,irq):
     # ---- test store long --------
     p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
     program.update( p )
@@ -1296,7 +1317,7 @@ def test_35(program,expect,pc,dmem):
     program[ n_pc+2 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':0x88776655 })
 
-def test_36(program,expect,pc,dmem):
+def test_36(program,expect,pc,dmem,irq):
     # ---- test store byte --------
     p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
     program.update( p )
@@ -1307,7 +1328,7 @@ def test_36(program,expect,pc,dmem):
     program[ n_pc+3 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':0x00000055 })
 
-def test_37(program,expect,pc,dmem):
+def test_37(program,expect,pc,dmem,irq):
     # ---- test store byte --------
     p, n_pc = load_a_rx( a_val=0x88776655, rx=2, rx_val=7, pc=0 )
     program.update( p )
@@ -1318,7 +1339,7 @@ def test_37(program,expect,pc,dmem):
     program[ n_pc+3 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':0x00000055 })
 
-def test_38(program,expect,pc,dmem):
+def test_38(program,expect,pc,dmem,irq):
     # ---- test store byte w offs --------
     p, n_pc = load_a_rx( a_val=7, rx=3, rx_val=0x88776655, pc=0 )
     program.update( p )
@@ -1336,7 +1357,7 @@ def test_38(program,expect,pc,dmem):
     program[ n_pc+9] = 0xff # NOP
     program[ n_pc+10] = 0xff # NOP
 
-def test_39(program,expect,pc,dmem):
+def test_39(program,expect,pc,dmem,irq):
     # ---- test store word --------
     p, n_pc = load_a_rx( a_val=0x88776655, rx=2, rx_val=7, pc=0 )
     program.update( p )
@@ -1347,7 +1368,7 @@ def test_39(program,expect,pc,dmem):
     program[ n_pc+3 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':0x00006655 })
 
-def test_40(program,expect,pc,dmem):
+def test_40(program,expect,pc,dmem,irq):
     # ---- test store byte w offs --------
     p, n_pc = load_a_rx( a_val=7, rx=3, rx_val=0x88776655, pc=0 )
     program.update( p )
@@ -1365,7 +1386,7 @@ def test_40(program,expect,pc,dmem):
     program[ n_pc+9] = 0xff # NOP
     program[ n_pc+10] = 0xff # NOP
 
-def test_41(program,expect,pc,dmem):
+def test_41(program,expect,pc,dmem,irq):
     # ---- test store word --------
     p, n_pc = load_a_rx( a_val=7, rx=2, rx_val=0x88776655, pc=0 )
     program.update( p )
@@ -1376,29 +1397,58 @@ def test_41(program,expect,pc,dmem):
     program[ n_pc+3 ] = 0xff # NOP
     dmem.append({'rd':0, 'adr':7, 'data':0x00006655 })
 
+def test_42(program,expect,pc,dmem,irq):
+    stack = 100
+    p, n_pc = load_a_rx( a_val=0xffffffff, rx=SP, rx_val=stack, pc=0 )
+    program.update( p )
+    for r in range(15):
+        stack -= 4
+        p, n_pc = load_rx( rx=r , rx_val=0x11000000 | r, pc = n_pc )
+        program.update( p )
+        dmem.append({'rd':0, 'adr':stack, 'data': 0x11000000 | r})
+
+    stack -= 4
+    dmem.append({'rd':0, 'adr':stack, 'data': 0xffffffff }) # ACC
+    stack -= 4
+    dmem.append({'rd':0, 'adr':stack, 'data': 0 }) # CC
+    stack -= 4
+    dmem.append({'rd':0, 'adr':stack, 'data': n_pc+4}) # PC
+
+    irq[ n_pc+4 ] = 1
+
+    program[ n_pc    ] = 0xff # NOP
+    program[ n_pc+1  ] = 0xff # NOP
+    program[ n_pc+2  ] = 0xff # NOP
+    program[ n_pc+3  ] = 0xff # NOP
+    program[ n_pc+4  ] = 0xff # NOP
+
+    print("program:",program)
+
 def tb2():
 
     clk = Signal(bool())
 
     progs = []
 
-    tests = [41]
-    tests = list(range(1,41+1))
+    tests = [42]
+    tests = list(range(1,42+1))
 
     for tid in tests:
         expect = dict()
         program = dict()
         pc = dict()
         dmem = list()
+        irq = dict()
 
         print(f"===== add test {tid} =====")
-        eval(f"test_{tid}(program,expect,pc,dmem)")
+        eval(f"test_{tid}(program,expect,pc,dmem,irq)")
 
         progs.append( { 'id': tid,
                         'imem': program,
                         'dmem': dmem,
                         'expect': expect,
-                        'pc' : pc} )
+                        'pc' : pc,
+                        'irq' : irq } )
 
     tests = []
 
@@ -1436,6 +1486,7 @@ def main():
         dmem_wr_sz = Signal(modbv(0)[2:])
 
         halt = Signal(modbv(0)[1:])
+        intr = Signal(modbv(0)[1:])
 
         toVerilog.standard = 'systemverilog'
         itop = toVerilog( cpu, clk, rstn,
@@ -1449,6 +1500,7 @@ def main():
                 dmem_wr,
                 dmem_wr_sz,
                 halt,
+                intr,
                 False,
                 None,
                 None,
