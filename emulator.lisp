@@ -68,6 +68,8 @@
 ;;;       push: R0-R14 (skip SP), A, CC, PC (with R0 first the counter
 ;;;             will be the same as for push-rx instruction.
 ;;;       reti just reversed order
+;;;     - interrupt should be disabled after reset-processor
+;;;     - need ei/di instructions
 
 ;;;  - no c32, chaining of 32-bit to 64-bit is difficult
 ;;;  - only sub affects flag, but chaining of 32-bit adds is desirable
@@ -80,9 +82,9 @@
 ;;;  +------------+
 ;;;  |    ...     |
 ;;;  +------------+
-;;;  |  R14 ( SP) |
+;;;  |  R14 (SRP) |
 ;;;  +------------+
-;;;  |  R15 (SRP) |
+;;;  |  R15 ( SP) |
 ;;;  +------------+
 ;;;
 ;;;  CC: n v z c8 z8 c16 z16
@@ -140,29 +142,32 @@
 ;;;    1        lsl   A                 c = A, A = A << 1, A<0> = 0
 ;;;    2        lsr   A                 c = A, A = A >> 1, A<31> = 0
 ;;;    3        asr   A                 c = A, A = A >> 1, A<31> = A<30>
-;;;    4 see below
-;;;    5 see below
+;;;    4        push, see below
+;;;    5        pop, see below
 ;;;    6        push  srp               sp = sp -4, M[sp] = srp
 ;;;    7        popa                    a = M[sp].l, sp = sp + 4
 ;;;    8 
 ;;;       [ o o o o  r r r r ]
-;;;       oooo
-;;;       0-1 Unused
-;;;       2    ld   A+#nn,Rx            Rx = M[A+nn].b
-;;;       3    ld   A,Rx                Rx = M[A].b
-;;;       4    ld   Rx,A                A = M[Rx].b
-;;;       5    st   Rx,A+#nn            M[A+nn].b = Rx
-;;;       6    st   Rx,A                M[A].b = Rx
-;;;       7    st   A,Rx                M[Rx].b = A
-;;;       8-9  Unused
-;;;      10    ld   A+#nn,Rx            Rx = M[A+nn].w
-;;;      11    ld   A,Rx                Rx = M[A].w
-;;;      12    ld   Rx,A                A = M[Rx].w
-;;;      13    st   Rx,A+#nn            M[A+nn].w = Rx
-;;;      14    st   Rx,A                M[A].w = Rx
-;;;      15    st   A,Rx                M[Rx].w = A
+;;;       oooo rrrr
+;;;       0-1  ---- Unused
+;;;       2    rx   ld   A+#nn,Rx            Rx = M[A+nn].b
+;;;       3    rx   ld   A,Rx                Rx = M[A].b
+;;;       4    rx   ld   Rx,A                A = M[Rx].b
+;;;       5    rx   st   Rx,A+#nn            M[A+nn].b = Rx
+;;;       6    rx   st   Rx,A                M[A].b = Rx
+;;;       7    rx   st   A,Rx                M[Rx].b = A
+;;;       8    0    ei
+;;;       8    1    di
+;;;       8    2-f  Unused
+;;;       9    rx   xor  Rx,A                A = A xor Rx
+;;;      10    rx   ld   A+#nn,Rx            Rx = M[A+nn].w
+;;;      11    rx   ld   A,Rx                Rx = M[A].w
+;;;      12    rx   ld   Rx,A                A = M[Rx].w
+;;;      13    rx   st   Rx,A+#nn            M[A+nn].w = Rx
+;;;      14    rx   st   Rx,A                M[A].w = Rx
+;;;      15    rx   st   A,Rx                M[Rx].w = A
 ;;;      
-;;;    9 Unused
+;;;    9        reti                    pop pc, cc, acc, r14-r0 and ei
 ;;;    10       maskb A                 A = A & 0xff
 ;;;    11       maskw A                 A = A & 0xffff
 ;;;    12 sexb  A                       A<31:8>  = A<7>

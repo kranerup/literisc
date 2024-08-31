@@ -68,14 +68,17 @@ OPCI2_LDB_RX     = 4  # A = M[Rx].b
 OPCI2_STB_A_OFFS = 5  # M[A+nn].b = Rx
 OPCI2_STB_A      = 6  # M[A].b = Rx
 OPCI2_STB_RX     = 7  # M[Rx].b = A
-OPCI2_UNUSED3    = 8
-OPCI2_UNUSED4    = 9
+OPCI2_NEXT       = 8
+OPCI2_XOR        = 9  # A = A xor Rx
 OPCI2_LDW_A_OFFS = 10 # Rx = M[A+nn].w
 OPCI2_LDW_A      = 11 # Rx = M[A].w
 OPCI2_LDW_RX     = 12 # A = M[Rx].w
 OPCI2_STW_A_OFFS = 13 # M[A+nn].w = Rx
 OPCI2_STW_A      = 14 # M[A].w = Rx
 OPCI2_STW_RX     = 15 # M[Rx].w = A
+
+OPCI3_EI         = 0
+OPCI3_DI         = 1
 
 INTR_START = 6 # reset starts at 0, allows jump past interrupt handler
 
@@ -104,7 +107,7 @@ ALU_MASKB  = 10
 ALU_MASKW  = 11
 ALU_SEXB   = 12
 ALU_SEXW   = 13
-
+ALU_XOR    = 14
 
 # register numbers
 SRP = 14
@@ -306,6 +309,8 @@ def cpu( clk, rstn,
     intr_push = Signal(modbv(0)[1:])
     n_load_cc = Signal(modbv(0)[1:])
     load_cc = Signal(modbv(0)[1:])
+    set_i = Signal(modbv(0)[1:])
+    clr_i = Signal(modbv(0)[1:])
 
     # sel_imem
     PC = 0
@@ -342,11 +347,19 @@ def cpu( clk, rstn,
         sel_imem.next = 0
         load_reg_cnt.next = 0
         clear_reg_cnt.next = 0
-        n_intr_enabled.next = intr_enabled
+        n_intr_enabled.next = 0
         intr_push.next = 0
     
         goto_next_instr = modbv(0)[1:]
         intr_active = modbv(0)[1:]
+
+        if clr_i == 1:
+            n_intr_enabled.next = 0
+        elif set_i == 1:
+            n_intr_enabled.next = 1
+        else:
+            n_intr_enabled.next = intr_enabled
+
 
         if halt == 1:
             goto_next_instr[:] = 1
@@ -404,7 +417,7 @@ def cpu( clk, rstn,
                     inc_pc.next = 1
                     sel_imem.next = PC
                     goto_next_instr[:] = 1
-            elif state == ST_READ_PART2:
+            elif state == ST_READ_PART2: # TODO: remove duplicate code below
                 if op == OPC_NEXT and r_field == OPCI_POP_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
@@ -570,6 +583,8 @@ def cpu( clk, rstn,
         load_reti_reg_cnt.next = 0
         n_acc_ld_maskb.next = 0
         n_acc_ld_maskw.next = 0
+        set_i.next = 0
+        clr_i.next = 0
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -974,7 +989,17 @@ def cpu( clk, rstn,
                     dmem_adr_sel.next = 0 # ALU
                     dmem_wr_acc.next = 1 # Acc
                     dmem_wr_sz.next = 1 # word
-
+                elif op2 == OPCI2_XOR:
+                    alu_oper.next = ALU_XOR
+                    alu_x_imm.next = 0
+                    wr_acc.next = 1
+                    alu_y_pc.next = 0 # acc
+                    reg_wr_alu.next = 1
+                elif op2 == OPCI2_NEXT:
+                    if r_field2 == OPCI3_EI: # enable interrupt
+                        set_i.next = 1;
+                    elif r_field2 == OPCI3_DI: # enable interrupt
+                        clr_i.next = 1;
 
     if sim_print:
         @always(clk.negedge)
@@ -1270,6 +1295,8 @@ def cpu( clk, rstn,
             alu_out.next = alu_op_x | alu_op_y
         elif alu_oper == ALU_NOT:
             alu_out.next = ~alu_op_y
+        elif alu_oper == ALU_XOR:
+            alu_out.next = alu_op_x ^ alu_op_y
         elif alu_oper == ALU_MASKB:
             alu_out.next = alu_op_y[8:]
         elif alu_oper == ALU_MASKW:

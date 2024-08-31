@@ -7,4 +7,7 @@ while True:
     line = sys.stdin.readline().strip()
     if not line:
         break
-    print(alu_to_sym[int(line)],flush=True)
+    if int(line,16) in alu_to_sym:
+        print(alu_to_sym[int(line,16)],flush=True)
+    else:
+        print("ILLEGAL",flush=True)

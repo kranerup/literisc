@@ -1462,6 +1462,32 @@ def test_43(program,expect,pc,dmem,irq):
     program[ 0x9b  ] = 0x95 # a = 5
     program[ 0x9c  ] = 0x96 # a = 6
     
+def test_44(program,expect,pc,dmem,irq):
+
+    irq[ 2 ] = 1
+    irq[ 7 ] = 0
+
+    program[ 0 ] = 0xf8
+    program[ 1 ] = 0x81 # DI
+    program[ 2 ] = 0xff
+    program[ 3 ] = 0xff
+    program[ 4 ] = 0xff
+    program[ 5 ] = 0xf8
+    program[ 6 ] = 0x80 # EI
+    program[ 7 ] = 0xff
+    program[ 8 ] = 0xff
+    program[ 9 ] = 0xff
+
+def test_45(program,expect,pc,dmem,irq):
+    # ---- test xor --------
+    program[ 0  ] = 0x9d # A = -3
+    program[ 1  ] = 0x83 # R3 = 0x3f
+    program[ 2  ] = 0x3f
+    program[ 3  ] = 0xf8 # A = A ^ R3
+    program[ 4  ] = 0x93
+    expect[6] = { 'A': (-3 & 0xffffffff) ^ 0x3f, 3: 0x3f }
+    program[ 5  ] = 0xff # NOP
+    program[ 6  ] = 0xff # NOP
 
 def tb2():
 
@@ -1470,7 +1496,7 @@ def tb2():
     progs = []
 
     if run_all:
-        tests = list(range(1,43+1))
+        tests = list(range(1,45+1))
     else:
         tests = [run_test_nr]
 
