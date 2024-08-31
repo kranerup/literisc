@@ -1399,7 +1399,20 @@ def test_41(program,expect,pc,dmem,irq):
 
 def test_42(program,expect,pc,dmem,irq):
     stack = 100
-    p, n_pc = load_a_rx( a_val=0xffffffff, rx=SP, rx_val=stack, pc=0 )
+    
+    # reset entry point, jump past interrupt handler
+    program[ 0 ] = 0xa0 # J #50 -> jump to 52
+    program[ 1 ] = 50
+    pc[5] = [52]
+
+    # interrupt entry point
+    program[ 6 ] = 0x93 # a = 3
+    program[ 7 ] = 0xff # nop
+    program[ 8 ] = 0xff # nop
+    expect[ 8 ] = { 'A': 3 }
+
+    n_pc = 52
+    p, n_pc = load_a_rx( a_val=0xffffffff, rx=SP, rx_val=stack, pc=n_pc )
     program.update( p )
     for r in range(15):
         stack -= 4
@@ -1408,21 +1421,47 @@ def test_42(program,expect,pc,dmem,irq):
         dmem.append({'rd':0, 'adr':stack, 'data': 0x11000000 | r})
 
     stack -= 4
-    dmem.append({'rd':0, 'adr':stack, 'data': 0xffffffff }) # ACC
+    dmem.append({'rd':0, 'adr':stack, 'data': 0x00000006 }) # ACC
     stack -= 4
     dmem.append({'rd':0, 'adr':stack, 'data': 0 }) # CC
     stack -= 4
     dmem.append({'rd':0, 'adr':stack, 'data': n_pc+4}) # PC
 
     irq[ n_pc+4 ] = 1
+    irq[ n_pc+5 ] = 0
 
-    program[ n_pc    ] = 0xff # NOP
-    program[ n_pc+1  ] = 0xff # NOP
-    program[ n_pc+2  ] = 0xff # NOP
-    program[ n_pc+3  ] = 0xff # NOP
-    program[ n_pc+4  ] = 0xff # NOP
+    program[ n_pc    ] = 0x93 # a = 3
+    program[ n_pc+1  ] = 0x94 # a = 4
+    program[ n_pc+2  ] = 0x95 # a = 5
+    program[ n_pc+3  ] = 0x96 # a = 6
+    program[ n_pc+4  ] = 0x97 # a = 7 - this will not be executed
+    # n_pc+4 will be pushed to stack so that reti will start here
+    program[ n_pc+5  ] = 0xff # NOP
 
-    print("program:",program)
+def test_43(program,expect,pc,dmem,irq):
+    stack = 100
+    p, n_pc = load_a_rx( a_val=0xffffffff, rx=SP, rx_val=stack, pc=0 )
+    program.update( p )
+
+    dmem.append({'rd':1, 'adr':stack, 'data': 0x99}) # PC
+    dmem.append({'rd':1, 'adr':stack+4, 'data': 0xff}) # CC
+    dmem.append({'rd':1, 'adr':stack+8, 'data': 0x11223344}) # A
+    stack += 12
+    for r in range(14,-1,-1):
+        dmem.append({'rd':1, 'adr':stack, 'data': 0xaabb0000 | r }) # rx
+        stack += 4
+
+    expect[ 0x9b ] = { 'A': 0x11223344, 'cc': 0xff }
+    for r in range(15):
+        expect[ 0x9b ][ r ] = 0xaabb0000 | r
+    program[ n_pc   ] = 0xf9 # reti
+    program[ n_pc+1 ] = 0xff # NOP
+    program[ n_pc+2 ] = 0xff # NOP
+    program[ 0x99  ] = 0xff # NOP
+    program[ 0x9a  ] = 0x94 # a = 4
+    program[ 0x9b  ] = 0x95 # a = 5
+    program[ 0x9c  ] = 0x96 # a = 6
+    
 
 def tb2():
 
@@ -1430,8 +1469,13 @@ def tb2():
 
     progs = []
 
-    tests = [42]
-    tests = list(range(1,42+1))
+    if run_all:
+        tests = list(range(1,43+1))
+    else:
+        tests = [run_test_nr]
+
+    #tests = list(range( 32, 44))
+    #tests = [ 32, 43 ]
 
     for tid in tests:
         expect = dict()
@@ -1509,9 +1553,20 @@ def main():
                 False)
     
 run_sim = False
+run_all = False
+run_test_nr = None
+
+# tb.py sim 12
+# tb.py sim all 
+# tb.py -> generate verilog
+
 
 if __name__ == '__main__':
     import sys
     if 'sim' in sys.argv:
         run_sim = True
+        if 'all' in sys.argv:
+            run_all = True
+        else:
+            run_test_nr = int(sys.argv[-1])
     main()

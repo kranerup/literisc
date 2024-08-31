@@ -51,7 +51,7 @@ OPCI_POP_R   = 5  # for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
 OPCI_PUSH_SRP= 6  # sp = sp -4, M[sp] = srp
 OPCI_POP_A   = 7  # A = M[sp].l, sp = sp + 4
 OPCI_NEXT    = 8 
-OPCI_UNUSED1 = 9 
+OPCI_RETI    = 9 
 OPCI_MASKB   = 10 # A = A & 0xff
 OPCI_MASKW   = 11 # A = A & 0xffff
 OPCI_SEXB    = 12 # A<31:8>  = A<7>
@@ -77,6 +77,7 @@ OPCI2_STW_A_OFFS = 13 # M[A+nn].w = Rx
 OPCI2_STW_A      = 14 # M[A].w = Rx
 OPCI2_STW_RX     = 15 # M[Rx].w = A
 
+INTR_START = 6 # reset starts at 0, allows jump past interrupt handler
 
 # state
 ST_RESET = 0
@@ -86,6 +87,7 @@ ST_READ_IMM = 3
 ST_READ_PART2 = 4
 ST_REG_CNT = 5
 ST_INTERRUPT = 6
+ST_RETI = 7
 
 # ALU operations
 ALU_PASS_X = 0
@@ -254,6 +256,9 @@ def cpu( clk, rstn,
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
     load_pc = Signal(modbv(0)[1:])
+    load_pc_intr = Signal(modbv(0)[1:])
+    deferred_load_pc = Signal(modbv(0)[1:])
+    n_deferred_load_pc = Signal(modbv(0)[1:])
     direct_load_imm = Signal(modbv(0)[1:])
     load_imm = Signal(modbv(0)[1:])
     n_load_imm = Signal(modbv(0)[1:])
@@ -290,6 +295,7 @@ def cpu( clk, rstn,
     dmem_wr_acc = Signal(modbv(0)[1:])
     sel_reg_cnt = Signal(modbv(0)[1:])
     load_reg_cnt = Signal(modbv(0)[1:])
+    load_reti_reg_cnt = Signal(modbv(0)[1:])
     clear_reg_cnt = Signal(modbv(0)[1:])
     inc_reg_cnt = Signal(modbv(0)[1:])
     n_reg_cnt  = Signal(modbv(0)[5:])
@@ -298,6 +304,8 @@ def cpu( clk, rstn,
     sel_srp = Signal(modbv(0)[1:])
     rx_field2 = Signal(modbv(0)[1:])
     intr_push = Signal(modbv(0)[1:])
+    n_load_cc = Signal(modbv(0)[1:])
+    load_cc = Signal(modbv(0)[1:])
 
     # sel_imem
     PC = 0
@@ -312,6 +320,7 @@ def cpu( clk, rstn,
     iop2 = multiflop( n_op2_valid, op2_valid, clk, rstn )
     idf  = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
     ida  = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
+    idpc = multiflop( n_deferred_load_pc, deferred_load_pc, clk, rstn )
     idr  = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
     idrm = multiflop( n_reg_ld_maskb, reg_ld_maskb, clk, rstn )
     idrmw= multiflop( n_reg_ld_maskw, reg_ld_maskw, clk, rstn )
@@ -319,10 +328,12 @@ def cpu( clk, rstn,
     idamw= multiflop( n_acc_ld_maskw, acc_ld_maskw, clk, rstn )
     ili  = multiflop( n_load_imm, load_imm, clk, rstn )
     ii   = multiflop( n_intr_enabled, intr_enabled, clk, rstn, reset_value=1 )
+    icc  = multiflop( n_load_cc, load_cc, clk, rstn, reset_value=1 )
 
     @always_comb
     def ctrl():
         inc_pc.next = 0
+        load_pc_intr.next = 0
         n_load_ir.next = 0
         n_load_imm.next = 0
         n_load_ir2.next = 0
@@ -369,6 +380,10 @@ def cpu( clk, rstn,
                     sel_imem.next = PC
                     n_op2_valid.next = r_field == OPCI_NEXT
                     next_state.next = ST_READ_PART2
+                elif op == OPC_NEXT and r_field == OPCI_RETI:
+                    n_load_ir.next = 0
+                    inc_pc.next = 0
+                    next_state.next = ST_RETI
                 else:
                     n_load_ir.next = 1
                     n_load_imm.next = 0
@@ -480,9 +495,21 @@ def cpu( clk, rstn,
                 if n_reg_cnt == PCR:
                     goto_next_instr[:] = 1
                     intr_push.next = 1
+                    load_pc_intr.next = 1
                 else:
                     next_state.next = ST_INTERRUPT
                     intr_push.next = 1
+            elif state == ST_RETI:
+                n_load_ir.next = 0
+                inc_pc.next = 0
+                if n_reg_cnt == 0:
+                    n_load_ir.next = 1
+                    sel_imem.next = PC
+                    goto_next_instr[:] = 1
+                else:
+                    n_load_ir.next = 0
+                    inc_pc.next = 0
+                    next_state.next = ST_RETI
 
             intr_active[:] = intr==1 and intr_enabled==1
             if goto_next_instr == 1:
@@ -521,8 +548,10 @@ def cpu( clk, rstn,
         dmem_wr_sz.next = 2
         inc_sp.next = 0
         load_pc.next = 0
+        n_deferred_load_pc.next = 0
         n_reg_ld_rx.next = 0
         n_reg_ld_maskb.next = 0
+        n_reg_ld_maskw.next = 0
         n_reg_wr_deferred.next = 0
         reg_dest_srp.next = 0
         reg_wr_alu.next = 0
@@ -537,6 +566,10 @@ def cpu( clk, rstn,
         inc_reg_cnt.next = 0
         sel_reg_cnt.next = 0
         rx_field2.next = 0
+        n_load_cc.next = 0
+        load_reti_reg_cnt.next = 0
+        n_acc_ld_maskb.next = 0
+        n_acc_ld_maskw.next = 0
 
         take_jump = modbv(0)[1:]
         take_jump[:] = 0
@@ -771,6 +804,31 @@ def cpu( clk, rstn,
                 wr_acc.next = 1
                 alu_y_pc.next = 0 # acc
                 reg_wr_alu.next = 1
+            elif r_field == OPCI_RETI:
+                dmem_adr_sel.next = 1 # SP
+                inc_sp.next = 1
+                dmem_rd.next = 1
+                if state != ST_RETI:
+                    load_reti_reg_cnt.next = 1
+                    # trick to make selrx take dmem_dout
+                    # this will write PC to R9 as a side effect
+                    n_reg_ld_rx.next = OPCI_RETI
+                    n_deferred_load_pc.next = 1
+                    n_reg_wr_deferred.next = 1
+                else:
+                    alu_oper.next = ALU_PASS_X # pass dmem_dout through alu to pc and cc
+                    if reg_cnt == PCR: # next dout will be CC
+                        # trick to make selrx take dmem_dout
+                        # this will write CC to R9 as a side effect
+                        n_reg_ld_rx.next = OPCI_RETI
+                        n_reg_wr_deferred.next = 1
+                        n_load_cc.next = 1
+                    elif reg_cnt == CC: # next dout will be A
+                        n_acc_wr_deferred.next = 1
+                    else:
+                        n_reg_wr_deferred.next = 1
+                        n_reg_ld_rx.next = n_reg_cnt
+
             elif r_field == OPCI_MASKB:
                 alu_oper.next = ALU_MASKB
                 wr_acc.next = 1
@@ -982,10 +1040,12 @@ def cpu( clk, rstn,
         pc_inc.next = pc + 1
         if halt:
             pc_next.next = pc
-        elif load_pc == 1:
+        elif load_pc == 1 or deferred_load_pc == 1:
             pc_next.next = alu_out
         elif inc_pc == 1:
             pc_next.next = pc_inc
+        elif load_pc_intr == 1:
+            pc_next.next = INTR_START
         else:
             pc_next.next = pc
 
@@ -1087,6 +1147,8 @@ def cpu( clk, rstn,
             n_reg_cnt.next = n_ir2[4:]
         elif clear_reg_cnt == 1:
             n_reg_cnt.next = 0
+        elif load_reti_reg_cnt == 1:
+            n_reg_cnt.next = PCR
         elif inc_reg_cnt == 1:
             n_reg_cnt.next = reg_cnt + 1
         else:
@@ -1229,7 +1291,10 @@ def cpu( clk, rstn,
 
     @always_comb
     def ccreg():
-        n_cc.next = concat( n_n,n_c,n_z,n_v,n_c8,n_z8,n_c16,n_z16 )
+        if load_cc == 1:
+            n_cc.next = alu_out
+        else:
+            n_cc.next = concat( n_n,n_c,n_z,n_v,n_c8,n_z8,n_c16,n_z16 )
 
     @always_comb
     def ccsplit():
