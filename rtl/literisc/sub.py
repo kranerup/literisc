@@ -1,6 +1,7 @@
 from myhdl import *
-
-# res should have width, x,y should have width. res msb will be carry/borrow
+#
+# Subtracts to words and provides all flags.
+# The inputs x and y, the output res all should be of size 'width'.
 def sub_w( x, y, res, borrow_in, borrow_out, v, n, z, width ) :
     ext_x = modbv(0)[width+1:]
     ext_x[:] = x
@@ -18,7 +19,11 @@ def sub_w( x, y, res, borrow_in, borrow_out, v, n, z, width ) :
     z[:] = ext_res[width:] == 0
     #print("sub_w",bin(x),bin(y),bin(res),z)
 
-
+#
+# Subtracts two words by performing narrow substractions
+# that are combined to wider subtractions. Provides
+# flags for two sizes (typically 16-bit and 8-bit).
+#
 def sub2_w( x, y, res, borrow_in,
            b_out_hi, v_hi, n_hi, z_hi,
            b_out_lo, v_lo, n_lo, z_lo,
@@ -45,6 +50,11 @@ def sub2_w( x, y, res, borrow_in,
     z_hi[:] = z_hi & z_lo
     #print("sub2_w z",z_hi,z_lo)
 
+#
+# Subtracts two words by performing narrow substractions
+# that are combined to wider subtractions. Provides
+# flags for three sizes (typically 32-bit,16-bit and 8-bit).
+#
 def sub3_w( x, y, res, borrow_in,
            b_out_hi,  v_hi,  n_hi,  z_hi,
            b_out_mid, v_mid, n_mid, z_mid,

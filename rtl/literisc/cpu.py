@@ -22,7 +22,6 @@ OPC_AND       = 13 # A = A & Rx
 OPC_OR        = 14 # A = A | Rx
 OPC_NEXT      = 15
 
-OPCI2_UNUSED3    = 8
 # op code jump
 OPCJ_J        = 0  # jump always
 OPCJ_JLT      = 1  # jump <   signed      n ^ v
@@ -60,8 +59,8 @@ OPCI_J_A     = 14 # PC = A
 OPCI_NOP     = 15 # NOP
 
 # op code inner 2
-OPCI2_UNUSED1    = 0
-OPCI2_UNUSED2    = 1
+OPCI2_ADC        = 0  # c,A = A + Rx + c
+OPCI2_UNUSED1    = 1
 OPCI2_LDB_A_OFFS = 2  # Rx = M[A+nn].b
 OPCI2_LDB_A      = 3  # Rx = M[A].b
 OPCI2_LDB_RX     = 4  # A = M[Rx].b
@@ -108,6 +107,8 @@ ALU_MASKW  = 11
 ALU_SEXB   = 12
 ALU_SEXW   = 13
 ALU_XOR    = 14
+ALU_ADC    = 15
+ALU_ADDC   = 16
 
 # register numbers
 SRP = 14
@@ -246,7 +247,7 @@ def cpu( clk, rstn,
     rx_idx  = Signal(modbv(0)[4:])
     state = Signal(modbv(0)[4:])
     next_state = Signal(modbv(0)[4:])
-    alu_oper = Signal(modbv(0)[4:])
+    alu_oper = Signal(modbv(0)[5:])
 
     sel_imem = Signal(modbv(0)[4:])
     n_load_ir = Signal(modbv(0)[1:])
@@ -768,7 +769,7 @@ def cpu( clk, rstn,
             alu_y_pc.next = 0 # acc
             reg_wr_alu.next = 1
         elif op == OPC_ADD:
-            alu_oper.next = ALU_ADD
+            alu_oper.next = ALU_ADDC
             alu_x_imm.next = 0
             wr_acc.next = 1
             alu_y_pc.next = 0 # acc
@@ -991,6 +992,12 @@ def cpu( clk, rstn,
                     dmem_wr_sz.next = 1 # word
                 elif op2 == OPCI2_XOR:
                     alu_oper.next = ALU_XOR
+                    alu_x_imm.next = 0
+                    wr_acc.next = 1
+                    alu_y_pc.next = 0 # acc
+                    reg_wr_alu.next = 1
+                elif op2 == OPCI2_ADC:
+                    alu_oper.next = ALU_ADC
                     alu_x_imm.next = 0
                     wr_acc.next = 1
                     alu_y_pc.next = 0 # acc
@@ -1268,8 +1275,13 @@ def cpu( clk, rstn,
             tmp[:] = alu_op_y >> 1
             tmp[31] = tmp[30]
             alu_out.next = tmp
-        elif alu_oper == ALU_ADD:
-            alu_out.next = alu_op_x + alu_op_y
+        elif alu_oper == ALU_ADD or alu_oper == ALU_ADC or alu_oper == ALU_ADDC:
+            # TODO: adder should be merged with sub3_w
+            lc[:] = cc_c if alu_oper == ALU_ADC else 0
+            tmp[:] = alu_op_x + alu_op_y + lc
+            alu_out.next = tmp[32:0]
+            if alu_oper == ALU_ADDC or alu_oper == ALU_ADC:
+                n_c.next = tmp[32]
         elif alu_oper == ALU_SUB:
 
             sub3_w( alu_op_y, alu_op_x, tmp,
@@ -1279,6 +1291,8 @@ def cpu( clk, rstn,
                    lc8,  v_lo,  n_lo,  lz8,
                    32, 16, 8 )
 
+            alu_out.next = tmp
+
             n_n.next = ln
             n_z.next = lz
             n_v.next = lv
@@ -1287,7 +1301,6 @@ def cpu( clk, rstn,
             n_z8.next = lz8
             n_c16.next = lc16
             n_z16.next = lz16
-            alu_out.next = tmp
 
         elif alu_oper == ALU_AND:
             alu_out.next = alu_op_x & alu_op_y

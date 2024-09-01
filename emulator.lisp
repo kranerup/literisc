@@ -14,7 +14,6 @@
 ;;; data which is variable length and follows the first byte in the instruction.
 ;;; 
 ;;; Issues:
-;;;  - no XOR instruction
 ;;;  - should mvi really sign extend? Loading constants with upper zeros but
 ;;;    with highest immediate bit set is not possible. Instead must add another
 ;;;    immediate byte with all zeros.
@@ -31,7 +30,7 @@
 ;;;    - j #-1 jumps to last byte in jump instruction
 ;;;    - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
 ;;;  - interrupts
-;;;    - wait for interrupt instruction
+;;;    - wait for interrupt instruction (only needed for power save)
 ;;;    - CC is not part of the register bank. Awkward to save CC on interrupt,
 ;;;    - interrupt action
 ;;;      - save current PC, disable interrupts, save registers and cc on stack.
@@ -149,7 +148,8 @@
 ;;;    8 
 ;;;       [ o o o o  r r r r ]
 ;;;       oooo rrrr
-;;;       0-1  ---- Unused
+;;;       0    rx   adc  Rx,A                c,A = A + Rx + c
+;;;       1    ---- Unused
 ;;;       2    rx   ld   A+#nn,Rx            Rx = M[A+nn].b
 ;;;       3    rx   ld   A,Rx                Rx = M[A].b
 ;;;       4    rx   ld   Rx,A                A = M[Rx].b

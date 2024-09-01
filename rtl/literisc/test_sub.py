@@ -1,5 +1,5 @@
 from myhdl import *
-from sub import sub3_w
+from sub import sub3_w, sub_w
 
 
 def twos_comp_to_int( v, width ):
@@ -16,7 +16,9 @@ def check_sub( op_a, op_b, width ):
     op_b_s = modbv( op_b )[rwidth:]
     res = modbv(0)[rwidth:]
     b_in = modbv(1)[1:]
-    b_out = modbv(0)[1:]
+    b_out_hi = modbv(0)[1:]
+    b_out_mid = modbv(0)[1:]
+    b_out_lo = modbv(0)[1:]
     v_lo = modbv(0)[1:]
     n_lo = modbv(0)[1:]
     z_lo = modbv(0)[1:]
@@ -26,10 +28,10 @@ def check_sub( op_a, op_b, width ):
     v_hi = modbv(0)[1:]
     n_hi = modbv(0)[1:]
     z_hi = modbv(0)[1:]
-    sub3_w( op_a_s, op_b_s, res, b_in, b_out,
-           v_hi, n_hi, z_hi,
-           v_mid, n_mid, z_mid,
-           v_lo, n_lo, z_lo,
+    sub3_w( op_a_s, op_b_s, res, b_in,
+           b_out_hi,  v_hi,  n_hi,  z_hi,
+           b_out_mid, v_mid, n_mid, z_mid,
+           b_out_lo,  v_lo,  n_lo,  z_lo,
            rwidth, rwidth//2, rwidth//4 )
 
     a = int(op_a_s)
@@ -108,21 +110,78 @@ def check_range( outer_range, inner_range, width ):
         for op_b in inner_range:
             check_sub( op_a, op_b, width )
 
+def check_3bit():
+
+    print("----  all legal operand combinations for a single 3-bit subtraction ----")
+    max_int = (2**(3-1)) - 1
+    min_int = -( 2**(3-1) )
+    print(f"loop over min-int:{min_int} to max-int:{max_int}")
+
+    for op_a in range(-4,4):
+        for op_b in range(-4,4):
+            exp = op_a - op_b
+            if exp > 3 or exp < -4:
+                exp_ovf = True
+            else:
+                exp_ovf = False
+            exp_bin = exp & 0b111
+
+            # --- sbc ----
+            x = modbv( op_a & 0b111 )[3:]
+            y = modbv( op_b & 0b111 )[3:]
+            res = modbv(0)[3:]
+            borrow_in = modbv(1)[1:]
+            b_out = modbv(0)[1:]
+
+            carry_out = modbv(1)[1:]
+            n = modbv(0)[1:]
+            z = modbv(0)[1:]
+            v = modbv(0)[1:]
+
+            sub_w( x, y, res, borrow_in, b_out, v, n, z, 3 )
+
+            rrr = int( res & 0b111 )
+            ro = int(v)
+            rb = int(b_out)
+
+            eovf = 1 if exp_ovf else 0
+
+            #if exp_ovf:
+            #    exp_b = 1 if (exp & 0b1000) != 0 else 0
+            #else:
+            #    exp_b = 1 if exp >= 0 else 0
+            exp_b = 1 if (exp & 0b1000) != 0 else 0
+
+            print(f"a:{op_a:2d} b:{op_b:2d} ovf:{eovf} exp:{exp:2d} exp-bin:{exp_bin:03b} exp-b:{exp_b} rb:{rb}")
+
+            assert ro == eovf
+            assert (res & 0b111 ) == exp_bin
+            #assert rb == exp_b
+#
+#
+#  
+#
+
 def verify():
+    #check_3bit()
+    #return
+
     # chain two N-bit subtractions into a 2N-bit subtraction
-    width = 2
+    width = 3
     rwidth = width*4
     max_int = (2**(rwidth-1)) - 1
     min_int = -( 2**(rwidth-1) )
     print(f"=============== chaining {width}-bit to {rwidth}-bit ================")
 
-    if True:
+    if False:
+        print(f"loop over min-int:{min_int} to max-int:{max_int}")
         range_a = range( min_int, max_int+1 )
         range_b = range( min_int, max_int+1 )
 
         for op_a in range_a:
             for op_b in range_b:
                 check_sub( op_a, op_b, width )
+        print("loop done")
 
     if False:
         workers = 12
@@ -147,6 +206,7 @@ def verify():
         subrange_size = (B - A + N - 1) // N  # Adjust for rounding up
         return [(A + i * subrange_size, min(A + (i + 1) * subrange_size, B)) for i in range(N)]
 
+    print("parallel over range",loop2_range[0],loop2_range[-1])
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
         # Submit tasks
         futures = [ executor.submit(

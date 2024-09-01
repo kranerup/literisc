@@ -1055,7 +1055,6 @@ def test_24(program,expect,pc,dmem,irq):
 
     program[ n_pc+2   ] = 0xff # NOP
     program[ n_pc+3   ] = 0xff # NOP
-    print("program:",program)
 
 def test_25(program,expect,pc,dmem,irq):
 # ---- test signed jumps ----------
@@ -1489,6 +1488,22 @@ def test_45(program,expect,pc,dmem,irq):
     program[ 5  ] = 0xff # NOP
     program[ 6  ] = 0xff # NOP
 
+def test_46(program,expect,pc,dmem,irq):
+    # --- test add produce carry and adc use carry in
+    n_pc = 0
+    p, n_pc = load_a_rx( a_val=0xfffffff0, rx=3, rx_val=15, pc=n_pc )
+    program.update( p )
+    program[ n_pc ] = 0xb3 # A = A + R3 -> A = 0xffffffff, C=0
+    expect[ n_pc+2 ] = { 'A': 0xffffffff, 'cc': 0x00 }
+    program[ n_pc+1 ] = 0xb3 # A = A + R3 -> A = 0x0000000e, C=1
+    expect[ n_pc+3 ] = { 'A': 0x0000000e, 'cc': 0x40 }
+    program[ n_pc+2 ] = 0xf8 # c,A = A + R3 + c -> A = 0xe + 0xf + 1
+    program[ n_pc+3 ] = 0x03
+    expect[ n_pc+5 ] = { 'A': 30, 'cc': 0x00 }
+    program[ n_pc+4  ] = 0xff # NOP
+    program[ n_pc+5  ] = 0xff # NOP
+
+
 def tb2():
 
     clk = Signal(bool())
@@ -1496,7 +1511,7 @@ def tb2():
     progs = []
 
     if run_all:
-        tests = list(range(1,45+1))
+        tests = list(range(1,46+1))
     else:
         tests = [run_test_nr]
 
