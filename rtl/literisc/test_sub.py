@@ -283,7 +283,7 @@ def verify():
             print(f"completed {completed}",flush=True)
 
 
-def top( clk, rstn, ina, inb, res, borrow ):
+def top( clk, rstn, ina, inb, do_add, res, borrow ):
 
     @always(clk.posedge)
     def calc():
@@ -297,7 +297,7 @@ def top( clk, rstn, ina, inb, res, borrow ):
         v_hi = modbv(0)[1:]
         n_hi = modbv(0)[1:]
         z_hi = modbv(0)[1:]
-        sub3_w( ina, inb, res, b_in, borrow,
+        sub3_w( ina, inb, res, do_add, b_in, borrow,
            v_hi, n_hi, z_hi,
            v_mid, n_mid, z_mid,
            v_lo, n_lo, z_lo,
@@ -312,9 +312,10 @@ def gen_verilog():
     inb = Signal(modbv(0)[32:])
     res = Signal(modbv(0)[32:])
     borrow = Signal(modbv(0)[1:])
+    do_add = Signal(intbv(0)[1:])
 
     toVerilog.standard = 'systemverilog'
-    itop = toVerilog( top, clk, rstn, ina, inb, res, borrow )
+    itop = toVerilog( top, clk, rstn, ina, inb, res, do_add, borrow )
 
 
 if __name__ == '__main__':
