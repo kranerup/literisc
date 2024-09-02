@@ -1245,7 +1245,6 @@ def cpu( clk, rstn,
         lz16 = modbv(0)[1:]
         extended_x = modbv(0)[32+1:]
         extended_y = modbv(0)[32+1:]
-        b_in = modbv(1)[1:]
 
         v_mid = modbv(0)[1:] # unused
         n_mid = modbv(0)[1:] # unused
@@ -1275,16 +1274,18 @@ def cpu( clk, rstn,
             tmp[:] = alu_op_y >> 1
             tmp[31] = tmp[30]
             alu_out.next = tmp
-        elif alu_oper == ALU_ADD or alu_oper == ALU_ADC or alu_oper == ALU_ADDC:
-            # TODO: adder should be merged with sub3_w
-            lc[:] = cc_c if alu_oper == ALU_ADC else 0
-            tmp[:] = alu_op_x + alu_op_y + lc
-            alu_out.next = tmp[32:0]
-            if alu_oper == ALU_ADDC or alu_oper == ALU_ADC:
-                n_c.next = tmp[32]
-        elif alu_oper == ALU_SUB:
+        elif alu_oper == ALU_SUB or alu_oper == ALU_ADD or alu_oper == ALU_ADC or alu_oper == ALU_ADDC:
+            add = modbv(0)[1:]
+            b_in = modbv(0)[1:]
+            if alu_oper != ALU_SUB:
+                add[:] = 1
+                if alu_oper == ALU_ADC:
+                    b_in[:] = cc_c
+            else:
+                b_in[:] = 1
 
             sub3_w( alu_op_y, alu_op_x, tmp,
+                   add,
                    b_in, 
                    lc,   lv,    ln,    lz,
                    lc16, v_mid, n_mid, lz16,
@@ -1293,14 +1294,17 @@ def cpu( clk, rstn,
 
             alu_out.next = tmp
 
-            n_n.next = ln
-            n_z.next = lz
-            n_v.next = lv
-            n_c.next = lc
-            n_c8.next = lc8
-            n_z8.next = lz8
-            n_c16.next = lc16
-            n_z16.next = lz16
+            if alu_oper == ALU_SUB:
+                n_n.next = ln
+                n_z.next = lz
+                n_v.next = lv
+                n_c.next = lc
+                n_c8.next = lc8
+                n_z8.next = lz8
+                n_c16.next = lc16
+                n_z16.next = lz16
+            elif alu_oper == ALU_ADDC or alu_oper == ALU_ADC:
+                n_c.next = lc
 
         elif alu_oper == ALU_AND:
             alu_out.next = alu_op_x & alu_op_y

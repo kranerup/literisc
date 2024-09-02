@@ -12,6 +12,8 @@ def check_sub( op_a, op_b, width ):
     max_int = (2**(rwidth-1)) - 1
     min_int = -( 2**(rwidth-1) )
 
+    do_add = modbv(0)[1:]
+
     op_a_s = modbv( op_a )[rwidth:]
     op_b_s = modbv( op_b )[rwidth:]
     res = modbv(0)[rwidth:]
@@ -28,7 +30,7 @@ def check_sub( op_a, op_b, width ):
     v_hi = modbv(0)[1:]
     n_hi = modbv(0)[1:]
     z_hi = modbv(0)[1:]
-    sub3_w( op_a_s, op_b_s, res, b_in,
+    sub3_w( op_a_s, op_b_s, res, do_add, b_in,
            b_out_hi,  v_hi,  n_hi,  z_hi,
            b_out_mid, v_mid, n_mid, z_mid,
            b_out_lo,  v_lo,  n_lo,  z_lo,
@@ -103,6 +105,49 @@ def check_sub( op_a, op_b, width ):
     assert exp_n_mid == n_mid, f"z fail exp:{exp_n} act:{n_mid}"
     assert exp_n_lo == n_lo, f"z fail exp:{exp_n} act:{n_lo}"
 
+def check_add( op_a, op_b, c_in, width ):
+    rwidth = width*4
+    max_int = (2**(rwidth-1)) - 1
+    min_int = -( 2**(rwidth-1) )
+
+    do_add = modbv(1)[1:]
+
+    op_a_s = modbv( op_a )[rwidth:]
+    op_b_s = modbv( op_b )[rwidth:]
+    res = modbv(0)[rwidth:]
+    b_in = modbv( c_in )[1:]
+    b_out_hi = modbv(0)[1:]
+    b_out_mid = modbv(0)[1:]
+    b_out_lo = modbv(0)[1:]
+    v_lo = modbv(0)[1:]
+    n_lo = modbv(0)[1:]
+    z_lo = modbv(0)[1:]
+    v_mid = modbv(0)[1:]
+    n_mid = modbv(0)[1:]
+    z_mid = modbv(0)[1:]
+    v_hi = modbv(0)[1:]
+    n_hi = modbv(0)[1:]
+    z_hi = modbv(0)[1:]
+    sub3_w( op_a_s, op_b_s, res, do_add, b_in,
+           b_out_hi,  v_hi,  n_hi,  z_hi,
+           b_out_mid, v_mid, n_mid, z_mid,
+           b_out_lo,  v_lo,  n_lo,  z_lo,
+           rwidth, rwidth//2, rwidth//4 )
+
+    #a = int(op_a_s)
+    #b = int(op_b_s)
+    #r = int(res)
+    #print(f"L a:{a:2d} b:{b:2d} c-in:{c_in:1d}    res:{r:2d} res-bin:{r:03b}")
+
+    exp = ( (op_a & ( 2**rwidth-1 )) +
+            (op_b & ( 2**rwidth-1 )) +
+            c_in )
+    exp_c_out = ( exp >> rwidth ) & 1
+    exp = exp & ( 2**(rwidth)-1 )
+
+    assert exp_c_out == b_out_hi
+    assert res == exp
+
 def check_range( outer_range, inner_range, width ):
     #print("outer",outer_range, 'inner',inner_range, flush=True)
 
@@ -167,13 +212,26 @@ def verify():
     #return
 
     # chain two N-bit subtractions into a 2N-bit subtraction
-    width = 3
+    width = 2
     rwidth = width*4
     max_int = (2**(rwidth-1)) - 1
     min_int = -( 2**(rwidth-1) )
-    print(f"=============== chaining {width}-bit to {rwidth}-bit ================")
+    print(f"=============== chaining {width}-bit addition to {rwidth}-bit ================")
 
-    if False:
+    if True:
+        print(f"loop over min-int:{min_int} to max-int:{max_int}")
+        range_a = range( min_int, max_int+1 )
+        range_b = range( min_int, max_int+1 )
+
+        for op_a in range_a:
+            for op_b in range_b:
+                for c_in in range(2):
+                    check_add( op_a, op_b, c_in, width )
+        print("loop done")
+
+    print(f"=============== chaining {width}-bit subtraction to {rwidth}-bit ================")
+
+    if True:
         print(f"loop over min-int:{min_int} to max-int:{max_int}")
         range_a = range( min_int, max_int+1 )
         range_b = range( min_int, max_int+1 )
