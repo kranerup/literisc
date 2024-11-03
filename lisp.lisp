@@ -1,24 +1,26 @@
 (ql:quickload :literisc)
+(use-package :lr-asm)
+(use-package :lr-emulator)
 
 ;(defmacro part3 (reg)
 ;  `'(
 ;    (mvi->r 0 ,reg)))
 ;(masm (part1) (part2) (part3 3))
 
-(defconstant R0  0 )
-(defconstant R1  1 )
-(defconstant R2  2 )
-(defconstant R3  3 )
-(defconstant R4  4 )
-(defconstant R5  5 )
-(defconstant R6  6 )
-(defconstant R7  7 )
-(defconstant R8  8 )
-(defconstant R9  9 )
-(defconstant R10 10) (defconstant P0 R10)
-(defconstant R11 11) (defconstant P1 R11)
-(defconstant R12 12) (defconstant P2 R12)
-(defconstant R13 13) (defconstant P3 R13)
+;;;(defconstant R0  0 )
+;;;(defconstant R1  1 )
+;;;(defconstant R2  2 )
+;;;(defconstant R3  3 )
+;;;(defconstant R4  4 )
+;;;(defconstant R5  5 )
+;;;(defconstant R6  6 )
+;;;(defconstant R7  7 )
+;;;(defconstant R8  8 )
+;;;(defconstant R9  9 )
+;;;(defconstant R10 10) (defconstant P0 R10)
+;;;(defconstant R11 11) (defconstant P1 R11)
+;;;(defconstant R12 12) (defconstant P2 R12)
+;;;(defconstant R13 13) (defconstant P3 R13)
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
@@ -1372,7 +1374,22 @@
 ;      (masm main func-prtstr read-c scan))
 
 (defvar e nil)
-                                  
+(defvar *symtab* nil)
+
+(defun asm-n-run ( main &optional (setup nil) (debug nil))
+  (setq *symtab* (make-hash-table))
+  (setq *hello-world*
+        (masm *symtab*
+              main func-prtstr read-c scan func-str-equal
+              func-find-symbol func-putchar func-cdr
+              func-car func-parse func-rplca func-rplcd
+              func-cons func-print-symbol func-print
+              func-print-list func-str2num func-div10
+              func-print-number func-read))
+  (setf e (make-emulator *hello-world* dmem 200 debug))
+  (if setup (funcall setup dmem))
+  (run-with-curses e *symtab*))
+
 ;(setf e (make-emulator *hello-world* dmem 200 nil))
 ;(run-with-curses e)
 
@@ -1482,20 +1499,6 @@
           do (setf taddr (1+ taddr)))))
   
 
-(defvar *symtab* nil)
-(defun asm-n-run ( main &optional (setup nil) (debug nil))
-  (setq *symtab* (make-hash-table))
-  (setq *hello-world*
-        (masm *symtab*
-              main func-prtstr read-c scan func-str-equal
-              func-find-symbol func-putchar func-cdr
-              func-car func-parse func-rplca func-rplcd
-              func-cons func-print-symbol func-print
-              func-print-list func-str2num func-div10
-              func-print-number func-read))
-  (setf e (make-emulator *hello-world* dmem 200 debug))
-  (if setup (funcall setup dmem))
-  (run-with-curses e *symtab*))
 
 ;(run-emul e 200 nil)
 

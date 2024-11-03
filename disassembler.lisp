@@ -1,10 +1,15 @@
 ;;; ===========================================================================
+(defpackage :lr-disasm
+  (:use :cl :unit :lr-asm)
+  (:export :disasm))
+(in-package :lr-disasm)
+
 ;;; ========================== disassembler ===================================
 (defun disasm-immediate (bytes signed &optional debug)
   (let* ((pc 0)
          (imm (car bytes))
          (imm-end nil)
-          e(bits 0)
+         (bits 0)
          (res 0))
     (if debug (format t "get-imm pc ~a imm ~a~%" pc imm))
     (loop do (progn

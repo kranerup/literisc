@@ -1,3 +1,9 @@
+(defpackage :charms-extra
+  (:use :cl :charms)
+  (:export :draw-window-border
+           :draw-window-box))
+(in-package :charms-extra)
+
 (defun draw-window-border (window
                            &optional
                              (ls #\|) (rs #\|) (ts #\-) (bs #\-)

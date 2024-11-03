@@ -1,4 +1,8 @@
 ;(in-package :com.gigamonkeys.macro-utilities)
+(defpackage :macro-utilities
+  (:use :cl)
+  (:export :with-gensyms :once-only :ppme))
+(in-package :macro-utilities)
 
 (defmacro with-gensyms ((&rest names) &body body)
   `(let ,(loop for n in names collect `(,n (make-symbol ,(string n))))

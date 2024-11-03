@@ -1,8 +1,114 @@
 ;;; ===========================================================================
 ;;; =============================== assembler =================================
-;;;(defpackage #:lr-asm
-;;;  (:use :cl))
-;;;(in-package #:lr-asm)
+(defpackage :lr-asm
+  (:use :cl :unit :lr-opcodes)
+  (:export :integer-to-byte-list
+	   :binary-to-signed-integer
+	   :bit-vector->integer
+	   :integer->bit-vector
+           :string-to-mem 
+           :assemble
+           :masm
+           :set-program
+           :hexdump
+
+           :srp :sp
+           :r0 
+           :r1            
+           :r2            
+           :r3            
+           :r4            
+           :r5            
+           :r6            
+           :r7            
+           :r8            
+           :r9            
+           :r10 :p0
+           :r11 :p1
+           :r12 :p2
+           :r13 :p3
+
+           :label
+
+           :mvi->r 
+           :mvi->a 
+           :j    
+           :jlt             
+           :jge             
+           :jlo             
+           :jhs             
+           :jz              
+           :jnz             
+           :jlo-b           
+           :jhs-b           
+           :jz-b            
+           :jnz-b           
+           :jlo-w           
+           :jhs-w           
+           :jz-w            
+           :jnz-w           
+           :jsr             
+           :a->r 
+           :r->a 
+           :sub-r
+           :add-r
+           :and-r
+           :or-r 
+           :ld-a->r
+           :ld-r->a
+           :st-r->a
+           :st-a->r
+           :ld-a-rel->r
+           :st-r->a-rel
+           :ld.b-a->r
+           :ld.b-r->a
+           :st.b-a->r
+           :st.b-r->a
+           :ld.b-a-rel->r
+           :st.b-r->a-rel
+           :ld.w-a->r
+           :ld.w-r->a
+           :st.w-a->r
+           :st.w-r->a
+           :ld.w-a-rel->r
+           :st.w-r->a-rel
+           :not-a   
+           :lsl-a    
+           :lsr-a    
+           :asr-a    
+           :pop-a    
+           :mask-a-b 
+           :mask-a-w 
+           :sex-a-w  
+           :sex-a-b  
+           :j-a      
+           :push-r
+           :pop-r
+           :stst-srp
+           :push-srp
+           ))
+
+(in-package :lr-asm)
+
+(load-opcodes 
+  (asdf:system-relative-pathname :literisc "rtl/literisc/cpu.py" ))
+
+(defconstant R0  0 )
+(defconstant R1  1 )
+(defconstant R2  2 )
+(defconstant R3  3 )
+(defconstant R4  4 )
+(defconstant R5  5 )
+(defconstant R6  6 )
+(defconstant R7  7 )
+(defconstant R8  8 )
+(defconstant R9  9 )
+(defconstant R10 10) (defconstant P0 R10)
+(defconstant R11 11) (defconstant P1 R11)
+(defconstant R12 12) (defconstant P2 R12)
+(defconstant R13 13) (defconstant P3 R13)
+(defconstant srp 15)
+(defconstant sp 14)
 
 ;;; lsb is returned at start of list
 (defun integer-to-byte-list (data bytes)
@@ -10,6 +116,31 @@
     (loop :for i :downfrom (1- bytes) :to 0
           :collect (ldb (byte 8 (* i 8)) data))))
 
+(defun binary-to-signed-integer (binary num-bits)
+    (if (>= (ash binary (- 1 num-bits)) 1)
+              (- binary (ash 1 num-bits))
+                    binary))
+
+(defun bit-vector->integer (bit-vector)
+  "Create a positive integer from a bit-vector."
+  (reduce #'(lambda (first-bit second-bit)
+              (+ (* first-bit 2) second-bit))
+          bit-vector))
+
+(defun integer->bit-vector (integer)
+  "Create a bit-vector from a positive integer."
+  (labels ((integer->bit-list (int &optional accum)
+             (cond ((> int 0)
+                    (multiple-value-bind (i r) (truncate int 2)
+                      (integer->bit-list i (push r accum))))
+                   ((null accum) (push 0 accum))
+                   (t accum))))
+    (coerce (integer->bit-list integer) 'bit-vector)))
+
+;;; converts a string into a list of bytes and appends a 0
+(defun string-to-mem (s)
+  (loop for c in (append (coerce s 'list) '(#\Nul))
+        append (list (char-code c) )))
 ;;; --------------------------------------------
 
 (defun most-negative-2sc (bits)
@@ -53,26 +184,36 @@
                               (logand #x7f (ash val -7)))
                       (logand #x7f val)))))))
 
+;;; -------------- build op codes -----------------
+;;; reg/field are alias for the lower 4 bits in the opcode
+(defun opc ( opcode &key (reg 0) (field 0) )
+  (logior 
+    (ash opcode 4)
+    reg
+    field))
+
+(defun opci2 ( opcode &key (reg 0) (field 0) )
+  (list (opc OPC_NEXT :field OPCI_NEXT)
+        (opc opcode :field (logior reg field))))
+
+
+;;; -------------- assembler instructions -----------------
 (defun mvi->r (imm r)
-  (concatenate 'list
-               (list (logior #x80 r))
-               (asm-immediate imm)))
+  (cons (opc OPC_MVI :reg r)
+        (asm-immediate imm)))
+
 (defun mvi->a (imm)
   (if (within-2sc imm 4)
-      (list (logior #x90 
-                    (logand #xf imm)))
+      (cons (opc OPC_MVIA
+                 :field (logand #xf imm))
+            nil)
       (error "mvi-a value is too large: ~a" imm)))
-
-(defun j (offs)
-  (concatenate 'list
-               (list #xa0)
-               (asm-immediate offs)))
 
 (defmacro def-jump (fname opcode)
   `(defun ,fname (offs)
      (concatenate 'list
-                 (list (logior #xa0 ,opcode))
-                 offs)))
+                  (list (opc OPC_JMP :field ,opcode))
+                  offs)))
 
 (def-jump j     0)
 (def-jump jlt   1)
@@ -93,125 +234,104 @@
 
 (defmacro def-reg (fname opcode)
   `(defun ,fname (r)
-     (list (logior ,opcode r))))
+     (cons (opc ,opcode :reg r) nil)))
 
-(def-reg a->r    #x00)
-(def-reg r->a    #x10)
-(def-reg sub-r   #xc0)
-(def-reg add-r   #xb0)
-(def-reg and-r   #xd0)
-(def-reg or-r    #xe0)
+(def-reg a->r    OPC_A_Rx)
+(def-reg r->a    OPC_RX_A)
+(def-reg sub-r   OPC_SUB)
+(def-reg add-r   OPC_ADD)
+(def-reg and-r   OPC_AND)
+(def-reg or-r    OPC_OR)
 
 ;;; ----- load / store 32-bit words
-(def-reg ld-a->r #x30)
-(def-reg ld-r->a #x40)
-(def-reg st-r->a #x60)
-(def-reg st-a->r #x70)
-(defun ld-a-rel->r (offs r)
-  (concatenate 'list
-               (list (logior #x20 r))
-               (asm-immediate offs)))
-(defun st-r->a-rel (offs r)
-  (concatenate 'list
-               (list (logior #x50 r))
-               (asm-immediate offs)))
+(def-reg ld-a->r OPC_LD_A)
+(def-reg ld-r->a OPC_LD_RX)
+(def-reg st-r->a OPC_ST_A)
+(def-reg st-a->r OPC_ST_RX) ;;; 7   st A,Rx  M[Rx].l = A
 
-(defun ld.b-a->r (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x30 r))))
+(defun ld-a-rel->r (offs r)
+  (cons (opc OPC_LD_A_OFFS :reg r)
+        (asm-immediate offs)))
+
+(defun st-r->a-rel (offs r)
+  (cons (opc OPC_ST_A_OFFS :reg r)
+        (asm-immediate offs)))
 
 ;;; ----- load / store bytes
+(defun ld.b-a->r (r)
+  (opci2 OPCI2_LDB_A :reg r))
+
 (defun ld.b-r->a (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x40 r))))
+  (opci2 OPCI2_LDB_RX :reg r))
 
 (defun st.b-a->r (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x60 r))))
+  (opci2 OPCI2_STB_A :reg r))
 
 (defun st.b-r->a (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x70 r))))
+  (opci2 OPCI2_STB_RX :reg r))
 
 (defun ld.b-a-rel->r (offs r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x20 r))
-               (asm-immediate offs)))
+  (cons (opc OPCI2_LDB_A_OFFS :reg r)
+        (asm-immediate offs)))
 
 (defun st.b-r->a-rel (offs r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #x50 r))
-               (asm-immediate offs)))
+  (cons (opc OPCI2_STB_A_OFFS :reg r)
+        (asm-immediate offs)))
 
 ;;; ----- load / store 16-bit words
 
 (defun ld.w-a->r (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xb0 r))))
+  (opci2 OPCI2_LDW_A :reg r))
 
 (defun ld.w-r->a (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xc0 r))))
+  (opci2 OPCI2_LDW_RX :reg r))
 
 (defun st.w-a->r (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xe0 r))))
+  (opci2 OPCI2_STW_A :reg r))
 
 (defun st.w-r->a (r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xf0 r))))
+  (opci2 OPCI2_STW_RX :reg r))
 
 (defun ld.w-a-rel->r (offs r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xa0 r))
-               (asm-immediate offs)))
+  (cons (opc OPCI2_LDW_A_OFFS :reg r)
+        (asm-immediate offs)))
 
 (defun st.w-r->a-rel (offs r)
-  (concatenate 'list
-               (list #xf8
-                     (logior #xd0 r))
-               (asm-immediate offs)))
+  (cons (opc OPCI2_STW_A_OFFS :reg r)
+        (asm-immediate offs)))
 
+
+(defun opci (opcode)
+  (logior (ash OPC_NEXT 4)
+          opcode))
 
 (defmacro def-acc (fname opcode)
   `(defun ,fname ()
-     (list ,opcode)))
+     (cons (opci ,opcode) nil)))
 
-(def-acc not-a    #xf0)
-(def-acc lsl-a    #xf1)
-(def-acc lsr-a    #xf2)
-(def-acc asr-a    #xf3)
-(def-acc pop-a    #xf7)
-(def-acc mask-a-b #xfa)
-(def-acc mask-a-w #xfb)
-(def-acc sex-a-w  #xfc)
-(def-acc sex-a-b  #xfd)
-(def-acc j-a      #xfe)
+(def-acc not-a    OPCI_NOT)
+(def-acc lsl-a    OPCI_LSL)
+(def-acc lsr-a    OPCI_LSR)
+(def-acc asr-a    OPCI_ASR)
+(def-acc pop-a    OPCI_POP_A)
+(def-acc mask-a-b OPCI_MASKB)
+(def-acc mask-a-w OPCI_MASKW)
+(def-acc sex-a-w  OPCI_SEXW)
+(def-acc sex-a-b  OPCI_SEXB)
+(def-acc j-a      OPCI_J_A)
 
 (defun push-r (r)
-  (list #xf4
+  (list (opc OPC_NEXT :field OPCI_PUSH_R)
         r))
 
 (defun pop-r (r)
-  (list #xf5
+  (list (opc OPC_NEXT :field OPCI_PUSH_R)
         r))
 
-(defun stst-srp ()
-  (list #xf6))
-
 (defun push-srp ()
-  (list #xf6))
+  (opc OPC_NEXT :field OPCI_PUSH_SRP))
+
+;;;-----------------------------------------------------------
 
 ;;; writes a list of bytes to memory at given address
 (defun set-program (imem ilist &optional (start-adr 0))
@@ -220,7 +340,6 @@
           ;do (format t "M[~a] = ~a~%" p instr)
           do (progn (setf (aref imem p) instr)
                     (setf p (+ p 1))))))
-
 
 (defmacro label (lbl)
   `(progn
@@ -330,6 +449,18 @@
 ;;; macro assembler
 (defmacro masm (symtab &rest body)
   `(assemble (concatenate 'list ,@body) nil ,symtab))
+
+(defun hexdump (bytes &optional (prefix ""))
+  "Print a hexadecimal dump of the given list of bytes.
+   BYTES is a list of integers representing the bytes to dump.
+   PREFIX is an optional string to prepend to each line."
+  (loop for i from 0 by 16 below (length bytes) do
+        (format t "~a~8,'0x: " prefix i)
+        (loop for j from 0 below 16
+              for b = (if (< (+ i j) (length bytes)) (nth (+ i j) bytes) 0)
+              do (format t "~2,'0x " b))
+        (format t "~%")))
+
 ;;;---------- unit tests --------------------
 ;(defmacro part3 (reg)
 ;  `'(
@@ -553,10 +684,11 @@
 ; (run-prog hello-world (string-to-mem "Hello World!") 200 t)
 
 (deftest test-asm ()
-  (test-fw-jump)
-  (test-jumps)
-  (test-jsr)
-  (test-misc-asm)
-  (test-long-jmp)
-  (test-hello-world-asm))
+  (combine-results
+    (test-fw-jump)
+    (test-jumps)
+    (test-jsr)
+    (test-misc-asm)
+    (test-long-jmp)
+    (test-hello-world-asm)))
   

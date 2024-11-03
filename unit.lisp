@@ -1,4 +1,7 @@
-;;;(in-package :com.gigamonkeys.test)
+(defpackage :unit
+  (:use :cl :macro-utilities)
+  (:export :deftest :check :report-results :combine-results))
+(in-package :unit)
 
 (defvar *test-name* nil)
 

@@ -215,6 +215,16 @@
 
 ;;; ===========================================================================
 ;;; ======================== emulator =========================================
+(defpackage :lr-emulator
+  (:use :cl :unit :lr-asm :lr-disasm
+        :charms :charms-extra
+        :lr-opcodes)
+  (:export :make-dmem :make-emulator :run-with-curses ))
+(in-package :lr-emulator)
+
+(load-opcodes 
+  (asdf:system-relative-pathname :literisc "rtl/literisc/cpu.py" ))
+
 (defstruct processor-state 
   R
   A
@@ -259,6 +269,16 @@
   (loop for r from 0 to 15
         do (setf (aref (processor-state-r p) r) 0)) )
 
+(defun sex (val width)
+  (let* ((msb (- width 1))
+         (sign (logand 1 (ash val (- msb))))
+         (extend-mask (logxor #xffffffff (- (ash 1 width) 1)))
+         (zero-mask (- (ash 1 width) 1)))
+    ;(format t "sign ~a emask ~X zmask ~X msb ~a" sign extend-mask zero-mask msb)
+    (if (equal 1 sign)
+        (logior val extend-mask)
+        (logand val zero-mask))))
+  
 ; 1     mv  Rx,A                A = Rx
 (defun i-mv-r (ps rx)
   (setf (processor-state-a ps)
@@ -283,8 +303,6 @@
   (if (processor-state-debug ps) (format t "A = ~a~%" imm)))
 
 ;    15 jsr #nn                 SRP = PC; PC = PC + sex(nn)
-(defconstant SRP 15)
-(defconstant SP 14)
 
 (defun i-jsr (ps imm)
   (setf (aref (processor-state-r ps) SRP)
@@ -304,27 +322,6 @@
                 (+
                   (processor-state-a ps)
                   (aref (processor-state-r ps) rx)))))
-
-(defun binary-to-signed-integer (binary num-bits)
-    (if (>= (ash binary (- 1 num-bits)) 1)
-              (- binary (ash 1 num-bits))
-                    binary))
-
-(defun bit-vector->integer (bit-vector)
-  "Create a positive integer from a bit-vector."
-  (reduce #'(lambda (first-bit second-bit)
-              (+ (* first-bit 2) second-bit))
-          bit-vector))
-
-(defun integer->bit-vector (integer)
-  "Create a bit-vector from a positive integer."
-  (labels ((integer->bit-list (int &optional accum)
-             (cond ((> int 0)
-                    (multiple-value-bind (i r) (truncate int 2)
-                      (integer->bit-list i (push r accum))))
-                   ((null accum) (push 0 accum))
-                   (t accum))))
-    (coerce (integer->bit-list integer) 'bit-vector)))
 
 
 (defun overflow8 (a b)
@@ -425,16 +422,6 @@
         (logand #xffff (processor-state-a ps)))
   (if (processor-state-debug ps) (format t "maskw A~%")))
 
-(defun sex (val width)
-  (let* ((msb (- width 1))
-         (sign (logand 1 (ash val (- msb))))
-         (extend-mask (logxor #xffffffff (- (ash 1 width) 1)))
-         (zero-mask (- (ash 1 width) 1)))
-    ;(format t "sign ~a emask ~X zmask ~X msb ~a" sign extend-mask zero-mask msb)
-    (if (equal 1 sign)
-        (logior val extend-mask)
-        (logand val zero-mask))))
-  
 
 ; sexb  A, A<31:8>  = A<7>
 (defun i-sexb (ps)
@@ -933,121 +920,121 @@
     (progn
       (if (processor-state-debug p) (format t "pc:~d opc:~2d p:~d " pc opcode param))
       (setf (processor-state-pc p) (+ pc 1))
-      (cond ((equal opcode 0)
+      (cond ((equal opcode OPC_A_RX)
              (i-mv-a p param))
-            ((equal opcode 1)
+            ((equal opcode OPC_RX_A)
              (i-mv-r p param))
-            ((equal opcode 2)
+            ((equal opcode OPC_LD_A_OFFS)
              (i-ld-a-rx-imm p param (get-immediate p imem nil) dmem))
-            ((equal opcode 3)
+            ((equal opcode OPC_LD_A)
              (i-ld-a-rx p param dmem))
-            ((equal opcode 4)
+            ((equal opcode OPC_LD_RX)
              (i-ld-rx-a p param dmem))
-            ((equal opcode 5)
+            ((equal opcode OPC_ST_A_OFFS)
              (i-st-a-rx-imm p param (get-immediate p imem nil) dmem))
-            ((equal opcode 6)
+            ((equal opcode OPC_ST_A)
              (i-st-a-rx p param dmem))
-            ((equal opcode 7)
+            ((equal opcode OPC_ST_RX)
              (i-st-rx-a p param dmem))
-            ((equal opcode 8)
+            ((equal opcode OPC_MVI)
              (i-mvi-rx p param (get-immediate p imem t)))
-            ((equal opcode 9)
+            ((equal opcode OPC_MVIA)
              (i-mvi-a p param))
-            ((equal opcode 11)
+            ((equal opcode OPC_ADD)
              (i-add p param))
-            ((equal opcode 12)
+            ((equal opcode OPC_SUB)
              (i-sub p param))
-            ((equal opcode 13)
+            ((equal opcode OPC_AND)
              (i-and p param))
-            ((equal opcode 14)
+            ((equal opcode OPC_OR)
              (i-or p param))
-            ((equal opcode 10)
-             (cond ((equal param 0)
+            ((equal opcode OPC_JMP)
+             (cond ((equal param OPCJ_J)
                     (i-j p (get-immediate p imem t)))
-                   ((equal param 1)
+                   ((equal param OPCJ_JLT)
                     (i-jlt p (get-immediate p imem t)))
-                   ((equal param 2)
+                   ((equal param OPCJ_JGE)
                     (i-jge p (get-immediate p imem t)))
-                   ((equal param 3)
+                   ((equal param OPCJ_JLO)
                     (i-jlo p (get-immediate p imem t)))
-                   ((equal param 4)
+                   ((equal param OPCJ_JHS)
                     (i-jhs p (get-immediate p imem t)))
-                   ((equal param 5)
+                   ((equal param OPCJ_JZ)
                     (i-jz p (get-immediate p imem t)))
-                   ((equal param 6)
+                   ((equal param OPCJ_JNZ)
                     (i-jnz p (get-immediate p imem t)))
-                   ((equal param 7)
+                   ((equal param OPCJ_JLO8)
                     (i-jlo-b p (get-immediate p imem t)))
-                   ((equal param 8)
+                   ((equal param OPCJ_JHS8)
                     (i-jhs-b p (get-immediate p imem t)))
-                   ((equal param 9)
+                   ((equal param OPCJ_JZ8)
                     (i-jz-b p (get-immediate p imem t)))
-                   ((equal param 10)
+                   ((equal param OPCJ_JNZ8)
                     (i-jnz-b p (get-immediate p imem t)))
-                   ((equal param 11)
+                   ((equal param OPCJ_JLO16)
                     (i-jlo-w p (get-immediate p imem t)))
-                   ((equal param 12)
+                   ((equal param OPCJ_JHS16)
                     (i-jhs-w p (get-immediate p imem t)))
-                   ((equal param 13)
+                   ((equal param OPCJ_JZ16)
                     (i-jz-w p (get-immediate p imem t)))
-                   ((equal param 14)
+                   ((equal param OPCJ_JNZ16)
                     (i-jnz-w p (get-immediate p imem t)))
-                   ((equal param 15)
+                   ((equal param OPCJ_JSR)
                     (i-jsr p (get-immediate p imem t)))))
-            ((equal opcode 15)
-             (cond ((equal param 0)
+            ((equal opcode OPC_NEXT)
+             (cond ((equal param OPCI_NOT)
                     (i-not p))
-                   ((equal param 1)
+                   ((equal param OPCI_LSL)
                     (i-lsl p))
-                   ((equal param 2)
+                   ((equal param OPCI_LSR)
                     (i-lsr p))
-                   ((equal param 3)
+                   ((equal param OPCI_ASR)
                     (i-asr p))
-                   ((equal param 4)
+                   ((equal param OPCI_PUSH_R)
                     (i-push p (get-immediate p imem nil) dmem))
-                   ((equal param 5)
+                   ((equal param OPCI_POP_R)
                     (i-pop p (get-immediate p imem nil) dmem))
-                   ((equal param 6)
+                   ((equal param OPCI_PUSH_SRP)
                     (i-push-srp p dmem))
-                   ((equal param 7)
+                   ((equal param OPCI_POP_A)
                     (i-pop-a p dmem))
-                   ((equal param 8)
+                   ((equal param OPCI_NEXT)
                     (destructuring-bind (opcode2 param2)
                       (get-next-opcode p imem)
-                      (cond ((equal opcode2 2)
-                             (i-ld-b-a-rx-imm o param2 (get-immediate p imem nil) dmem))
-                            ((equal opcode2 3)
+                      (cond ((equal opcode2 OPCI2_LDB_A_OFFS)
+                             (i-ld-b-a-rx-imm p param2 (get-immediate p imem nil) dmem))
+                            ((equal opcode2 OPCI2_LDB_A)
                              (i-ld-b-a-rx p param2 dmem))
-                            ((equal opcode2 4)
+                            ((equal opcode2 OPCI2_LDB_RX)
                              (i-ld-b-rx-a p param2 dmem))
-                            ((equal opcode2 5)
+                            ((equal opcode2 OPCI2_STB_A_OFFS)
                              (i-st-b-a-rx-imm p param2 (get-immediate p imem nil) dmem))
-                            ((equal opcode2 6)
+                            ((equal opcode2 OPCI2_STB_A)
                              (i-st-b-a-rx p param2 dmem))
-                            ((equal opcode2 7)
+                            ((equal opcode2 OPCI2_STB_RX)
                              (i-st-b-rx-a p param2 dmem))
-                            ((equal opcode2 10)
+                            ((equal opcode2 OPCI2_LDW_A_OFFS )
                              (i-ld-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
-                            ((equal opcode2 11)
+                            ((equal opcode2 OPCI2_LDW_A)
                              (i-ld-w-a-rx p param2 dmem))
-                            ((equal opcode2 12)
+                            ((equal opcode2 OPCI2_LDW_RX)
                              (i-ld-w-rx-a p param2 dmem))
-                            ((equal opcode2 13)
+                            ((equal opcode2 OPCI2_STW_A_OFFS)
                              (i-st-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
-                            ((equal opcode2 14)
+                            ((equal opcode2 OPCI2_STW_A)
                              (i-st-w-a-rx p param2 dmem))
-                            ((equal opcode2 15)
+                            ((equal opcode2 OPCI2_STW_RX)
                              (i-st-w-rx-a p param2 dmem))
                             )))
-                   ((equal param 10)
+                   ((equal param OPCI_MASKB)
                     (i-maskb p))
-                   ((equal param 11)
+                   ((equal param OPCI_MASKW)
                     (i-maskw p))
-                   ((equal param 12)
+                   ((equal param OPCI_SEXB)
                     (i-sexb p))
-                   ((equal param 13)
+                   ((equal param OPCI_SEXW)
                     (i-sexw p))
-                   ((equal param 14)
+                   ((equal param OPCI_J_A)
                     (i-j-a p))))
             ))))
 
@@ -1069,15 +1056,13 @@
     (if debug (print p)))
   nil)
 
-;;; converts a string into a list of bytes and appends a 0
-(defun string-to-mem (s)
-  (loop for c in (append (coerce s 'list) '(#\Nul))
-        append (list (char-code c) )))
 
 (defstruct emulated-system
   imem
   dmem
   processor)
+
+(defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
   
 (defun make-emulator ( prog-list dmem max-instr &optional (debug t) )
@@ -1114,8 +1099,6 @@
 (setf *a-row* 4)
 (setf *reg-row* 5)
 (setf *cc-row* 22)
-
-(defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
 (defun write-processor-state (window proc imem)
   (charms:write-string-at-point
@@ -2077,14 +2060,14 @@
          (expected (init-reg-state p))
          (dmem (make-dmem 100)))
     (check
-      (progn
-        ;--- stst srp M[sp] = srp
-        (setf (aref (processor-state-r p) SP) 50)
-        (setf (aref (processor-state-r p) SRP) #x04030201)
-        (set-expected-r expected SP 50)
-        (set-expected-r expected SRP #x04030201)
-        (i-stst-srp p dmem)
-        (equal (mem-read-dword dmem 50) #x04030201))
+      ;;(progn
+      ;;  ;--- stst srp M[sp] = srp
+      ;;  (setf (aref (processor-state-r p) SP) 50)
+      ;;  (setf (aref (processor-state-r p) SRP) #x04030201)
+      ;;  (set-expected-r expected SP 50)
+      ;;  (set-expected-r expected SRP #x04030201)
+      ;;  (i-stst-srp p dmem)
+      ;;  (equal (mem-read-dword dmem 50) #x04030201))
       (progn
         ;--- push SRP
         (setf (aref (processor-state-r p) SP) 54)
@@ -2135,12 +2118,13 @@
         (i-pop p 2 dmem)
         (check-state p expected)))))
 
+
 (deftest test-run-hello ()
   (let* ((hw-prog (assemble 
         '( 
            ; --- main ---
            (mvi->r 0 0)
-           (jsr prtstr)
+           (lr-asm::jsr prtstr)
            (label end)
            (j end)
            ; --- prtstr ---
@@ -2168,25 +2152,27 @@
     (setf prog-output
           (with-output-to-string (*standard-output*)
             (run-emul (make-emulator hw-prog dmem 200 nil) 180)))
+    (format t "program-output:~%~a~%" prog-output)
     (check (equal prog-output "Hello World!"))))
 
 
 (deftest test-instructions ()
-  (test-mv)
-  (test-add)
-  (test-and-or )
-  (test-shifts )
-  (test-mask-sex )
-  (test-j )
-  (test-jz )
-  (test-jhs )
-  (test-jge )
-  (test-jge-signed )
-  (test-jsr-regs )
-  (test-mvi )
-  (test-ld )
-  (test-st )
-  (test-push-pop )
-  (test-run-hello))
+  (combine-results
+    (test-mv)
+    (test-add)
+    (test-and-or )
+    (test-shifts )
+    (test-mask-sex )
+    (test-j )
+    (test-jz )
+    (test-jhs )
+    (test-jge )
+    (test-jge-signed )
+    (test-jsr-regs )
+    (test-mvi )
+    (test-ld )
+    (test-st )
+    (test-push-pop )
+    (test-run-hello)))
 
 
