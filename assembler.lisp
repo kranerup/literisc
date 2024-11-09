@@ -86,6 +86,17 @@
            :pop-r
            :stst-srp
            :push-srp
+           :A=M[Rx].b
+           :A-=Rx
+           :A+=Rx
+           :A&=Rx
+           :A\|=Rx
+           :M[Rx]=A
+           :M[Rx].b=A
+           :A=Rx
+           :Rx=A
+           :A=
+           :Rx=
            ))
 
 (in-package :lr-asm)
@@ -201,6 +212,7 @@
 (defun mvi->r (imm r)
   (cons (opc OPC_MVI :reg r)
         (asm-immediate imm)))
+(setf (symbol-function 'Rx=) #'mvi->r)
 
 (defun mvi->a (imm)
   (if (within-2sc imm 4)
@@ -208,6 +220,7 @@
                  :field (logand #xf imm))
             nil)
       (error "mvi-a value is too large: ~a" imm)))
+(setf (symbol-function 'A=) #'mvi->a)
 
 (defmacro def-jump (fname opcode)
   `(defun ,fname (offs)
@@ -237,17 +250,24 @@
      (cons (opc ,opcode :reg r) nil)))
 
 (def-reg a->r    OPC_A_Rx)
+(setf (symbol-function 'Rx=A) #'a->r)
 (def-reg r->a    OPC_RX_A)
+(setf (symbol-function 'A=Rx) #'r->a)
 (def-reg sub-r   OPC_SUB)
+(setf (symbol-function 'A-=Rx) #'sub-r)
 (def-reg add-r   OPC_ADD)
+(setf (symbol-function 'A+=Rx) #'add-r)
 (def-reg and-r   OPC_AND)
+(setf (symbol-function 'A&=Rx) #'and-r)
 (def-reg or-r    OPC_OR)
+(setf (symbol-function 'A\|=Rx) #'or-r)
 
 ;;; ----- load / store 32-bit words
 (def-reg ld-a->r OPC_LD_A)
 (def-reg ld-r->a OPC_LD_RX)
 (def-reg st-r->a OPC_ST_A)
 (def-reg st-a->r OPC_ST_RX) ;;; 7   st A,Rx  M[Rx].l = A
+(setf (symbol-function 'M[Rx]=A) #'st-a->r)
 
 (defun ld-a-rel->r (offs r)
   (cons (opc OPC_LD_A_OFFS :reg r)
@@ -263,12 +283,14 @@
 
 (defun ld.b-r->a (r)
   (opci2 OPCI2_LDB_RX :reg r))
+(setf (symbol-function 'A=M[Rx].b) #'ld.b-r->a)
 
 (defun st.b-a->r (r)
   (opci2 OPCI2_STB_A :reg r))
 
 (defun st.b-r->a (r)
   (opci2 OPCI2_STB_RX :reg r))
+(setf (symbol-function 'M[Rx].b=A) #'st.b-r->a)
 
 (defun ld.b-a-rel->r (offs r)
   (cons (opc OPCI2_LDB_A_OFFS :reg r)
@@ -325,11 +347,11 @@
         r))
 
 (defun pop-r (r)
-  (list (opc OPC_NEXT :field OPCI_PUSH_R)
+  (list (opc OPC_NEXT :field OPCI_POP_R)
         r))
 
 (defun push-srp ()
-  (opc OPC_NEXT :field OPCI_PUSH_SRP))
+  (cons (opc OPC_NEXT :field OPCI_PUSH_SRP) nil))
 
 ;;;-----------------------------------------------------------
 
@@ -353,7 +375,7 @@
   (dolist (item aprog)
     (if (equal (car item) 'label)
         (progn
-          ;(format t "label ~a~%" (cadr item))
+          (if verbose (format t "label ~a~%" (cadr item)))
           (eval item)))))
 
 ;;; Evaluate assembler instruction and if it is a jump
@@ -408,6 +430,7 @@
             (setf diff (or diff (not (equal (symbol-value (cadr item)) curr-pc))))
             (setf (symbol-value (cadr item)) curr-pc))
           (progn
+            (if debug (format t "item:~a~%" item))
             (if debug (format t "mcode len:~a val:~a~%"
                               (list-length (eval-asm item curr-pc debug))
                               (eval-asm item curr-pc debug)))

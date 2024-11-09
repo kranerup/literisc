@@ -2,26 +2,6 @@
 (use-package :lr-asm)
 (use-package :lr-emulator)
 
-;(defmacro part3 (reg)
-;  `'(
-;    (mvi->r 0 ,reg)))
-;(masm (part1) (part2) (part3 3))
-
-;;;(defconstant R0  0 )
-;;;(defconstant R1  1 )
-;;;(defconstant R2  2 )
-;;;(defconstant R3  3 )
-;;;(defconstant R4  4 )
-;;;(defconstant R5  5 )
-;;;(defconstant R6  6 )
-;;;(defconstant R7  7 )
-;;;(defconstant R8  8 )
-;;;(defconstant R9  9 )
-;;;(defconstant R10 10) (defconstant P0 R10)
-;;;(defconstant R11 11) (defconstant P1 R11)
-;;;(defconstant R12 12) (defconstant P2 R12)
-;;;(defconstant R13 13) (defconstant P3 R13)
-
 (defvar dmem nil)
 (defvar dmem-allocated 0)
 (setq dmem (make-dmem 1000))
