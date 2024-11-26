@@ -3,7 +3,7 @@ from myhdl import Struct, unpack_struct
 
 from modules.common.memory import memory
 from modules.common.Common import copySignal, multiflop
-from sub import sub3_w
+from sub_always import sub3_w_sig
 
 OPC_A_RX      = 0  # Rx = A
 OPC_RX_A      = 1  # A = Rx
@@ -313,6 +313,24 @@ def cpu( clk, rstn,
     load_cc = Signal(modbv(0)[1:])
     set_i = Signal(modbv(0)[1:])
     clr_i = Signal(modbv(0)[1:])
+    sub_res = Signal(modbv(0)[32:])
+    add_sub = Signal(modbv(0)[1:])
+    borrow_in = Signal(modbv(0)[1:])
+
+    ln   = Signal(modbv(0)[1:])
+    lz   = Signal(modbv(0)[1:])
+    lv   = Signal(modbv(0)[1:])
+    lc   = Signal(modbv(0)[1:])
+    lc8  = Signal(modbv(0)[1:])
+    lz8  = Signal(modbv(0)[1:])
+    lc16 = Signal(modbv(0)[1:])
+    lz16 = Signal(modbv(0)[1:])
+
+    v_mid = Signal(modbv(0)[1:]) # unused
+    n_mid = Signal(modbv(0)[1:]) # unused
+    v_lo  = Signal(modbv(0)[1:]) # unused
+    n_lo  = Signal(modbv(0)[1:])  # unused
+
 
     # sel_imem
     PC = 0
@@ -337,6 +355,30 @@ def cpu( clk, rstn,
     ii   = multiflop( n_intr_enabled, intr_enabled, clk, rstn, reset_value=1 )
     icc  = multiflop( n_load_cc, load_cc, clk, rstn, reset_value=1 )
 
+    
+    @always_comb
+    def sub_ctrl():
+        add = modbv(0)[1:]
+        b_in = modbv(0)[1:]
+        if alu_oper != ALU_SUB:
+            add[:] = 1
+            if alu_oper == ALU_ADC:
+                b_in[:] = cc_c
+        else:
+            b_in[:] = 1
+        add_sub.next = add
+        borrow_in.next = b_in
+
+    isub = sub3_w_sig(
+        alu_op_y,  #i
+        alu_op_x, #i
+        sub_res, #o
+        add_sub, #i
+        borrow_in, #i
+        lc,   lv,    ln,    lz, #o
+        lc16, v_mid, n_mid, lz16, #o
+        lc8,  v_lo,  n_lo,  lz8, #o
+        32, 16, 8 )
 
     @always_comb
     def ctrl():
@@ -1234,23 +1276,12 @@ def cpu( clk, rstn,
         n[:] = ext_res[width-1]
         z[:] = ext_res[width-1:] == 0
 
+    
+
     @always_comb
     def alu():
-        ln = modbv(0)[1:]
-        lz = modbv(0)[1:]
-        lv = modbv(0)[1:]
-        lc = modbv(0)[1:]
-        lc8 = modbv(0)[1:]
-        lz8 = modbv(0)[1:]
-        lc16 = modbv(0)[1:]
-        lz16 = modbv(0)[1:]
         extended_x = modbv(0)[32+1:]
         extended_y = modbv(0)[32+1:]
-
-        v_mid = modbv(0)[1:] # unused
-        n_mid = modbv(0)[1:] # unused
-        v_lo = modbv(0)[1:] # unused
-        n_lo = modbv(0)[1:]  # unused
 
         n_n.next   = cc_n
         n_z.next   = cc_z
@@ -1276,25 +1307,27 @@ def cpu( clk, rstn,
             tmp[31] = tmp[30]
             alu_out.next = tmp
         elif alu_oper == ALU_SUB or alu_oper == ALU_ADD or alu_oper == ALU_ADC or alu_oper == ALU_ADDC:
-            add = modbv(0)[1:]
-            b_in = modbv(0)[1:]
-            if alu_oper != ALU_SUB:
-                add[:] = 1
-                if alu_oper == ALU_ADC:
-                    b_in[:] = cc_c
-            else:
-                b_in[:] = 1
+            #add = modbv(0)[1:]
+            #b_in = modbv(0)[1:]
+            #if alu_oper != ALU_SUB:
+            #    add[:] = 1
+            #    if alu_oper == ALU_ADC:
+            #        b_in[:] = cc_c
+            #else:
+            #    b_in[:] = 1
 
 
-            sub3_w( alu_op_y, alu_op_x, tmp,
-                   add,
-                   b_in, 
-                   lc,   lv,    ln,    lz,
-                   lc16, v_mid, n_mid, lz16,
-                   lc8,  v_lo,  n_lo,  lz8,
-                   32, 16, 8 )
+            #sub3_w( alu_op_y,  #i
+            #        alu_op_x, #i
+            #        tmp, #o
+            #        add, #i
+            #        b_in, #i
+            #        lc,   lv,    ln,    lz, #o
+            #        lc16, v_mid, n_mid, lz16, #o
+            #        lc8,  v_lo,  n_lo,  lz8, #o
+            #        32, 16, 8 )
 
-            alu_out.next = tmp
+            alu_out.next = sub_res
 
             if alu_oper == ALU_SUB:
                 n_n.next = ln
