@@ -26,6 +26,8 @@ class hwconf_fake(object):
         self.nr_of_pb = 1
         self.sparsly_table_address_space = False
         self.maximum_address_space = None
+        self.memory_max_width = 1000
+        self.memory_max_depth = 2000000
         self.statistics_config = {'conf_width':32,'conf_access':'rw','debug_width':16,'debug_access':'rw'}
 
     def regTab_check_exist_address(self,n):
