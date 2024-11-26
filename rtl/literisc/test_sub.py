@@ -1,5 +1,5 @@
 from myhdl import *
-from sub import sub3_w, sub_w
+from sub import sub3_w, sub2_w, sub_w
 
 
 def twos_comp_to_int( v, width ):
@@ -283,7 +283,7 @@ def verify():
             print(f"completed {completed}",flush=True)
 
 
-def top( clk, rstn, ina, inb, do_add, res, borrow ):
+def top( clk, rstn, ina, inb, do_add, res, borrow, borrow_mid, borrow_lo ):
 
     @always(clk.posedge)
     def calc():
@@ -297,11 +297,19 @@ def top( clk, rstn, ina, inb, do_add, res, borrow ):
         v_hi = modbv(0)[1:]
         n_hi = modbv(0)[1:]
         z_hi = modbv(0)[1:]
-        sub3_w( ina, inb, res, do_add, b_in, borrow,
-           v_hi, n_hi, z_hi,
-           v_mid, n_mid, z_mid,
-           v_lo, n_lo, z_lo,
-           32, 16, 8 )
+        z_hi = modbv(0)[1:]
+        sub3_w( ina, inb, res, do_add, b_in,
+               borrow, v_hi, n_hi, z_hi,
+               borrow_mid, v_mid, n_mid, z_mid,
+               borrow_lo, v_lo, n_lo, z_lo,
+               32, 16, 8 )
+        #sub2_w( ina, inb, res, do_add, b_in, 
+        #       borrow, v_hi, n_hi, z_hi,
+        #       borrow_lo, v_lo, n_lo, z_lo,
+        #       16, 8 )
+        #sub_w( ina, inb, res, do_add, b_in, borrow,
+        #   v_hi, n_hi, z_hi,
+        #   8 )
 
     return instances()
 
@@ -312,10 +320,12 @@ def gen_verilog():
     inb = Signal(modbv(0)[32:])
     res = Signal(modbv(0)[32:])
     borrow = Signal(modbv(0)[1:])
+    borrow_mid = Signal(modbv(0)[1:])
+    borrow_lo = Signal(modbv(0)[1:])
     do_add = Signal(intbv(0)[1:])
 
     toVerilog.standard = 'systemverilog'
-    itop = toVerilog( top, clk, rstn, ina, inb, res, do_add, borrow )
+    itop = toVerilog( top, clk, rstn, ina, inb, res, do_add, borrow, borrow_mid, borrow_lo )
 
 
 if __name__ == '__main__':
