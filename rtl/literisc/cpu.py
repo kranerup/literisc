@@ -167,7 +167,7 @@ for s,v in curr_globs.items():
 # sequence for byte/word write.
 #----------------------
 
-
+@module
 def cpu( clk, rstn,
          imem_dout,
          imem_adr,
@@ -186,6 +186,7 @@ def cpu( clk, rstn,
          obs_cc,
          obs_op,
          sim_print):
+
 
     pc = Signal(modbv(0)[16:])
     pc_next = Signal(modbv(0)[16:])
@@ -336,9 +337,9 @@ def cpu( clk, rstn,
     ii   = multiflop( n_intr_enabled, intr_enabled, clk, rstn, reset_value=1 )
     icc  = multiflop( n_load_cc, load_cc, clk, rstn, reset_value=1 )
 
+
     @always_comb
     def ctrl():
-        inc_pc.next = 0
         load_pc_intr.next = 0
         n_load_ir.next = 0
         n_load_imm.next = 0
@@ -1283,6 +1284,7 @@ def cpu( clk, rstn,
                     b_in[:] = cc_c
             else:
                 b_in[:] = 1
+
 
             sub3_w( alu_op_y, alu_op_x, tmp,
                    add,
