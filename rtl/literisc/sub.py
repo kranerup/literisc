@@ -6,7 +6,7 @@ def sub_w( x, y, res, do_add, borrow_in, borrow_out, v, n, z, width ) :
     ext_res = modbv(0)[width+1:]
     inv_y = modbv(0)[width:]
     add = modbv(0)[1:]
-    add = do_add
+    add[:] = do_add
     if add == 1: # strange myhdl error when using do_add directly
         inv_y[:] = y
     else:
