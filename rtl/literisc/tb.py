@@ -545,6 +545,27 @@ def test_2(program,expect,pc,dmem,irq):
     program[ 6 ] = 0xff # NOP
     program[ 7 ] = 0xff # NOP
 
+def immediate( val, pc=0 ):
+    program = dict()
+    program[ pc+0   ] = ((val>>28) & 0xf ) | 0x80  # 31:28
+    program[ pc+1   ] = ((val>>21) & 0x7f ) | 0x80  # 27:21
+    program[ pc+2   ] = ((val>>14) & 0x7f ) | 0x80  # 20:14
+    program[ pc+3   ] = ((val>>7) & 0x7f ) | 0x80  # 13:7
+    program[ pc+4   ] = ( val & 0x7f )         # 6:0
+    return program, pc+4+1
+
+def jump_relative( pc, target ):
+    offs = target - pc
+    program = dict()
+    program[ pc ] = 0xa0 # j
+    if offs < 0:
+        # offs is relative byte after jump instruction
+        offs = target - (pc + 5 + 1) # jump instr plus 32-bit immediate offset
+        imm, n_pc = immediate( offs & 0xffffffff, pc + 1 )
+        program.update( imm )
+        return program, n_pc
+    assert False, f"jump offs {offs} not supported"
+
 def test_3(program,expect,pc,dmem,irq):
     # ---- test jumps ----------
     program[ 0 ] = 0xff # NOP
