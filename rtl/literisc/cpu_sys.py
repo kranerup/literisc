@@ -18,6 +18,13 @@ def prog_to_tuples( program ):
     assert len(tup) == len(program), f"there are holes in the program {len(program)}:{program} t:{len(tup)}:{tup}"
     return tup 
 
+def hexdump_to_prog( dump ):
+    prog = []
+    for line in dump.splitlines():
+        adr, hexdata = line.split(': ')
+        prog += [ int(x,16) for x in hexdata.split(" ") ]
+    return { idx: val for idx,val in enumerate( prog ) }
+
 def rom(
     odata,
     raddr,
@@ -71,6 +78,7 @@ def cpu_sys(
     dmem_adr = Signal(modbv(0)[16:])
     dmem_din = signal(cpu_dmem_data_bits )
     dmem_dout = signal(cpu_dmem_data_bits)
+    dmem_muxed_dout = signal(cpu_dmem_data_bits)
     dmem_rd = signal()
     dmem_wr = signal()
     dmem_wr_sz = signal(2)
@@ -87,7 +95,7 @@ def cpu_sys(
             imem_radr,
             imem_rd,
             dmem_din,
-            dmem_dout,
+            dmem_muxed_dout,
             dmem_adr,
             dmem_rd,
             dmem_wr,
@@ -128,10 +136,22 @@ def cpu_sys(
     req_addr = signal(perip_addr_bits)
     req_wdata = signal(perip_data_bits)
     req_rdata = signal(perip_data_bits)
+    req_reading = signal()
+    n_req_reading = signal()
     dmem_renable = signal()
     dmem_wenable = signal()
 
     icw = multiflop( n_cpu_waiting, cpu_waiting, clk, rstn )
+    ird = multiflop( n_req_reading, req_reading, clk, rstn )
+
+    sel_axi_rd_data = signal()
+
+    @always_comb
+    def dmux():
+        if sel_axi_rd_data == 1:
+            dmem_muxed_dout.next = req_rdata
+        else:
+            dmem_muxed_dout.next = dmem_dout
 
     @always_comb
     def decode():
@@ -142,13 +162,20 @@ def cpu_sys(
         dmem_renable.next = 0
         dmem_wenable.next = 0
         n_cpu_waiting.next = 0
+        n_req_reading.next = 0
+
+        sel_axi_rd_data.next = req_reading
 
         if cpu_waiting == 1:
+            n_req_reading.next = req_reading
             if req_done == 1:
                 n_cpu_waiting.next = 0
                 req_rd.next = 0
                 req_wr.next = 0
+            else:
+                n_cpu_waiting.next = 1
         else:
+            n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
                 if dmem_adr >= IO_LOW and dmem_adr <= IO_HIGH:
                     n_cpu_waiting.next = 1
@@ -156,6 +183,7 @@ def cpu_sys(
                     req_wr.next = dmem_wr
                     req_addr.next = dmem_adr - IO_LOW
                     req_wdata.next = dmem_din
+                    n_req_reading.next = dmem_rd
                 else:
                     n_cpu_waiting.next = 0
                     dmem_renable.next = dmem_rd
@@ -188,17 +216,43 @@ def cpu_sys(
         output_flops = 0,
         name = 'dmem')
 
-    program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
-    # R1 = counter
-    program[ pc   ] = 0x91 # A = 1 
-    program[ pc+1 ] = 0xb1 # A = A + R1
-    program[ pc+2 ] = 0x01 # R1 = A
-    program[ pc+3 ] = 0xf8 # M[R0].b = A
-    program[ pc+4 ] = 0x70
-    p, pc = jump_relative( pc+5, 0 )
-    program[ pc ]   = 0xff # nop
-    program[ pc+1 ] = 0xff # nop
-    program.update( p )
+    if False:
+        # --- output counter to GPIO ------------
+        program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
+        # R1 = counter
+        program[ pc   ] = 0x91 # A = 1
+        program[ pc+1 ] = 0xb1 # A = A + R1
+        program[ pc+2 ] = 0x01 # R1 = A
+        program[ pc+3 ] = 0xf8 # M[R0].b = A
+        program[ pc+4 ] = 0x70
+        p, pc = jump_relative( pc+5, 0 )
+        program[ pc ]   = 0xff # nop
+        program[ pc+1 ] = 0xff # nop
+        program.update( p )
+    elif False:
+        # --- counter to GPIO and to serial port --------------
+        program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
+        # R1 = counter
+        program[ pc   ] = 0x91 # A = 1 
+        program[ pc+1 ] = 0xb1 # A = A + R1
+        program[ pc+2 ] = 0x01 # R1 = A
+        program[ pc+3 ] = 0xf8 # M[R0].b = A
+        program[ pc+4 ] = 0x70
+        program[ pc+5 ] = 0x10 # A = R0
+        program[ pc+6 ] = 0xf8 # M[ A + 1 ].b = R1
+        program[ pc+7 ] = 0x51
+        program[ pc+8 ] = 1 # single byte immediate offset
+        program[ pc+9 ] = 0xf8 # R2 = M[ A + 2 ].b
+        program[ pc+10] = 0x22 # -"-
+        program[ pc+11] = 2 # single byte immediate offset
+        p, pc = jump_relative( pc+12, 0 )
+        program[ pc ]   = 0xff # nop
+        program[ pc+1 ] = 0xff # nop
+        program.update( p )
+    else:
+        program = hexdump_to_prog("""\
+            00000000: 80 83 FF 1C 91 B1 01 F8 70 10 22 02 91 C2 A6 0B
+            00000010: C0 03 8F 05 15 D0 B3 04 10 54 01 A0 67 00 00 00""")
 
     boot_code = prog_to_tuples( program )
 
@@ -261,7 +315,6 @@ def cpu_sys(
 
             elif m_state == M_WAIT_ARREADY:
                 if axi.arready == 1:
-                    axi.rready.next = 1
                     m_state.next = M_WAIT_RVALID
                 else:
                     m_state.next = M_WAIT_ARREADY
@@ -269,7 +322,6 @@ def cpu_sys(
                 axi.rready.next = 1
                 axi.arvalid.next = 0
                 if axi.rvalid == 1:
-                    m_state.next = M_WAIT_RVALID
                     req_rdata.next = axi.rdata
                     req_done.next = 1
                     m_state.next = M_IDLE

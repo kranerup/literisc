@@ -93,6 +93,8 @@
            :A\|=Rx
            :M[Rx]=A
            :M[Rx].b=A
+           :Rx=M[A+n].b
+           :M[A+n].b=Rx
            :A=Rx
            :Rx=A
            :A=
@@ -295,10 +297,12 @@
 (defun ld.b-a-rel->r (offs r)
   (cons (opc OPCI2_LDB_A_OFFS :reg r)
         (asm-immediate offs)))
+(setf (symbol-function 'Rx=M[A+n].b) #'ld.b-a-rel->r)
 
 (defun st.b-r->a-rel (offs r)
   (cons (opc OPCI2_STB_A_OFFS :reg r)
         (asm-immediate offs)))
+(setf (symbol-function 'M[A+n].b=Rx) #'st.b-r->a-rel)
 
 ;;; ----- load / store 16-bit words
 
@@ -361,7 +365,8 @@
     (loop for instr in ilist
           ;do (format t "M[~a] = ~a~%" p instr)
           do (progn (setf (aref imem p) instr)
-                    (setf p (+ p 1))))))
+                    (setf p (+ p 1)))))
+  imem)
 
 (defmacro label (lbl)
   `(progn

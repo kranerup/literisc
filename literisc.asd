@@ -1,4 +1,6 @@
 ;;; CL-USER> (asdf:load-system :literisc)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (ql:quickload :str))
 
 (defsystem "literisc"
   :depends-on (#:cl-charms

@@ -2155,6 +2155,42 @@
     (format t "program-output:~%~a~%" prog-output)
     (check (equal prog-output "Hello World!"))))
 
+#|
+(run-with-curses 
+;(run-emul
+  (make-emulator
+    (assemble 
+        '( 
+           ; --- main ---
+           (mvi->r 0 0)
+           (lr-asm::jsr prtstr)
+           (label end)
+           (j end)
+           ; --- prtstr ---
+           ; r0 - ptr to zero terminated string
+           (label prtstr)
+           (ld.b-r->a 0)
+           (mask-a-b)
+           (a->r 1)
+           (mvi->r -1 2) ; ptr to I/O reg
+           (mvi->a 0)
+           (sub-r 1)
+           (jz ret-prtstr)
+           (r->a 1)
+           (st-a->r 2)
+           (mvi->a 1)
+           (add-r 0)
+           (a->r 0)
+           (j prtstr)
+           (label ret-prtstr)
+           (r->a srp)
+           (j-a)))
+    (set-program (make-dmem 1000) (string-to-mem "Hello World!"))
+    200
+    nil)
+  )
+|#
+
 
 (deftest test-instructions ()
   (combine-results
