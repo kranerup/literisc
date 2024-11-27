@@ -56,7 +56,7 @@ def cpu_sys(
     perip_addr_bits = 16
     perip_data_bits = 32
     cpu_dmem_data_bits = 32
-    dmem_depth = 65536
+    dmem_depth = 32768 # reduced to fit FPGA BRAM ( 65536)
     imem_depth = 65536
     IO_LOW = 65536-100
     IO_HIGH = 65535
@@ -141,6 +141,7 @@ def cpu_sys(
         req_wdata.next = 0
         dmem_renable.next = 0
         dmem_wenable.next = 0
+        n_cpu_waiting.next = 0
 
         if cpu_waiting == 1:
             if req_done == 1:

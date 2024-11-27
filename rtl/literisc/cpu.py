@@ -393,6 +393,7 @@ def cpu( clk, rstn,
         clear_reg_cnt.next = 0
         n_intr_enabled.next = 0
         intr_push.next = 0
+        inc_pc.next = 0
     
         goto_next_instr = modbv(0)[1:]
         intr_active = modbv(0)[1:]
@@ -1307,25 +1308,6 @@ def cpu( clk, rstn,
             tmp[31] = tmp[30]
             alu_out.next = tmp
         elif alu_oper == ALU_SUB or alu_oper == ALU_ADD or alu_oper == ALU_ADC or alu_oper == ALU_ADDC:
-            #add = modbv(0)[1:]
-            #b_in = modbv(0)[1:]
-            #if alu_oper != ALU_SUB:
-            #    add[:] = 1
-            #    if alu_oper == ALU_ADC:
-            #        b_in[:] = cc_c
-            #else:
-            #    b_in[:] = 1
-
-
-            #sub3_w( alu_op_y,  #i
-            #        alu_op_x, #i
-            #        tmp, #o
-            #        add, #i
-            #        b_in, #i
-            #        lc,   lv,    ln,    lz, #o
-            #        lc16, v_mid, n_mid, lz16, #o
-            #        lc8,  v_lo,  n_lo,  lz8, #o
-            #        32, 16, 8 )
 
             alu_out.next = sub_res
 
