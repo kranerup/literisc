@@ -90,6 +90,7 @@ class InstrCovCollector(object):
 def cpu_tester( clk, programs ):
 
     rstn = Signal(modbv(0)[1:])
+    clk_en = Signal(modbv(1)[1:])
 
     imem_radr = Signal(modbv(0)[16:])
     imem_wadr = Signal(modbv(0)[16:])
@@ -290,6 +291,7 @@ def cpu_tester( clk, programs ):
 
     icpu = cpu(
         clk        = clk,
+        clk_en     = clk_en,
         rstn       = rstn,
         imem_dout  = imem_dout,
         imem_adr   = imem_radr,
@@ -1576,6 +1578,7 @@ def main():
         sim.run( 20000 )
     else:
         clk = Signal(bool())
+        clk_en = Signal(modbv(1)[1:0])
         rstn = Signal(intbv(0)[1:0])
         imem_radr = Signal(modbv(0)[16:])
         imem_wadr = Signal(modbv(0)[16:])
@@ -1595,7 +1598,7 @@ def main():
         intr = Signal(modbv(0)[1:])
 
         toVerilog.standard = 'systemverilog'
-        itop = toVerilog( cpu, clk, rstn,
+        itop = toVerilog( cpu, clk, clk_en, rstn,
                 imem_dout,
                 imem_radr,
                 imem_rd,

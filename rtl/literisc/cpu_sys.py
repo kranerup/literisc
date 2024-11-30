@@ -2,10 +2,12 @@ from myhdl import *
 
 from modules.common.memory import memory
 from modules.common.signal import signal
-from modules.common.Common import copySignal, multiflop
+from modules.common.Common import copySignal
 
 from cpu import cpu
 from tb import load_a_rx, load_rx, jump_relative
+from dp_mem import dp_mem
+from cpu_common import flop
 
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
@@ -30,7 +32,8 @@ def rom(
     raddr,
     renable,
     clk,
-    rstn,
+    clk_en,
+    sync_rstn,
     depth,
     content,
     input_flops = 0,
@@ -41,7 +44,7 @@ def rom(
     @always_comb
     def read():
         if renable == 1:
-            print("raddr:",raddr)
+            #print("rom raddr:",raddr)
             if raddr >= len(content):
                 #print("raddr out of range, max",len(content),"act",raddr)
                 n_rdata.next = 0
@@ -50,13 +53,13 @@ def rom(
         else:
             n_rdata.next = 0
 
-    icw = multiflop( n_rdata, odata, clk, rstn )
+    icw = flop( n_rdata, odata, clk_en, clk, sync_rstn )
 
     return instances()
 
 def cpu_sys(
         clk,
-        rstn,
+        sync_rstn,
         axi
         ):
 
@@ -87,10 +90,12 @@ def cpu_sys(
     intr = signal()
 
     cpu_clk = signal()
+    clk_en = signal()
   
     icpu = cpu(
             cpu_clk,
-            rstn,
+            clk_en,
+            sync_rstn,
             imem_dout,
             imem_radr,
             imem_rd,
@@ -112,22 +117,30 @@ def cpu_sys(
 
     # --------------- cpu clock gating ------------
     # negedge clock enable
-    clk_en = signal()
+    #clk_en = signal()
     cpu_waiting = signal()
     n_cpu_waiting = signal()
      
 
-    @always(clk.negedge, rstn.negedge)
-    def cpu_hold():
-        if rstn == 0:
+    #@always(clk.negedge, rstn.negedge)
+    #def cpu_hold():
+    #    if rstn == 0:
+    #        clk_en.next = 1
+    #    else:
+    #        clk_en.next = ~cpu_waiting
+    @always_comb
+    def cg():
+        if sync_rstn == 0:
             clk_en.next = 1
         else:
             clk_en.next = ~cpu_waiting
+        cpu_clk.next = clk
 
-    # glitch free clock gate
-    @always_comb
-    def clk_gate():
-        cpu_clk.next = clk_en & clk
+
+    ## glitch free clock gate
+    #@always_comb
+    #def clk_gate():
+    #    cpu_clk.next = clk_en & clk
 
     # ---------------- memory and periphery control  --------------------
     req_rd = signal()
@@ -141,8 +154,8 @@ def cpu_sys(
     dmem_renable = signal()
     dmem_wenable = signal()
 
-    icw = multiflop( n_cpu_waiting, cpu_waiting, clk, rstn )
-    ird = multiflop( n_req_reading, req_reading, clk, rstn )
+    icw = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
+    ird = flop( n_req_reading, req_reading, clk_en=None, clk=clk, sync_rstn=sync_rstn )
 
     sel_axi_rd_data = signal()
 
@@ -184,6 +197,8 @@ def cpu_sys(
                     req_addr.next = dmem_adr - IO_LOW
                     req_wdata.next = dmem_din
                     n_req_reading.next = dmem_rd
+                    dmem_renable.next = 0
+                    dmem_wenable.next = 0
                 else:
                     n_cpu_waiting.next = 0
                     dmem_renable.next = dmem_rd
@@ -201,20 +216,34 @@ def cpu_sys(
         else: # sz=2
             dmem_wmask.next = 0b1111
 
-    dmem = memory(
-        idata = dmem_din,
-        odata = dmem_dout,
-        raddr = dmem_adr,
-        waddr = dmem_adr,
-        renable = dmem_renable,
-        wenable = dmem_wenable,
-        wmask   = dmem_wmask,
-        clk = cpu_clk,
-        rstn = rstn,
-        depth = dmem_depth,
-        input_flops = 0,
-        output_flops = 0,
-        name = 'dmem')
+    if False:
+        dmem = memory(
+            idata = dmem_din,
+            odata = dmem_dout,
+            raddr = dmem_adr,
+            waddr = dmem_adr,
+            renable = dmem_renable,
+            wenable = dmem_wenable,
+            wmask   = dmem_wmask,
+            clk = cpu_clk,
+            rstn = rstn,
+            depth = dmem_depth,
+            input_flops = 0,
+            output_flops = 0,
+            name = 'dmem')
+    else:
+        dmem = dp_mem(
+            idata = dmem_din,
+            odata = dmem_dout,
+            raddr = dmem_adr,
+            waddr = dmem_adr,
+            renable = dmem_renable,
+            wenable = dmem_wenable,
+            wmask   = dmem_wmask,
+            clk = cpu_clk,
+            clk_en = clk_en,
+            depth = dmem_depth,
+            name = 'dmem')
 
     if False:
         # --- output counter to GPIO ------------
@@ -251,8 +280,15 @@ def cpu_sys(
         program.update( p )
     else:
         program = hexdump_to_prog("""\
-            00000000: 80 83 FF 1C 91 B1 01 F8 70 10 22 02 91 C2 A6 0B
-            00000010: C0 03 8F 05 15 D0 B3 04 10 54 01 A0 67 00 00 00""")
+            00000000: 80 83 FF 1C 91 B1 01 F8 70 10 22 02 91 C2 A6 0C
+            00000010: 83 80 40 85 0F 15 D1 B3 04 10 54 01 A0 66 00 00""")
+        program = hexdump_to_prog("""\
+00000000: 80 83 FF 1C 91 B1 01 F8 70 10 22 02 91 C2 A6 21
+00000010: 85 0F 15 D1 05 90 C5 A6 0F 91 B1 01 F8 70 86 87
+00000020: 7F D6 08 87 00 C7 A6 71 15 83 80 40 B3 04 10 54
+00000030: 01 A0 51 00 00 00 00 00 00 00 00 00 00 00 00 00""")
+
+
 
     boot_code = prog_to_tuples( program )
 
@@ -260,8 +296,9 @@ def cpu_sys(
         odata        = imem_dout,
         raddr        = imem_radr,
         renable      = imem_rd,
+        clk_en       = clk_en,
         clk          = cpu_clk,
-        rstn         = rstn,
+        sync_rstn    = sync_rstn,
         depth        = imem_depth,
         input_flops  = 0,
         output_flops = 0,
@@ -280,14 +317,20 @@ def cpu_sys(
 
     m_state = signal(3)
 
-    @always(clk.posedge,rstn.negedge)
+    @always(clk.posedge)
     def axi_master():
         axi.arlen.next = 0
 
-        if rstn == 0:
+        if sync_rstn == 0:
             axi.rready.next = 0
             axi.arvalid.next = 0
             axi.araddr.next = 0
+            axi.awaddr.next = 0
+            axi.awvalid.next = 0
+            axi.wdata.next = 0
+            axi.wvalid.next = 0
+            req_done.next = 0
+            req_rdata.next = 0
             m_state.next = M_IDLE
         else:
 
@@ -297,6 +340,7 @@ def cpu_sys(
                 axi.arvalid.next = 0
 
                 if req_rd == 1:
+                    print("axi req_rd")
                     axi.arvalid.next = 1
                     axi.araddr.next = req_addr
                     if axi.arready == 1:
@@ -304,6 +348,7 @@ def cpu_sys(
                     else:
                         m_state.next = M_WAIT_ARREADY
                 elif req_wr == 1:
+                    print("axi req_wr")
                     axi.awvalid.next = 1
                     axi.awaddr.next = req_addr
                     axi.wvalid.next = 1
@@ -315,14 +360,22 @@ def cpu_sys(
 
             elif m_state == M_WAIT_ARREADY:
                 if axi.arready == 1:
-                    m_state.next = M_WAIT_RVALID
+                    if axi.rvalid == 1:
+                        axi.rready.next = 1
+                        req_rdata.next = axi.rdata
+                        print("axi req_done")
+                        req_done.next = 1
+                        m_state.next = M_IDLE
+                    else:
+                        m_state.next = M_WAIT_RVALID
                 else:
                     m_state.next = M_WAIT_ARREADY
             elif m_state == M_WAIT_RVALID:
-                axi.rready.next = 1
                 axi.arvalid.next = 0
                 if axi.rvalid == 1:
+                    axi.rready.next = 1
                     req_rdata.next = axi.rdata
+                    print("axi req_done")
                     req_done.next = 1
                     m_state.next = M_IDLE
                 else:
@@ -331,13 +384,20 @@ def cpu_sys(
             elif m_state == M_WAIT_AWREADY:
                 if axi.awready == 1:
                     axi.awvalid.next = 0
-                    m_state.next = M_WAIT_WREADY
+                    if axi.wready == 1:
+                        axi.wvalid.next = 0
+                        req_done.next = 1
+                        print("axi req_done")
+                        m_state.next = M_IDLE
+                    else:
+                        m_state.next = M_WAIT_WREADY
                 else:
                     m_state.next = M_WAIT_AWREADY
             elif m_state == M_WAIT_WREADY:
                 if axi.wready == 1:
                     axi.wvalid.next = 0
                     req_done.next = 1
+                    print("axi req_done")
                     m_state.next = M_IDLE
                 else:
                     m_state.next = M_WAIT_WREADY

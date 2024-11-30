@@ -2,7 +2,8 @@ from myhdl import *
 from myhdl import Struct, unpack_struct
 
 from modules.common.memory import memory
-from modules.common.Common import copySignal, multiflop
+from modules.common.Common import copySignal
+from cpu_common import flop
 from sub_always import sub3_w_sig
 
 OPC_A_RX      = 0  # Rx = A
@@ -168,7 +169,7 @@ for s,v in curr_globs.items():
 #----------------------
 
 @module
-def cpu( clk, rstn,
+def cpu( clk, clk_en, sync_rstn,
          imem_dout,
          imem_adr,
          imem_rd,
@@ -337,23 +338,23 @@ def cpu( clk, rstn,
 
     # op code outer
 
-    ist  = multiflop( next_state, state, clk, rstn, reset_value=ST_RESET )
-    iir  = multiflop( n_ir, ir, clk, rstn )
-    iir2 = multiflop( n_ir2, ir2, clk, rstn )
-    irc  = multiflop( n_load_ir, load_ir, clk, rstn )
-    irc2 = multiflop( n_load_ir2, load_ir2, clk, rstn )
-    iop2 = multiflop( n_op2_valid, op2_valid, clk, rstn )
-    idf  = multiflop( n_reg_wr_deferred, reg_wr_deferred, clk, rstn )
-    ida  = multiflop( n_acc_wr_deferred, acc_wr_deferred, clk, rstn )
-    idpc = multiflop( n_deferred_load_pc, deferred_load_pc, clk, rstn )
-    idr  = multiflop( n_reg_ld_rx, reg_ld_rx, clk, rstn )
-    idrm = multiflop( n_reg_ld_maskb, reg_ld_maskb, clk, rstn )
-    idrmw= multiflop( n_reg_ld_maskw, reg_ld_maskw, clk, rstn )
-    idam = multiflop( n_acc_ld_maskb, acc_ld_maskb, clk, rstn )
-    idamw= multiflop( n_acc_ld_maskw, acc_ld_maskw, clk, rstn )
-    ili  = multiflop( n_load_imm, load_imm, clk, rstn )
-    ii   = multiflop( n_intr_enabled, intr_enabled, clk, rstn, reset_value=1 )
-    icc  = multiflop( n_load_cc, load_cc, clk, rstn, reset_value=1 )
+    ist   = flop( next_state,         state,            clk_en, clk, sync_rstn, reset_value=ST_RESET )
+    iir   = flop( n_ir,               ir,               clk_en, clk, sync_rstn  )
+    iir2  = flop( n_ir2,              ir2,              clk_en, clk, sync_rstn  )
+    irc   = flop( n_load_ir,          load_ir,          clk_en, clk, sync_rstn  )
+    irc2  = flop( n_load_ir2,         load_ir2,         clk_en, clk, sync_rstn  )
+    iop2  = flop( n_op2_valid,        op2_valid,        clk_en, clk, sync_rstn  )
+    idf   = flop( n_reg_wr_deferred,  reg_wr_deferred,  clk_en, clk, sync_rstn  )
+    ida   = flop( n_acc_wr_deferred,  acc_wr_deferred,  clk_en, clk, sync_rstn  )
+    idpc  = flop( n_deferred_load_pc, deferred_load_pc, clk_en, clk, sync_rstn  )
+    idr   = flop( n_reg_ld_rx,        reg_ld_rx,        clk_en, clk, sync_rstn  )
+    idrm  = flop( n_reg_ld_maskb,     reg_ld_maskb,     clk_en, clk, sync_rstn  )
+    idrmw = flop( n_reg_ld_maskw,     reg_ld_maskw,     clk_en, clk, sync_rstn  )
+    idam  = flop( n_acc_ld_maskb,     acc_ld_maskb,     clk_en, clk, sync_rstn  )
+    idamw = flop( n_acc_ld_maskw,     acc_ld_maskw,     clk_en, clk, sync_rstn  )
+    ili   = flop( n_load_imm,         load_imm,         clk_en, clk, sync_rstn  )
+    ii    = flop( n_intr_enabled,     intr_enabled,     clk_en, clk, sync_rstn, reset_value=1        )
+    icc   = flop( n_load_cc,          load_cc,          clk_en, clk, sync_rstn, reset_value=1        )
 
     
     @always_comb
@@ -1125,7 +1126,7 @@ def cpu( clk, rstn,
         else:
             pc_next.next = pc
 
-    ipc = multiflop( pc_next, pc, clk, rstn )
+    ipc = flop( pc_next, pc, clk_en, clk, sync_rstn )
 
     @always_comb
     def imem():
@@ -1213,9 +1214,9 @@ def cpu( clk, rstn,
             imm_next.next = imm << 7 | imem_dout[7:]
         imm_more.next = imem_dout[7]
 
-    imm_ff = multiflop( imm_next, imm, clk, rstn )
+    imm_ff = flop( imm_next, imm, clk_en, clk, sync_rstn )
 
-    rc_ff = multiflop( n_reg_cnt, reg_cnt, clk, rstn )
+    rc_ff = flop( n_reg_cnt, reg_cnt, clk_en, clk, sync_rstn )
 
     @always_comb
     def rcnt():
@@ -1368,7 +1369,7 @@ def cpu( clk, rstn,
         cc_c16.next = cc[1]
         cc_z16.next = cc[0]
 
-    cc_ff = multiflop( n_cc, cc, clk, rstn )
+    cc_ff = flop( n_cc, cc, clk_en, clk, sync_rstn )
 
     @always_comb
     def wrback():
@@ -1430,7 +1431,7 @@ def cpu( clk, rstn,
                 print("wr_acc",reg_wr_op)
 
 
-    iacc_ff = multiflop( acc_next, acc_ff, clk, rstn )
+    iacc_ff = flop( acc_next, acc_ff, clk_en, clk, sync_rstn )
 
     @always_comb
     def regd():
@@ -1447,28 +1448,29 @@ def cpu( clk, rstn,
         elif dec_sp:
             n_sp.next = reg_bank[ SP ] - 4
 
-    @always(clk.posedge, rstn.negedge)
+    @always(clk.posedge)
     def reg_wr():
         masked_dout = modbv(0)[32:]
-        if rstn == 0:
+        if sync_rstn == 0:
             for i in range(16):
                 reg_bank[i].next = 0
         else:
-            if reg_ld_maskb == 1:
-                masked_dout[:] = dmem_dout[8:]
-            elif reg_ld_maskw == 1:
-                masked_dout[:] = dmem_dout[16:]
-            else:
-                masked_dout[:] = dmem_dout
+            if clk_en == 1:
+                if reg_ld_maskb == 1:
+                    masked_dout[:] = dmem_dout[8:]
+                elif reg_ld_maskw == 1:
+                    masked_dout[:] = dmem_dout[16:]
+                else:
+                    masked_dout[:] = dmem_dout
 
-            if reg_wr_deferred:
-                reg_bank[ reg_ld_rx ].next = masked_dout
+                if reg_wr_deferred:
+                    reg_bank[ reg_ld_rx ].next = masked_dout
 
-            if wr_reg:
-                reg_bank[ reg_dest ].next = reg_wr_op
+                if wr_reg:
+                    reg_bank[ reg_dest ].next = reg_wr_op
 
-            if inc_sp == 1 or dec_sp == 1:
-                reg_bank[ SP ].next = n_sp
+                if inc_sp == 1 or dec_sp == 1:
+                    reg_bank[ SP ].next = n_sp
 
     if sim_print:
         @always(clk.negedge)
@@ -1484,21 +1486,22 @@ def cpu( clk, rstn,
             obs_acc.next = acc
             obs_cc.next = cc
 
-        @always(clk.posedge, rstn.negedge)
+        @always(clk.posedge)
         def obsff():
-            obs_op.valid.next = 0
-            if state == ST_NEXT_INSTR:
-                if not ( op == OPC_NEXT and r_field == OPCI_NEXT ):
+            if clk_en == 1:
+                obs_op.valid.next = 0
+                if state == ST_NEXT_INSTR:
+                    if not ( op == OPC_NEXT and r_field == OPCI_NEXT ):
+                        obs_op.valid.next = 1
+                        obs_op.op.next = op
+                        obs_op.op_jmp.next = r_field
+                        obs_op.op_inner.next = r_field
+                elif state == ST_READ_PART2:
                     obs_op.valid.next = 1
                     obs_op.op.next = op
                     obs_op.op_jmp.next = r_field
                     obs_op.op_inner.next = r_field
-            elif state == ST_READ_PART2:
-                obs_op.valid.next = 1
-                obs_op.op.next = op
-                obs_op.op_jmp.next = r_field
-                obs_op.op_inner.next = r_field
-                obs_op.op_inner2.next = op2
+                    obs_op.op_inner2.next = op2
 
     @always_comb
     def extr_instr():
@@ -1511,7 +1514,7 @@ def cpu( clk, rstn,
     if sim_print:
         @always(clk.negedge)
         def prt_cpu():
-            if rstn == 0 or halt == 1:
+            if sync_rstn == 0 or halt == 1:
                 print("halt")
             else:
                 print("PC:",pc)

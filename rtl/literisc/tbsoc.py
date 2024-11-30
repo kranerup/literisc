@@ -16,8 +16,8 @@ def tb():
 
     @always(delay(10))
     def stim():
-      print("=========== CLOCK ============")
-      clk.next = not clk
+        #if clk == 0: print("=========== CLOCK ============")
+        clk.next = not clk
 
     @instance
     def seq():
@@ -43,4 +43,4 @@ def tb():
 traceSignals.filename = 'trace'
 itb = traceSignals( tb ) 
 sim = Simulation( itb )
-sim.run( 15000 )
+sim.run( 1000000 )

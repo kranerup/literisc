@@ -4,14 +4,12 @@ from modules.common.memory import memory
 from modules.common.signal import signal
 from modules.common.Common import copySignal, multiflop
 
-def axi_periphery(clk, rstn, axi, gpio,
+def axi_periphery(clk, sync_rstn, axi, gpio,
                   serial_tx_data,
                   serial_tx_send,
                   serial_tx_ready):
 
     wr = signal()
-    wr_data = signal( axi.dsize )
-    wr_addr = signal( axi.asize )
     rd_addr = signal( axi.asize )
     rd = signal()
 
@@ -22,38 +20,49 @@ def axi_periphery(clk, rstn, axi, gpio,
     serial_rx_status_address = 4
 
     # =========== write channel ================
-    @always(clk.posedge,rstn.negedge)
+    #    M           S
+    # awvalid -> 
+    # awaddr  ->
+    #         <-  awready
+    # wvalid  ->
+    # wdata   ->
+    #         <-  wready
+    @always(clk.posedge)
     def gpio_wr_slave():
-        if rstn == 0:
-            axi.awready.next = 0
+        if sync_rstn == 0:
+            axi.awready.next = 0 # we start with channels not ready
             axi.wready.next = 0
+            serial_tx_send.next = 0
+            wr.next = 0
+            axi.awready.next = 0
+            gpio.next = 0
+            serial_tx_data.next = 0
             serial_tx_send.next = 0
         else:
             serial_tx_send.next = 0
+
+            # last cycle was a write, take down ready
             if wr == 1:
                 wr.next = 0
-            if axi.awready == 1 and axi.wready == 1:
                 axi.awready.next = 0
                 axi.wready.next = 0
-            if axi.awvalid == 1:
-                axi.awready.next = 0
-                wr_addr.next = axi.awaddr
-            if axi.wvalid == 1:
-                axi.wready.next = 0
-                wr_data.next = axi.wdata
-            if axi.awvalid == 1 and axi.wvalid == 1:
+            # wait till both channels available
+            elif axi.awvalid == 1 and axi.wvalid == 1:
                 wr.next = 1
-                if wr_addr == gpio_address:
-                    print("gpio write",wr_addr,wr_data)
-                    gpio.next = wr_data
-                elif wr_addr == serial_tx_data_address:
+                if axi.awaddr == gpio_address:
+                    print("gpio write",axi.awaddr,axi.wdata)
+                    gpio.next = axi.wdata
+                elif axi.awaddr == serial_tx_data_address:
+                    print("serial write",axi.awaddr,axi.wdata)
                     # serial port must be ready when writing to this
                     # register
-                    serial_tx_data.next = wr_data[8:]
+                    serial_tx_data.next = axi.wdata[8:]
                     serial_tx_send.next = 1
-
+                # ack both channels that we're ready
                 axi.awready.next = 1
                 axi.wready.next = 1
+
+
 
     # =========== read channel ================
     #    M           S
@@ -64,11 +73,14 @@ def axi_periphery(clk, rstn, axi, gpio,
     #         <-  rdata
     # rready  ->
 
-    @always(clk.posedge,rstn.negedge)
+    @always(clk.posedge)
     def gpio_rd_slave():
-        if rstn == 0:
+        if sync_rstn == 0:
             axi.arready.next = 0
             axi.rvalid.next = 0
+            rd.next = 0
+            rd_addr.next = 0
+            axi.rdata.next = 0
         else:
             if rd == 0:
                 axi.arready.next = 0
