@@ -478,7 +478,7 @@
 (defmacro masm (symtab &rest body)
   `(assemble (concatenate 'list ,@body) nil ,symtab))
 
-(defun hexdump (bytes &optional (prefix ""))
+(defun hexdump-noascii (bytes &optional (prefix ""))
   "Print a hexadecimal dump of the given list of bytes.
    BYTES is a list of integers representing the bytes to dump.
    PREFIX is an optional string to prepend to each line."
@@ -488,6 +488,26 @@
               for b = (if (< (+ i j) (length bytes)) (nth (+ i j) bytes) 0)
               do (format t "~2,'0x " b))
         (format t "~%")))
+
+(defun hexdump (bytes &optional (prefix ""))
+  "Print a hexadecimal dump of the given list of bytes.
+   BYTES is a list of integers representing the bytes to dump.
+   PREFIX is an optional string to prepend to each line."
+  (loop for i from 0 by 16 below (length bytes) do
+        (format t "~a~8,'0x: " prefix i)
+        ;; Print hex values
+        (loop for j from 0 below 16
+              for b = (if (< (+ i j) (length bytes)) (nth (+ i j) bytes) 0)
+              do (format t "~2,'0x " b))
+        ;; Print ASCII representation
+        (format t " |")
+        (loop for j from 0 below 16
+              for b = (if (< (+ i j) (length bytes)) (nth (+ i j) bytes) 0)
+              do (format t "~c" 
+                        (if (and (>= b 32) (<= b 126))  ; Check if printable ASCII
+                            (code-char b)
+                            #\.)))
+        (format t"|~%")))
 
 ;;;---------- unit tests --------------------
 ;(defmacro part3 (reg)
