@@ -18,6 +18,9 @@
              ;; check serial ready
              (A=Rx R0) ; R0=IO
              (Rx=M[A+n].b 2 R2) ; IO+2 = ser-ready -> R2
+             ;; test imem access
+             (A= 0)
+             (Rx=M[A+n].b 0 R9) ; read imem at 0
              ;; ser-ready == 1?
              (A= 1)
              (A-=Rx R2)
