@@ -213,6 +213,7 @@ def cpu_sys(
             imem_rd.next = dmem_imem_rd
         elif imem_src == 1:
             imem_radr.next = deferred_cpu_imem_radr
+            imem_rd.next = 1 # probably needs fixing when implementing imem wr
         else:
             imem_radr.next = cpu_imem_radr
             imem_rd.next = cpu_imem_rd
@@ -364,11 +365,22 @@ def cpu_sys(
 00000010: C2 A6 21 85 0F 15 D1 05 90 C5 A6 0F 91 B1 01 F8
 00000020: 70 86 87 7F D6 08 87 00 C7 A6 71 15 83 80 40 B3
 00000030: 04 10 54 01 A0 4E 00 00 00 00 00 00 00 00 00 00""")
+
+        # print hello world in a loop
         program = hexdump_to_prog("""\
 00000000: 80 83 FF 1C 91 B1 01 F8 70 86 87 7F D6 08 87 00  |........p.......|
 00000010: C7 A6 71 89 2D F8 49 08 90 C8 A5 0F 10 22 02 91  |..q.-.I......"..|
 00000020: C2 A6 79 10 58 01 91 B9 09 A0 6A A0 57 48 65 6C  |..y.X.....j.WHel|
 00000030: 6C 6F 20 57 6F 72 6C 64 21 00 00 00 00 00 00 00  |lo World!.......|""")
+
+        # print hello world then copy serial rx to tx
+        program = hexdump_to_prog("""\
+00000000: 80 83 FF 1C 89 32 F8 49 08 90 C8 A5 0F 10 22 02  |.....2.I......".|
+00000010: 91 C2 A6 79 10 58 01 91 B9 09 A0 6A 10 22 04 91  |...y.X.....j."..|
+00000020: C2 A6 79 10 23 03 10 24 02 91 C4 A6 79 10 53 01  |..y.#..$....y.S.|
+00000030: A0 6A 48 65 6C 6C 6F 20 57 6F 72 6C 64 21 00 00  |.jHello World!..|""")
+
+
 
 
 

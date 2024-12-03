@@ -7,7 +7,10 @@ from modules.common.Common import copySignal, multiflop
 def axi_periphery(clk, sync_rstn, axi, gpio,
                   serial_tx_data,
                   serial_tx_send,
-                  serial_tx_ready):
+                  serial_tx_ready,
+                  serial_rx_data,
+                  serial_rx_ready,
+                  serial_rx_ack):
 
     wr = signal()
     rd_addr = signal( axi.asize )
@@ -81,6 +84,7 @@ def axi_periphery(clk, sync_rstn, axi, gpio,
             rd.next = 0
             rd_addr.next = 0
             axi.rdata.next = 0
+            serial_rx_ack.next = 0
         else:
             if rd == 0:
                 axi.arready.next = 0
@@ -92,9 +96,15 @@ def axi_periphery(clk, sync_rstn, axi, gpio,
                     axi.arready.next = 1
             else:
                 axi.arready.next = 0
+                serial_rx_ack.next = 0
                 if axi.rvalid == 0: # latch read data on first read cycle
                     if rd_addr == serial_tx_status_address:
                         axi.rdata.next = serial_tx_ready # bit 0 - ready status bit
+                    elif rd_addr == serial_rx_status_address:
+                        axi.rdata.next = serial_rx_ready
+                    elif rd_addr == serial_rx_data_address:
+                        axi.rdata.next = serial_rx_data
+                        serial_rx_ack.next = 1
                 axi.rvalid.next = 1
                 if axi.rready == 1:
                     rd.next = 0
