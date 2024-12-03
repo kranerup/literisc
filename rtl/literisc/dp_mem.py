@@ -23,11 +23,10 @@ def dp_mem(
 
     @always(clk.posedge)
     def porta():
-        #print("wenable",wenable,"renable",renable)
-        #print("waddr",waddr,"raddr",raddr)
         if clk_en == 1:
+            #print("wenable",wenable,"renable",renable,"waddr",int(waddr),"raddr",int(raddr),"depth",depth)
             if wenable == 1:
-                if int(waddr) > 32768:
+                if int(waddr) > int(depth):
                     print("wenable and waddr > depth",int(waddr),depth,len(waddr))
                 for i in range(nr_col):
                     idx = i * col_width

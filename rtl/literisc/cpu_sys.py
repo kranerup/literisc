@@ -24,15 +24,19 @@ def prog_to_tuples( program ):
 def hexdump_to_prog( dump ):
     prog = []
     for line in dump.splitlines():
-        line = re.sub(r' +\|.*','',line)
-        adr, hexdata = line.split(': ')
-        prog += [ int(x,16) for x in hexdata.split(" ") ]
+        if len(line) > 0:
+            line = re.sub(r' +\|.*','',line)
+            adr, hexdata = line.split(': ')
+            prog += [ int(x,16) for x in hexdata.split(" ") ]
     return { idx: val for idx,val in enumerate( prog ) }
 
 def rom(
     odata,
+    idata,
     raddr,
     renable,
+    waddr,
+    wenable,
     clk,
     clk_en,
     sync_rstn,
@@ -42,20 +46,67 @@ def rom(
     output_flops = 0,
     name = None ):
 
-    n_rdata = copySignal( odata )
+    n_rom_data = copySignal( odata )
+    rom_data = copySignal( odata )
+    ram_data = copySignal( odata )
+    r_ram_addr = copySignal( raddr )
+    w_ram_addr = copySignal( raddr )
+    rom_addr = copySignal( raddr )
+    n_sel_rom = signal()
+    sel_rom = signal()
+    n_sel_ram = signal()
+    sel_ram = signal()
+    rd_ram = signal()
+
+    adr_bits = (depth-1).bit_length()
+
+    @always_comb
+    def select():
+        n_sel_rom.next = 1
+        n_sel_ram.next = 0
+        rd_ram.next = 0
+        if raddr >= len(content):
+            n_sel_rom.next = 0
+            n_sel_ram.next = 1
+            rd_ram.next = 1
+            rom_addr.next = 0
+        else:
+            rom_addr.next = raddr
+        r_ram_addr.next = ( raddr - len(content) ) & (2**adr_bits - 1)
+        w_ram_addr.next = ( waddr - len(content) ) & (2**adr_bits - 1)
+
     @always_comb
     def read():
-        if renable == 1:
-            #print("rom raddr:",raddr)
-            if raddr >= len(content):
-                #print("raddr out of range, max",len(content),"act",raddr)
-                n_rdata.next = 0
-            else:
-                n_rdata.next = content[int(raddr)]
-        else:
-            n_rdata.next = 0
+        n_rom_data.next = 0
+        if renable == 1 and n_sel_rom == 1:
+            n_rom_data.next = content[int(rom_addr)]
 
-    icw = flop( n_rdata, odata, clk_en, clk, sync_rstn )
+    icw  = flop( n_rom_data, rom_data, clk_en, clk, sync_rstn )
+    isro = flop( n_sel_rom, sel_rom, clk_en, clk, sync_rstn )
+    isra = flop( n_sel_ram, sel_ram, clk_en, clk, sync_rstn )
+
+    pmem = dp_mem(
+        idata = idata,
+        odata = ram_data,
+        raddr = r_ram_addr,
+        waddr = w_ram_addr,
+        renable = rd_ram,
+        wenable = wenable,
+        wmask = wenable,
+        clk   = clk,
+        clk_en = clk_en,
+        depth = depth - len(content),
+        name = "pmem")
+
+    @always_comb
+    def oselect():
+        if sel_rom == 1:
+            odata.next = rom_data
+        elif sel_ram == 1:
+            odata.next = ram_data
+        else:
+            odata.next = 0
+
 
     return instances()
 
@@ -172,6 +223,7 @@ def cpu_sys(
     n_req_reading = signal()
     dmem_renable = signal()
     dmem_wenable = signal()
+    imem_wenable = signal()
     n_imem_src = signal()
     imem_src = signal()
     n_imem_src2 = signal()
@@ -227,6 +279,7 @@ def cpu_sys(
         req_wdata.next = 0
         dmem_renable.next = 0
         dmem_wenable.next = 0
+        imem_wenable.next = 0
         n_cpu_waiting.next = 0
         n_wait_type.next = 0
         n_req_reading.next = 0
@@ -271,12 +324,16 @@ def cpu_sys(
                     dmem_wenable.next = dmem_wr
                 # --- imem access -------------
                 elif cpu_dmem_adr >= imem_low and cpu_dmem_adr <= imem_high:
-                    n_cpu_waiting.next = 1
-                    n_wait_type.next = IMEM_WAIT
-                    sel_imem_src.next = 1
-                    dmem_imem_rd.next = 1
-                    dmem_renable.next = 0
-                    dmem_wenable.next = 0
+                    if dmem_wr == 0: # writes do not need delay
+                        n_cpu_waiting.next = 1
+                        n_wait_type.next = IMEM_WAIT
+                        sel_imem_src.next = 1
+                        dmem_imem_rd.next = 1
+                        dmem_renable.next = 0
+                        dmem_wenable.next = 0
+                    else:
+                        dmem_imem_rd.next = 0
+                        imem_wenable.next = 1
 
     # ---------------- DMEM -------------------------
     dmem_wmask = signal(4)
@@ -380,6 +437,10 @@ def cpu_sys(
 00000020: C2 A6 79 10 23 03 10 24 02 91 C4 A6 79 10 53 01  |..y.#..$....y.S.|
 00000030: A0 6A 48 65 6C 6C 6F 20 57 6F 72 6C 64 21 00 00  |.jHello World!..|""")
 
+        # test write to imem
+        program = hexdump_to_prog("""\
+00000000: 81 BF 7F 82 00 83 81 80 00 F8 43 F8 41 F8 42 F8  |..........C.A.B.|
+00000010: 71 A0 76 48 65 6C 6C 6F 20 57 6F 72 6C 64 21 00  |q.vHello World!.|""")
 
 
 
@@ -391,10 +452,13 @@ def cpu_sys(
 
     imem = rom(
         odata        = imem_dout,
+        idata        = dmem_din,
         raddr        = imem_radr,
         renable      = imem_rd,
-        clk_en       = rom_clk_en,
+        waddr        = dmem_adr,
+        wenable      = imem_wenable,
         clk          = cpu_clk,
+        clk_en       = rom_clk_en,
         sync_rstn    = sync_rstn,
         depth        = imem_depth,
         input_flops  = 0,
