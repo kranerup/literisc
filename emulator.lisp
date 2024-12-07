@@ -239,6 +239,7 @@
   Z16
   debug
   write-callback
+  read-callback
   )
 (defun make-processor ()
  (make-processor-state :R (make-array '(16))
@@ -254,7 +255,8 @@
                                     :c16 0
                                     :z16 0
                                     :debug t
-                                    :write-callback nil))
+                                    :write-callback nil
+                                    :read-callback nil))
 
 (defun reset-processor (p)
   (setf (processor-state-pc p) 0)
@@ -551,33 +553,38 @@
              offset)))
   (if (processor-state-debug ps) (format t "jge offs ~d pc ~d~%" offset (processor-state-pc ps))))
 
-
-(defun mem-read-dword (dmem addr)
+;;;--------------------- memory access functions --------------------------
+(defun mem-read-dword (dmem addr &optional read-callback)
   (let ((res (aref dmem addr)))
+    (assert (= 0 (logand addr 3)))
     (setf res (logior res 
                       (ash (aref dmem (+ addr 1)) 8)))
     (setf res (logior res 
                       (ash (aref dmem (+ addr 2)) 16)))
     (setf res (logior res 
                       (ash (aref dmem (+ addr 3)) 24)))
-    res))
+    (if read-callback (funcall read-callback addr res)
+        res)))
 
-(defun mem-read-byte (dmem addr)
-  (logand #xff (aref dmem addr)))
+(defun mem-read-byte (dmem addr &optional read-callback)
+  (let ((rd-val (logand #xff (aref dmem addr))))
+    (if read-callback (funcall read-callback addr rd-val)
+        rd-val)))
 
-(defun mem-read-word (dmem addr)
-  (let* ((byte-l (mem-read-byte dmem addr))
-         (byte-h (mem-read-byte dmem (1+ addr))))
+(defun mem-read-word (dmem addr &optional read-callback)
+  (let* ((byte-l (mem-read-byte dmem addr read-callback))
+         (byte-h (mem-read-byte dmem (1+ addr) read-callback)))
     (logior (ash byte-h 8) byte-l)))
 
 (defun mem-write-byte (dmem addr data &optional (write-callback nil))
-  ;;(format t "in mem-write-byte ~a ~a~%" addr data)
+  ;(format t "in mem-write-byte ~a ~a ~a~%" addr data write-callback)
   (if write-callback (funcall write-callback addr (logand #xff data)))
   (if (and (>= addr 0) (<= 65535))
       (setf (aref dmem addr) (logand #xff data))))
 
 (defun mem-write-dword (dmem addr data &optional (write-callback nil))
   ;;(format t "in mem-write-dword ~a ~a~%" addr data)
+  (assert (= 0 (logand addr 3)))
   (if write-callback (funcall write-callback addr data))
   ;(if (equal (logand #xffffffff addr) #xffffffff)
   ;    (format t "~c" (code-char (logand #xff data)))
@@ -601,7 +608,7 @@
               (logand #xff data))
         (setf (aref dmem (+ addr 1))
               (logand #xff (ash data -8))))))
-
+;;;-----------------------------------------------------------------------
 
 ; 7     st   A,Rx               M[Rx].l = A
 (defun i-st-rx-a (ps rx dmem)
@@ -648,7 +655,8 @@
 (defun i-st-b-a-rx (ps rx dmem)
   (mem-write-byte dmem 
                   (processor-state-a ps)
-                  (aref (processor-state-r ps) rx))
+                  (aref (processor-state-r ps) rx)
+                  (processor-state-write-callback ps))
   (if (processor-state-debug ps)
       (format t "st M[~a].b = ~a~%"
           (processor-state-a ps)
@@ -658,7 +666,8 @@
 (defun i-st-w-a-rx (ps rx dmem)
   (mem-write-word dmem 
                   (processor-state-a ps)
-                  (aref (processor-state-r ps) rx))
+                  (aref (processor-state-r ps) rx)
+                  (processor-state-write-callback ps))
   (if (processor-state-debug ps)
       (format t "st M[~a].w = ~a~%"
           (processor-state-a ps)
@@ -701,7 +710,8 @@
 (defun i-ld-a-rx-imm (ps rx offs dmem)
   (setf (aref (processor-state-r ps) rx)
         (mem-read-dword dmem 
-              (+ (processor-state-a ps) offs)))
+              (+ (processor-state-a ps) offs)
+              (processor-state-read-callback ps)))
   (if (processor-state-debug ps)
       (format t "ld Rx = M[~a] = ~a~%"
           (+ (processor-state-a ps) offs)
@@ -711,7 +721,8 @@
 (defun i-ld-b-a-rx-imm (ps rx offs dmem)
   (setf (aref (processor-state-r ps) rx)
         (mem-read-byte dmem 
-              (+ (processor-state-a ps) offs)))
+              (+ (processor-state-a ps) offs)
+              (processor-state-read-callback ps)))
   (if (processor-state-debug ps)
       (format t "ld Rx = M[~a].b = ~a~%"
           (+ (processor-state-a ps) offs)
@@ -721,7 +732,8 @@
 ; 10    ld   A+#nn,Rx           Rx = M[A+nn].w
 (defun i-ld-w-a-rx-imm (ps rx offs dmem)
   (let* ((addr (+ (processor-state-a ps) offs))
-         (word (mem-read-word dmem addr)))
+         (word (mem-read-word dmem addr
+                              (processor-state-read-callback ps))))
     (setf (aref (processor-state-r ps) rx) word)
     (if (processor-state-debug ps)
         (format t "ld Rx = M[~a].w = ~a~%" addr word))))
@@ -729,7 +741,8 @@
 ; 3     ld   A,Rx               Rx = M[A].l
 (defun i-ld-a-rx (ps rx dmem)
   (setf (aref (processor-state-r ps) rx)
-        (mem-read-dword dmem (processor-state-a ps)))
+        (mem-read-dword dmem (processor-state-a ps)
+              (processor-state-read-callback ps)))
   (if (processor-state-debug ps) 
       (format t "ld Rx = M[~a] = ~a~%"
           (processor-state-a ps)
@@ -738,7 +751,8 @@
 ; 3     ld   A,Rx               Rx = M[A].b
 (defun i-ld-b-a-rx (ps rx dmem)
   (setf (aref (processor-state-r ps) rx)
-        (mem-read-byte dmem (processor-state-a ps)))
+        (mem-read-byte dmem (processor-state-a ps)
+                       (processor-state-read-callback ps)))
   (if (processor-state-debug ps) 
       (format t "ld Rx = M[~a].b = ~a~%"
           (processor-state-a ps)
@@ -747,7 +761,8 @@
 ; 11    ld   A,Rx               Rx = M[A].w
 (defun i-ld-w-a-rx (ps rx dmem)
   (setf (aref (processor-state-r ps) rx)
-        (mem-read-word dmem (processor-state-a ps)))
+        (mem-read-word dmem (processor-state-a ps)
+                       (process-state-read-callback ps)))
   (if (processor-state-debug ps) 
       (format t "ld Rx = M[~a].w = ~a~%"
           (processor-state-a ps)
@@ -756,7 +771,8 @@
 ; 4     ld   Rx,A               A = M[Rx].l
 (defun i-ld-rx-a (ps rx dmem)
   (setf (processor-state-a ps)
-        (mem-read-dword dmem (aref (processor-state-r ps) rx)))
+        (mem-read-dword dmem (aref (processor-state-r ps) rx)
+              (processor-state-read-callback ps)))
   (if (processor-state-debug ps)
       (format t "ld A = M[~a] = ~a~%"
         (aref (processor-state-r ps) rx)
@@ -765,7 +781,8 @@
 ; 4     ld   Rx,A               A = M[Rx].b
 (defun i-ld-b-rx-a (ps rx dmem)
   (setf (processor-state-a ps)
-        (mem-read-byte dmem (aref (processor-state-r ps) rx)))
+        (mem-read-byte dmem (aref (processor-state-r ps) rx)
+                       (processor-state-read-callback ps)))
   (if (processor-state-debug ps)
       (format t "ld A = M[~a].b = ~a~%"
         (aref (processor-state-r ps) rx)
@@ -823,7 +840,8 @@
   (loop for r from rx downto 0 
         do (progn
              (setf (aref (processor-state-r ps) r)
-                   (mem-read-dword dmem (aref (processor-state-r ps) SP)))
+                   (mem-read-dword dmem (aref (processor-state-r ps) SP)
+                                   (processor-state-read-callback ps)))
              (setf (aref (processor-state-r ps) SP)
                    (+ (aref (processor-state-r ps) SP) 4))
              (if (processor-state-debug ps)
@@ -835,7 +853,8 @@
 ;;;       7     popa                    a = M[sp], sp = sp + 4
 (defun i-pop-a (ps dmem)
   (setf (processor-state-a ps)
-        (mem-read-dword dmem (aref (processor-state-r ps) SP)))
+        (mem-read-dword dmem (aref (processor-state-r ps) SP)
+              (processor-state-read-callback ps)))
   (setf (aref (processor-state-r ps) SP)
         (+ (aref (processor-state-r ps) SP) 4))
   (if (processor-state-debug ps)
@@ -886,7 +905,7 @@
 ;   [ 0 0 0 0 n n n n ]
 (defun get-immediate (p imem signed)
   (let* ((pc (processor-state-pc p))
-         (imm (aref imem pc))
+         (imm (mem-read-byte imem pc))
          (imm-end nil)
          (bits 0)
          (res 0))
@@ -896,7 +915,7 @@
                (setf imm-end (not (equal (logand imm #x80) #x80)))
                (setf pc (+ pc 1))
                (setf bits (+ bits 7))
-               (setf imm (aref imem pc))
+               (setf imm (mem-read-byte imem pc))
                (if nil (format t "res ~a pc ~a imm ~a bits ~a~%" res pc imm bits)))
           until imm-end)
     (setf (processor-state-pc p) pc)
@@ -905,7 +924,7 @@
 
 (defun get-next-opcode (p imem)
   (let* ((pc (processor-state-pc p))
-         (instr1 (aref imem pc))
+         (instr1 (mem-read-byte imem pc))
          (opcode (ash instr1 -4))
          (param (logand instr1 15)))
     (setf (processor-state-pc p) (+ pc 1))
@@ -914,7 +933,7 @@
 
 (defun execute-instruction (p imem dmem)
   (let* ((pc (processor-state-pc p))
-         (instr0 (aref imem pc))
+         (instr0 (mem-read-byte imem pc))
          (opcode (ash instr0 -4))
          (param (logand instr0 15)))
     (progn
@@ -1039,6 +1058,7 @@
             ))))
 
 (defun write-cb-write-char (addr data)
+  ;;(format t "in write-cb-write-char  ~a ~a~%" addr data)
   (if (equal (logand #xffffffff addr) #xffffffff)
       (format t "~c" (code-char (logand #xff data)))))
 
@@ -1064,11 +1084,11 @@
 
 (defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
-  
-(defun make-emulator ( prog-list dmem max-instr &optional (debug t) )
+(defun make-emulator ( prog-list dmem &optional (imem-size 0) (debug t) )
   (let ((emul
           (make-emulated-system
-            :imem (make-imem (+ (list-length prog-list) imem-padding))
+            :imem (make-imem (max (+ (list-length prog-list) imem-padding)
+                                  imem-size))
             :dmem dmem
             :processor (make-processor))))
     (setf (processor-state-debug (emulated-system-processor emul)) debug)
@@ -1218,7 +1238,7 @@
         do (setf addr (+ addr 16)))
   (charms:refresh-window window))
 
-(defun run-with-curses ( emul &optional symtab)
+(defun run-with-curses ( emul &optional symtab write-callback read-callback)
   (setq *print-pretty* nil)
   (setf (processor-state-debug 
           (emulated-system-processor emul)) nil)
@@ -1237,7 +1257,12 @@
               (emulated-system-processor emul))
             (lambda (addr data)
               (setf mem-was-written t)
-              (write-cb-write-win addr data output-window)))
+              (if write-callback (write-callback addr data))
+              (write-cb-write-win addr data output-window)
+              ))
+      (setf (processor-state-read-callback
+              (emulated-system-processor emul))
+            read-callback)
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
@@ -1999,27 +2024,27 @@
     (check
       (progn
         ;--- ld A,Rx 
-        (set-expected-a expected 11)
-        (setf (processor-state-a p) 11)
-        (mem-write-dword dmem 11 #x04030201)
+        (set-expected-a expected 12)
+        (setf (processor-state-a p) 12)
+        (mem-write-dword dmem 12 #x04030201)
         (set-expected-r expected 4 #x04030201)
         (i-ld-a-rx p 4 dmem)
         (check-state p expected))
       (progn
         ;--- ld Rx,A
-        (set-expected-r expected 5 13)
-        (setf (aref (processor-state-r p) 5) 13)
-        (mem-write-dword dmem 13 #xaabbccdd)
+        (set-expected-r expected 5 12)
+        (setf (aref (processor-state-r p) 5) 12)
+        (mem-write-dword dmem 12 #xaabbccdd)
         (set-expected-a expected #xaabbccdd)
         (i-ld-rx-a p 5 dmem)
         (check-state p expected))
       (progn
         ;--- ld A+#nn,Rx
-        (set-expected-a expected 11)
-        (setf (processor-state-a p) 11)
-        (mem-write-dword dmem 21 #x44332211)
+        (set-expected-a expected 12)
+        (setf (processor-state-a p) 12)
+        (mem-write-dword dmem 24 #x44332211)
         (set-expected-r expected 6 #x44332211)
-        (i-ld-a-rx-imm p 6 10 dmem)
+        (i-ld-a-rx-imm p 6 12 dmem)
         (check-state p expected)))))
 
 (deftest test-st ()
@@ -2029,21 +2054,21 @@
     (check
       (progn
         ;--- st Rx,A
-        (set-expected-a expected 11)
-        (setf (processor-state-a p) 11)
+        (set-expected-a expected 12)
+        (setf (processor-state-a p) 12)
         (setf (aref (processor-state-r p) 5) #x04030201)
         (set-expected-r expected 5 #x04030201)
         (i-st-a-rx p 5 dmem)
-        (equal (mem-read-dword dmem 11) #x04030201))
+        (equal (mem-read-dword dmem 12) #x04030201))
       (check-state p expected)
       (progn
         ;--- st A,Rx
         (set-expected-a expected #x44332211)
         (setf (processor-state-a p) #x44332211)
-        (setf (aref (processor-state-r p) 6) 13)
-        (set-expected-r expected 6 13)
+        (setf (aref (processor-state-r p) 6) 12)
+        (set-expected-r expected 6 12)
         (i-st-rx-a p 6 dmem)
-        (equal (mem-read-dword dmem 13) #x44332211))
+        (equal (mem-read-dword dmem 12) #x44332211))
       (check-state p expected)
       (progn
         ;--- st Rx,A+#nn
@@ -2051,8 +2076,8 @@
         (setf (processor-state-a p) 11)
         (setf (aref (processor-state-r p) 5) #x04030201)
         (set-expected-r expected 5 #x04030201)
-        (i-st-a-rx-imm p 5 10 dmem)
-        (equal (mem-read-dword dmem 21) #x04030201))
+        (i-st-a-rx-imm p 5 13 dmem)
+        (equal (mem-read-dword dmem 24) #x04030201))
       (check-state p expected))))
 
 (deftest test-push-pop ()
@@ -2070,51 +2095,56 @@
       ;;  (equal (mem-read-dword dmem 50) #x04030201))
       (progn
         ;--- push SRP
-        (setf (aref (processor-state-r p) SP) 54)
+        (setf (aref (processor-state-r p) SP) 48)
         (setf (aref (processor-state-r p) SRP) #x04030201)
-        (set-expected-r expected SP 50)
+        (set-expected-r expected SP 44)
         (set-expected-r expected SRP #x04030201)
         (i-push-srp p dmem)
-        (equal (mem-read-dword dmem 50) #x04030201))
+        (equal (mem-read-dword dmem 44) #x04030201))
       (check-state p expected)
       (progn
         ;--- push R0
+        (setf (aref (processor-state-r p) SP) 48)
         (i-push p 0 dmem)
-        (set-expected-r expected SP 46)
+        (set-expected-r expected SP 44)
         (check-state p expected)
-        (equal (mem-read-dword dmem 46) (get-expected-r expected 0)))
+        (equal (mem-read-dword dmem 44) (get-expected-r expected 0)))
       (progn
         ;--- push R2
+        (setf (aref (processor-state-r p) SP) 48)
         (i-push p 2 dmem)
-        (set-expected-r expected SP 34)
+        (set-expected-r expected SP 36)
         (check-state p expected))
-      (equal (mem-read-dword dmem 42) (get-expected-r expected 0))
-      (equal (mem-read-dword dmem 38) (get-expected-r expected 1))
-      (equal (mem-read-dword dmem 34) (get-expected-r expected 2))
+      (equal (mem-read-dword dmem 44) (get-expected-r expected 0))
+      (equal (mem-read-dword dmem 40) (get-expected-r expected 1))
+      (equal (mem-read-dword dmem 36) (get-expected-r expected 2))
       (progn
         ;--- popa, a = M[sp], sp = sp + 4
-        (setf (aref (processor-state-r p) SP) 50)
+        (mem-write-dword dmem 48 #x04030201)
+        (setf (aref (processor-state-r p) SP) 48)
         (setf (aref (processor-state-r p) SRP) #x04030201)
         (set-expected-a expected #x04030201)
-        (set-expected-r expected SP 54)
+        (set-expected-r expected SP 52)
         (i-pop-a p dmem)
         (check-state p expected))
       (progn
         ;--- pop R0
-        (mem-write-dword dmem 54 #xaabbccdd)
+        (setf (aref (processor-state-r p) SP) 48)
+        (mem-write-dword dmem 48 #xaabbccdd)
         (set-expected-r expected 0 #xaabbccdd)
-        (set-expected-r expected SP 58)
+        (set-expected-r expected SP 52)
         (i-pop p 0 dmem)
         (check-state p expected))
       (progn
         ;--- pop R2
-        (mem-write-dword dmem 58 #x11111111)
-        (mem-write-dword dmem 62 #x22222222)
-        (mem-write-dword dmem 66 #x33333333)
-        (set-expected-r expected 0 #x33333333)
+        (setf (aref (processor-state-r p) SP) 48)
+        (mem-write-dword dmem 56 #x11111111)
+        (mem-write-dword dmem 52 #x22222222)
+        (mem-write-dword dmem 48 #x33333333)
+        (set-expected-r expected 2 #x33333333)
         (set-expected-r expected 1 #x22222222)
-        (set-expected-r expected 2 #x11111111)
-        (set-expected-r expected SP 70)
+        (set-expected-r expected 0 #x11111111)
+        (set-expected-r expected SP 60)
         (i-pop p 2 dmem)
         (check-state p expected)))))
 
@@ -2138,7 +2168,7 @@
            (sub-r 1)
            (jz ret-prtstr)
            (r->a 1)
-           (st-a->r 2)
+           (st.b-r->a 2)
            (mvi->a 1)
            (add-r 0)
            (a->r 0)
@@ -2149,9 +2179,13 @@
          (dmem (make-dmem 1000))
          (prog-output nil))
     (set-program dmem (string-to-mem "Hello World!"))
+    ;(let ((emul (make-emulator hw-prog dmem 0 nil)))
+    ;  (format t "emulator:~a~%" emul)
+    ;  (run-emul emul 180))))
+    ;(run-emul (make-emulator hw-prog dmem 0 nil) 180)))
     (setf prog-output
           (with-output-to-string (*standard-output*)
-            (run-emul (make-emulator hw-prog dmem 200 nil) 180)))
+            (run-emul (make-emulator hw-prog dmem 0 nil) 180)))
     (format t "program-output:~%~a~%" prog-output)
     (check (equal prog-output "Hello World!"))))
 
@@ -2186,7 +2220,7 @@
            (r->a srp)
            (j-a)))
     (set-program (make-dmem 1000) (string-to-mem "Hello World!"))
-    200
+    0
     nil)
   )
 |#
