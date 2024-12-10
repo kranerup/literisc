@@ -2,6 +2,7 @@
 (ql:quickload :literisc)
 (use-package :lr-asm)
 (use-package :lr-emulator)
+(use-package :unit)
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
@@ -153,18 +154,18 @@
 (init-lisp)
 
 ;;; -- sym-strings --
-(defun add-symbol (dmem sym-name value-ptr)
+(defun add-symbol (dmem sym-name value-ptr &optional (verbose nil))
   (let ((str (string-to-mem sym-name))
         (str-ptr nil)
         (cons-ptr cons-free)) ; cons index, not address
     (set-program dmem str (+ n-string-space string-space-free))
-    (format t "add-symbol str at:~x~%" (+ n-string-space string-space-free))
+    (if verbose (format t "add-symbol str at:~x~%" (+ n-string-space string-space-free)))
     (setf str-ptr string-space-free)
-    (format t "str-ptr ~x~%" str-ptr)
+    (if verbose (format t "str-ptr ~x~%" str-ptr))
 
     (set-program dmem (list c-cons-symbol )
                  (+ n-cons-type cons-ptr)) ; one byte per cons-type item
-    (format t "cons-type ~d at ~x~%"  c-cons-symbol (+ n-cons-type cons-ptr))
+    (if verbose (format t "cons-type ~d at ~x~%"  c-cons-symbol (+ n-cons-type cons-ptr)))
     ;(format t "ccell ~x cbytes ~a~%"
     ;        (cons-cell str-ptr value-ptr)
     ;        (cons-bytes (cons-cell str-ptr value-ptr)))
@@ -173,9 +174,9 @@
                  (cons-bytes 
                    (cons-cell str-ptr value-ptr))
                  (+ n-cons (* cons-size cons-ptr)))
-    (format t "cons-cell at ~x car:~x cdr:~x~%"
-            (+ n-cons (* cons-size cons-ptr))
-            str-ptr value-ptr)
+    (if verbose (format t "cons-cell at ~x car:~x cdr:~x~%"
+                        (+ n-cons (* cons-size cons-ptr))
+                        str-ptr value-ptr))
 
     (setf cons-free (1+ cons-free))
     (setf (aref dmem n-cons-free) (logand #xff cons-free))
@@ -1389,8 +1390,11 @@
 (defvar e nil)
 (defvar *symtab* nil)
 
-(defun asm-n-run ( main &optional (setup nil) (debug nil))
-  (setq *symtab* (make-hash-table))
+(defun asm-n-run ( main &optional (setup nil) (debug nil) (no-curses nil) (nr-instr 1000))
+  (setq *symtab* 
+        (if no-curses
+            nil
+            (make-hash-table)))
   (setq *hello-world*
         (masm *symtab*
               main func-prtstr read-c scan func-str-equal
@@ -1401,27 +1405,50 @@
               func-print-number func-read))
   (setf e (make-emulator *hello-world* dmem 9 debug))
   (if setup (funcall setup dmem))
-  (run-with-curses e *symtab*)
+  (if no-curses (run-emul e nr-instr)
+      (run-with-curses e *symtab*))
   (check-dmem dmem))
 
 ;(setf e (make-emulator *hello-world* dmem 0 nil))
 ;(run-with-curses e)
 
-(defun t1 ()
+(defun run-test (test &optional (expected-print nil))
+  (with-output-to-string (*standard-output*)
+    (setq dmem (make-dmem 1000))
+    (init-lisp))
+  (let ((printed 
+    (with-output-to-string (*standard-output*)
+      (funcall test t))))
+    (if (and expected-print (not (equal printed expected-print)))
+        (progn (format t "missmatch printed:~a expected:~a" printed expected-print) nil)
+        t)))
+
+
+;;; expected: "ssymb"
+(defun t1 ( &optional (regression nil) )
   (asm-n-run test-read-c
     #'(lambda (dmem)
         (set-program dmem 
                      (string-to-mem "symbol symbol2 ( inner )") 
-                     n-source-start))))
-(defun t2 ()
+                     n-source-start))
+    nil
+    regression))
+
+(deftest run-t1 () (run-test #'t1 "ssymb"))
+
+;;; expected: "symbol 123 123 symbol2 inner"
+(defun t2 ( &optional (regression nil) )
   (asm-n-run test-reader
     #'(lambda (dmem)
         (set-program dmem 
                      (string-to-mem "symbol 123 123x symbol2 ( inner )") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
 
-;;; prints the found symbol "symbol"
-(defun t3 ()
+(deftest run-t2 () (run-test #'t2 "symbol123123symbol2inner"))
+
+;;; expected: "symbol"
+(defun t3 ( &optional (regression nil) )
   (asm-n-run test-find-symbol
     #'(lambda (dmem)
         (setq string-space-free 0)
@@ -1430,9 +1457,12 @@
         (add-symbol dmem "symbol" 0)
         (set-program dmem 
                      (string-to-mem "symbol") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
 
-(defun t4 ()
+(deftest run-t3 () (run-test #'t3 "symbol"))
+
+(defun t4 ( &optional (regression nil) )
   (asm-n-run test-parse-1
     #'(lambda (dmem)
         (setq string-space-free 0)
@@ -1440,11 +1470,14 @@
         (add-symbol dmem "symbol" 0)
         (set-program dmem 
                      (string-to-mem "symbol") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
+
+(deftest run-t4 () (run-test #'t4 "symbol"))
 
 ;;; reading an empty list == nil
 ;;; expect: "nil"
-(defun t5 ()
+(defun t5 ( &optional (regression nil) )
   (asm-n-run test-parse-2
     #'(lambda (dmem)
         (setq string-space-free 0)
@@ -1453,8 +1486,12 @@
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
                      (string-to-mem "()") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
 
+(deftest run-t5 () (run-test #'t5 "nil"))
+
+;;; expected: ? list?
 (defun t6 ()
   (asm-n-run test-parse-2
     #'(lambda (dmem)
@@ -1467,7 +1504,7 @@
                      n-source-start))))
 
 ;;; expected: (123 (sym2 sym1))
-(defun t7 ()
+(defun t7 ( &optional (regression nil) )
   (asm-n-run test-parse-3
     #'(lambda (dmem)
         (setq string-space-free 0)
@@ -1476,7 +1513,10 @@
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
                      (string-to-mem "(123 (sym2 sym1))") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
+
+(deftest run-t7 () (run-test #'t7 "(123 (sym2 sym1))"))
 
 ;;; expected: P0=1 P1=1234
 (defun t8 ()
@@ -1492,11 +1532,14 @@
   (asm-n-run test-div10))
 
 ;;; expected: "439 100001 0"
-(defun t10 ()
-  (asm-n-run test-prtdec))
+(defun t10 ( &optional (regression nil) )
+  (asm-n-run test-prtdec
+             nil nil regression 10000))
+
+(deftest run-t10 () (run-test #'t10 "4391000010"))
 
 ;;; expected: "123"
-(defun t11 ()
+(defun t11 ( &optional (regression nil) )
   (asm-n-run test-parse-num
     #'(lambda (dmem)
         (setq string-space-free 0)
@@ -1505,7 +1548,10 @@
         (add-symbol dmem "sym2" 0)
         (set-program dmem 
                      (string-to-mem "123") 
-                     n-source-start))))
+                     n-source-start))
+    nil regression 10000))
+
+(deftest run-t11 () (run-test #'t11 "123"))
 
 (defun dump-cons (dmem n-cons n-cons-type)
   (let ((incr 4))
@@ -1519,6 +1565,8 @@
           do (setf addr (+ addr incr))
           do (setf taddr (1+ taddr)))))
   
+(deftest test-lisp ()
+  (combine-results
 
 
 ;(run-emul e 200 nil)

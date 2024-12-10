@@ -223,7 +223,7 @@
   (:use :cl :unit :lr-asm :lr-disasm
         :charms :charms-extra
         :lr-opcodes)
-  (:export :make-dmem :make-emulator :run-with-curses ))
+  (:export :make-dmem :make-emulator :run-with-curses :run-emul ))
 (in-package :lr-emulator)
 
 (load-opcodes 
