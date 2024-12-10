@@ -1,3 +1,4 @@
+(asdf:load-system :literisc)
 (ql:quickload :literisc)
 (use-package :lr-asm)
 (use-package :lr-emulator)
@@ -116,12 +117,15 @@
   ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
   (alloc n-source-start 32)
   (alloc n-sym-string-start 32)
+#|
   (alloc-init n-print-sep        (string-to-mem "---
 "))
-  (alloc n-read-sym-str 20)
+|#
+  (alloc n-read-sym-str 24)
 
-  (alloc n-string-space 200)
+  (alloc n-string-space 248)
   (setq string-space-free 0)
+  (format t "n-string-space ~x~%" n-string-space)
 
   (defparameter nr-cons 20)
   (defparameter cons-size 4) ; bytes
@@ -130,8 +134,10 @@
   (set-program dmem '(0 0) n-cons-free)
 
   (alloc-dwords n-cons nr-cons)
+  (format t "n-cons ~x~%" n-cons)
   (setq n-cons-end dmem-allocated)
   (alloc n-cons-type nr-cons) ; holds type of each cons cell, one byte per cons
+  (format t "n-cons-type ~x~%" n-cons-type)
   (setq cons-free 0) ; points to entry nr in n-cons table
 
   ;; use-unread, last-read, read-ptr
@@ -141,7 +147,7 @@
   (defparameter rs-read-ptr 8)
   
   (alloc-dwords n-stack 100)
-  (setq n-stack-highest (- dmem-allocated 4)))
+  (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
 
 
 (init-lisp)
@@ -152,10 +158,13 @@
         (str-ptr nil)
         (cons-ptr cons-free)) ; cons index, not address
     (set-program dmem str (+ n-string-space string-space-free))
+    (format t "add-symbol str at:~x~%" (+ n-string-space string-space-free))
     (setf str-ptr string-space-free)
+    (format t "str-ptr ~x~%" str-ptr)
 
     (set-program dmem (list c-cons-symbol )
                  (+ n-cons-type cons-ptr)) ; one byte per cons-type item
+    (format t "cons-type ~d at ~x~%"  c-cons-symbol (+ n-cons-type cons-ptr))
     ;(format t "ccell ~x cbytes ~a~%"
     ;        (cons-cell str-ptr value-ptr)
     ;        (cons-bytes (cons-cell str-ptr value-ptr)))
@@ -164,6 +173,9 @@
                  (cons-bytes 
                    (cons-cell str-ptr value-ptr))
                  (+ n-cons (* cons-size cons-ptr)))
+    (format t "cons-cell at ~x car:~x cdr:~x~%"
+            (+ n-cons (* cons-size cons-ptr))
+            str-ptr value-ptr)
 
     (setf cons-free (1+ cons-free))
     (setf (aref dmem n-cons-free) (logand #xff cons-free))
@@ -415,10 +427,12 @@
     ;; all other chars are written to sym buffer
     (label l-read-sym-char)
     (r->a R0)
-    (st-a->r R1) ; M[read-sym-str] = char
+    (st.b-a->r R1) ; M[read-sym-str] = char
     (mvi->a 1)
     (add-r R1) ; read-sym-str++
     (a->r R1)
+    (A= 0)
+    (M[Rx].b=A R1) ; zero terminate string
     ;; debug print
     ;(r->a R0)
     ;(st-a->r R3); putchar
@@ -583,7 +597,7 @@
      (mvi->r n-cons-type R1)
      (r->a P0)
      (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-number
+     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-number
 
      (pop-r R2)
      (pop-a)
@@ -662,7 +676,7 @@
      (lsl-a)
      (lsl-a)
      (add-r R0) ; n-cons + 4*cons-ptr is car ptr
-     (st.w-a->r P1) ; write car
+     (st.w-r->a P1) ; write car
      (pop-r R0)
      (r->a SRP)
      (j-a)))
@@ -682,7 +696,7 @@
      (a->r R0)
      (mvi->a 2) ; offs for cdr
      (add-r R0)
-     (st.w-a->r P1) ; write cdr
+     (st.w-r->a P1) ; write cdr
      (pop-r R0)
      (r->a SRP)
      (j-a)))
@@ -698,13 +712,13 @@
      (a->r P0) ; return value
      (mvi->a 1) ; cons-free += 1
      (add-r P0)
-     (st.w-r->a R0)
+     (st.w-a->r R0)
      ;; set type to cons
      (mvi->r c-cons-cons R0)
      (mvi->r n-cons-type R1)
      (r->a P0)
      (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-a->r R0) ; n-cons-type[cons-idx] = c-cons-cons
+     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-cons
      (pop-r R1)
      (r->a SRP)
      (j-a)))
@@ -767,6 +781,7 @@
      (r->a SRP)
      (j-a)))
 
+;;; expected: "ssymb"
 (defvar test-read-c nil)
 (setq test-read-c 
   '( 
@@ -802,6 +817,7 @@
      (label end)
      (j end)))
 
+;;; expected: symbol 123 123 symbol2 inner (but no spaced)
 (defvar test-reader nil)
 (setq test-reader
  '(
@@ -815,32 +831,41 @@
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
-     ;; sym
+     ;; sym  "symbol"
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
     
-     ;; num
+     ;; num "123"
      (jsr f-scan)
      (r->a P1) (a->r P0)
      (jsr l-prtdec)
 
-     ;;sym
+     ;; num "123"
+     (jsr f-scan)
+     (r->a P1) (a->r P0)
+     (jsr l-prtdec)
+
+     ;; sym "symbol2"
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
 
+     ;; lpar
+     (jsr f-scan)
+
+     ;; sym "inner"
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
 
-     (jsr f-scan)
-     (mvi->r n-read-sym-str P0)
-     (jsr prtstr)
+     ;; rpar
+     (jsr f-scan)kj
 
      (label end-reader)
      (j end-reader)))
 
+;;; expected: symbol
 (defvar test-find-symbol nil)
 (setq test-find-symbol
  '(      
@@ -861,6 +886,7 @@
      (j end-fs)))
 
 ;;; test reading a symbol
+;;; expect: "symbol"
 (defvar test-parse-1 nil)
 (setq test-parse-1
  '(      
@@ -874,6 +900,8 @@
      (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr f-scan) ; P0 = read obj type
 
      (jsr l-parse) ; P0=object (cons prt)
      ;; in this test we know it's a symbol
@@ -1118,7 +1146,7 @@
      (sub-r R0)
      (jz ret-prtstr)
      (r->a R0)
-     (st-a->r R1)
+     (M[Rx].b=A R1)
      (mvi->a 1)
      (add-r P0)
      (a->r P0)
@@ -1136,7 +1164,7 @@
      (push-r R0)
      (mvi->r -1 R0) ; ptr to I/O reg
      (r->a P0)
-     (st-a->r R0)
+     (M[Rx].b=A R0)
      (pop-r R0)
      (r->a srp)
      (j-a)))
@@ -1203,7 +1231,7 @@
      (r->a P0) ; cons-ptr = cons-index << 2 + n-cons + 2
      (lsl-a)
      (lsl-a)
-     (ld.w-a-rel->r (+ 2 n-cons) P0) ; R0 = highest word of cons-cell (cons.f1/cdr)
+     (ld.w-a-rel->r (+ 2 n-cons) P0) ; P0 = highest word of cons-cell (cons.f1/cdr)
      (r->a SRP)
      (j-a)))
 
@@ -1353,6 +1381,11 @@
 ;(setq *hello-world*
 ;      (masm main func-prtstr read-c scan))
 
+(defun check-dmem (dmem)
+  (loop for item across dmem
+        for i from 0
+        do (if (> item 255) (format t "Index ~D: ~A~%" i item))))
+
 (defvar e nil)
 (defvar *symtab* nil)
 
@@ -1368,7 +1401,8 @@
               func-print-number func-read))
   (setf e (make-emulator *hello-world* dmem 9 debug))
   (if setup (funcall setup dmem))
-  (run-with-curses e *symtab*))
+  (run-with-curses e *symtab*)
+  (check-dmem dmem))
 
 ;(setf e (make-emulator *hello-world* dmem 0 nil))
 ;(run-with-curses e)
@@ -1386,6 +1420,7 @@
                      (string-to-mem "symbol 123 123x symbol2 ( inner )") 
                      n-source-start))))
 
+;;; prints the found symbol "symbol"
 (defun t3 ()
   (asm-n-run test-find-symbol
     #'(lambda (dmem)
@@ -1408,6 +1443,7 @@
                      n-source-start))))
 
 ;;; reading an empty list == nil
+;;; expect: "nil"
 (defun t5 ()
   (asm-n-run test-parse-2
     #'(lambda (dmem)
@@ -1430,6 +1466,7 @@
                      (string-to-mem "(sym1)") 
                      n-source-start))))
 
+;;; expected: (123 (sym2 sym1))
 (defun t7 ()
   (asm-n-run test-parse-3
     #'(lambda (dmem)
@@ -1441,6 +1478,7 @@
                      (string-to-mem "(123 (sym2 sym1))") 
                      n-source-start))))
 
+;;; expected: P0=1 P1=1234
 (defun t8 ()
   (asm-n-run test-str2num
     #'(lambda (dmem)
@@ -1449,12 +1487,15 @@
                      (string-to-mem "1234") 
                      n-source-start))))
 
+;;; expected: P0=420000
 (defun t9 ()
   (asm-n-run test-div10))
 
+;;; expected: "439 100001 0"
 (defun t10 ()
   (asm-n-run test-prtdec))
 
+;;; expected: "123"
 (defun t11 ()
   (asm-n-run test-parse-num
     #'(lambda (dmem)
