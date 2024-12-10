@@ -24,6 +24,10 @@
 ;;;    - unaligned 32-bit access is never done. The lower 2 address bits
 ;;;      are masked before memory access, resulting in aligned access.
 ;;;    - byte/word ld/st can use byte/word aligned accesses
+;;;      - This means that bus access is 32 bit but read data is shifted
+;;;      to lsb and masked to size of access. Writes are shifted from lsb to 
+;;;      byte position given by address and write mask is used to only write to
+;;;      valid bytes.
 ;;;  - jump offset is relative the first byte after the jump instruction.
 ;;;    - j #0 is therefore a NOP
 ;;;    - j #1 skips one byte after the jump instruction
@@ -572,6 +576,7 @@
         rd-val)))
 
 (defun mem-read-word (dmem addr &optional read-callback)
+  (assert (= 0 (logand addr 1)))
   (let* ((byte-l (mem-read-byte dmem addr read-callback))
          (byte-h (mem-read-byte dmem (1+ addr) read-callback)))
     (logior (ash byte-h 8) byte-l)))
@@ -600,6 +605,7 @@
               (logand #xff (ash data -24))))))
 
 (defun mem-write-word (dmem addr data &optional (write-callback nil))
+  (assert (= 0 (logand addr 1)))
   ;;(format t "in mem-write-word ~a ~a~%" addr data)
   (if write-callback (funcall write-callback addr data))
   (if (and (>= addr 0) (<= 65535))
@@ -869,7 +875,8 @@
 
 (defun make-dmem (nr-words)
   (make-array nr-words
-    :element-type '(unsigned-byte 32)
+    ;:element-type '(unsigned-byte 32)
+    :element-type '(unsigned-byte 8)
     :initial-element 0))
 
 ; Variable size immediate data:
