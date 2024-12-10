@@ -288,19 +288,20 @@
 (setf (symbol-function 'A=M[Rx].b) #'ld.b-r->a)
 
 (defun st.b-a->r (r)
-  (opci2 OPCI2_STB_A :reg r))
+  (opci2 OPCI2_STB_RX :reg r))
+(setf (symbol-function 'M[Rx].b=A) #'st.b-a->r)
 
 (defun st.b-r->a (r)
-  (opci2 OPCI2_STB_RX :reg r))
-(setf (symbol-function 'M[Rx].b=A) #'st.b-r->a)
+  (opci2 OPCI2_STB_A :reg r))
+(setf (symbol-function 'M[A].b=Rx) #'st.b-r->a)
 
 (defun ld.b-a-rel->r (offs r)
-  (cons (opc OPCI2_LDB_A_OFFS :reg r)
+  (append (opc OPCI2_LDB_A_OFFS :reg r)
         (asm-immediate offs)))
 (setf (symbol-function 'Rx=M[A+n].b) #'ld.b-a-rel->r)
 
 (defun st.b-r->a-rel (offs r)
-  (cons (opc OPCI2_STB_A_OFFS :reg r)
+  (append (opc OPCI2_STB_A_OFFS :reg r)
         (asm-immediate offs)))
 (setf (symbol-function 'M[A+n].b=Rx) #'st.b-r->a-rel)
 
@@ -313,17 +314,19 @@
   (opci2 OPCI2_LDW_RX :reg r))
 
 (defun st.w-a->r (r)
-  (opci2 OPCI2_STW_A :reg r))
+  (opci2 OPCI2_STW_RX :reg r))
+(setf (symbol-function 'M[Rx].w=A) #'st.w-a->r)
 
 (defun st.w-r->a (r)
-  (opci2 OPCI2_STW_RX :reg r))
+  (opci2 OPCI2_STW_A :reg r))
+(setf (symbol-function 'M[A].w=Rx) #'st.w-r->a)
 
 (defun ld.w-a-rel->r (offs r)
-  (cons (opc OPCI2_LDW_A_OFFS :reg r)
+  (append (opci2 OPCI2_LDW_A_OFFS :reg r)
         (asm-immediate offs)))
 
 (defun st.w-r->a-rel (offs r)
-  (cons (opc OPCI2_STW_A_OFFS :reg r)
+  (append (opci2 OPCI2_STW_A_OFFS :reg r)
         (asm-immediate offs)))
 
 
