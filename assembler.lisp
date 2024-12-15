@@ -296,12 +296,12 @@
 (setf (symbol-function 'M[A].b=Rx) #'st.b-r->a)
 
 (defun ld.b-a-rel->r (offs r)
-  (append (opc OPCI2_LDB_A_OFFS :reg r)
+  (cons (opc OPCI2_LDB_A_OFFS :reg r)
         (asm-immediate offs)))
 (setf (symbol-function 'Rx=M[A+n].b) #'ld.b-a-rel->r)
 
 (defun st.b-r->a-rel (offs r)
-  (append (opc OPCI2_STB_A_OFFS :reg r)
+  (cons (opc OPCI2_STB_A_OFFS :reg r)
         (asm-immediate offs)))
 (setf (symbol-function 'M[A+n].b=Rx) #'st.b-r->a-rel)
 
