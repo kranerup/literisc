@@ -222,12 +222,38 @@
 (defpackage :lr-emulator
   (:use :cl :unit :lr-asm :lr-disasm
         :charms :charms-extra
-        :lr-opcodes)
+        :lr-opcodes ) ; :pty)
   (:export :make-dmem :make-emulator :run-with-curses :run-emul ))
 (in-package :lr-emulator)
 
 (load-opcodes 
   (asdf:system-relative-pathname :literisc "rtl/literisc/cpu.py" ))
+
+;;; definitions from cpu_sys.py and axi_slaves.py
+(defparameter io-base-address (- 65536 100))
+(defparameter io-hi 65535)
+;; io register offsets from base address
+(defparameter gpio_address 0)
+(defparameter serial_tx_data_address  1)
+(defparameter serial_tx_status_address  2)
+(defparameter serial_rx_data_address  3)
+(defparameter serial_rx_status_address  4)
+
+(defun add-callback (callback-list fn)
+  (if fn
+    (push fn callback-list)))
+
+(defun execute-callbacks (callback-list addr data)
+  (dolist (fn callback-list)
+    (funcall fn addr data))
+  data)
+
+(defun execute-predicate-callbacks (callback-list addr data)
+  (if (null callback-list)
+      t
+      (let ((results (loop for fn in callback-list
+                           collect (funcall fn addr data))))
+        (some #'identity results))))
 
 (defstruct processor-state 
   R
@@ -261,6 +287,15 @@
                                     :debug t
                                     :write-callback nil
                                     :read-callback nil))
+
+(defun processor-add-wr-callback (proc cb-func)
+  (setf (processor-state-write-callback proc)
+        (add-callback (processor-state-write-callback proc) cb-func)))
+
+(defun processor-add-rd-callback (proc cb-func)
+  (setf (processor-state-read-callback proc)
+        (add-callback (processor-state-read-callback proc) cb-func)))
+ 
 
 (defun reset-processor (p)
   (setf (processor-state-pc p) 0)
@@ -558,62 +593,76 @@
   (if (processor-state-debug ps) (format t "jge offs ~d pc ~d~%" offset (processor-state-pc ps))))
 
 ;;;--------------------- memory access functions --------------------------
-(defun mem-read-dword (dmem addr &optional read-callback)
-  (let ((res (aref dmem addr)))
-    (assert (= 0 (logand addr 3)))
-    (setf res (logior res 
-                      (ash (aref dmem (+ addr 1)) 8)))
-    (setf res (logior res 
-                      (ash (aref dmem (+ addr 2)) 16)))
-    (setf res (logior res 
-                      (ash (aref dmem (+ addr 3)) 24)))
-    (if read-callback (funcall read-callback addr res)
-        res)))
+(defun mem-read-dword (dmem addr &optional read-callbacks)
+  (execute-callbacks read-callbacks addr
+    (let ((res (aref dmem addr)))
+      (assert (= 0 (logand addr 3)))
+      (setf res (logior res 
+                        (ash (aref dmem (+ addr 1)) 8)))
+      (setf res (logior res 
+                        (ash (aref dmem (+ addr 2)) 16)))
+      (setf res (logior res 
+                        (ash (aref dmem (+ addr 3)) 24)))
+      ;(format t "mem-read-dword a:~a d:~a~%" addr res)
+      res)))
 
-(defun mem-read-byte (dmem addr &optional read-callback)
-  (let ((rd-val (logand #xff (aref dmem addr))))
-    (if read-callback (funcall read-callback addr rd-val)
-        rd-val)))
+(defun test-mem-read-dw ()
+  (let ((dmem (make-dmem 10))
+        (callbacks (list (lambda (addr data)
+                           (format t "a:~a v:~a~%" addr data)))))
+        (setf (aref dmem 4) 123)
+        (mem-read-dword dmem 4 callbacks)))
 
-(defun mem-read-word (dmem addr &optional read-callback)
+(defun mem-read-byte (dmem addr &optional read-callbacks)
+  (execute-callbacks read-callbacks addr
+    (logand #xff (aref dmem addr))))
+
+(defun mem-read-word (dmem addr &optional read-callbacks)
   (assert (= 0 (logand addr 1)))
-  (let* ((byte-l (mem-read-byte dmem addr read-callback))
-         (byte-h (mem-read-byte dmem (1+ addr) read-callback)))
+  (let* ((byte-l (mem-read-byte dmem addr read-callbacks))
+         (byte-h (mem-read-byte dmem (1+ addr) read-callbacks)))
     (logior (ash byte-h 8) byte-l)))
 
-(defun mem-write-byte (dmem addr data &optional (write-callback nil))
-  ;(format t "in mem-write-byte ~a ~a ~a~%" addr data write-callback)
-  (if write-callback (funcall write-callback addr (logand #xff data)))
-  (if (and (>= addr 0) (<= 65535))
-      (setf (aref dmem addr) (logand #xff data))))
+(defun mem-write-byte (dmem addr data &optional (write-callbacks nil))
+  ;(format t "mem-write-byte a:~a d:~a cb:~a~%" addr data write-callbacks)
+  (if (execute-predicate-callbacks write-callbacks addr data)
+    (progn ;(format t "mem-write-byte a:~a d:~a~%" addr data)
+      (if (and (>= addr 0) (<= 65535))
+          (setf (aref dmem addr) (logand #xff data))))))
 
-(defun mem-write-dword (dmem addr data &optional (write-callback nil))
-  ;;(format t "in mem-write-dword ~a ~a~%" addr data)
+(defun test-mem-write-b ()
+  (let ((dmem (make-dmem 10))
+        (callbacks (list (lambda (addr data)
+                           (format t "a:~a v:~a~%" addr data) t))))
+        (setf (aref dmem 4) 123)
+        (mem-write-byte dmem 4 222 callbacks)
+        (format t "dmem ~a~%" (aref dmem 4))))
+
+
+(defun mem-write-dword (dmem addr data &optional (write-callbacks nil))
   (assert (= 0 (logand addr 3)))
-  (if write-callback (funcall write-callback addr data))
-  ;(if (equal (logand #xffffffff addr) #xffffffff)
-  ;    (format t "~c" (code-char (logand #xff data)))
-  (if (and (>= addr 0) (<= 65535))
-      (progn
-        (setf (aref dmem addr)
-              (logand #xff data))
-        (setf (aref dmem (+ addr 1))
-              (logand #xff (ash data -8)))
-        (setf (aref dmem (+ addr 2))
-              (logand #xff (ash data -16)))
-        (setf (aref dmem (+ addr 3))
-              (logand #xff (ash data -24))))))
+  (if (execute-predicate-callbacks write-callbacks addr data)
+      (progn ;(format t "mem-write-dword a:~a d:~a~%" addr data)
+        (if (and (>= addr 0) (<= 65535))
+            (progn
+              (setf (aref dmem addr)
+                    (logand #xff data))
+              (setf (aref dmem (+ addr 1))
+                    (logand #xff (ash data -8)))
+              (setf (aref dmem (+ addr 2))
+                    (logand #xff (ash data -16)))
+              (setf (aref dmem (+ addr 3))
+                    (logand #xff (ash data -24))))))))
 
-(defun mem-write-word (dmem addr data &optional (write-callback nil))
+(defun mem-write-word (dmem addr data &optional (write-callbacks nil))
   (assert (= 0 (logand addr 1)))
-  ;;(format t "in mem-write-word ~a ~a~%" addr data)
-  (if write-callback (funcall write-callback addr data))
-  (if (and (>= addr 0) (<= 65535))
-      (progn
-        (setf (aref dmem addr)
-              (logand #xff data))
-        (setf (aref dmem (+ addr 1))
-              (logand #xff (ash data -8))))))
+  (if (execute-predicate-callbacks write-callbacks addr data)
+    (if (and (>= addr 0) (<= 65535))
+        (progn
+          (setf (aref dmem addr)
+                (logand #xff data))
+          (setf (aref dmem (+ addr 1))
+                (logand #xff (ash data -8)))))))
 ;;;-----------------------------------------------------------------------
 
 ; 7     st   A,Rx               M[Rx].l = A
@@ -1066,8 +1115,28 @@
 
 (defun write-cb-write-char (addr data)
   ;;(format t "in write-cb-write-char  ~a ~a~%" addr data)
-  (if (equal (logand #xffffffff addr) #xffffffff)
-      (format t "~c" (code-char (logand #xff data)))))
+  (cond ((equal (logand #xffffffff addr) #xffffffff)
+         (format t "~c" (code-char (logand #xff data)))
+         nil)
+        (t t)))
+
+(defun uart-write-char-cb (addr data)
+  ;;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
+  (if (and (>= addr io-base-address) (<= addr io-hi))
+      (let ((offs (- addr io-base-address)))
+        (if (= serial_tx_data_address)
+               (uart_tx_data data)))))
+
+(defun uart-read-char-cb (addr)
+  ;;(format t "in uart-read-char-cb  ~a ~a~%" addr data)
+  (if (and (>= addr io-base-address) (<= addr io-hi))
+      (let ((offs (- addr io-base-address)))
+        (cond ((= offs serial_tx_status_address)
+               (uart-tx-status))
+              ((= offs serial_rx_status_address)
+               (uart-rx-status))
+              ((= offs serial_rx_data_address)
+               (uart-rx-data))))))
 
 (defun run-prog ( prog-list dmem-list max-instr &optional (debug t) )
   (let ((the-prog prog-list)
@@ -1077,7 +1146,7 @@
     (setf (processor-state-debug p) debug)
     (set-program imem the-prog)
     (set-program dmem dmem-list)
-    (setf (processor-state-write-callback p) 'write-cb-write-char)
+    (processor-add-wr-callback p 'write-cb-write-char)
     (dotimes (n max-instr)
       (execute-instruction p imem dmem))
     (if debug (print p)))
@@ -1091,7 +1160,7 @@
 
 (defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
-(defun make-emulator ( prog-list dmem &optional (imem-size 0) (debug t) )
+(defun make-emulator ( prog-list dmem &optional (imem-size 0) (debug t))
   (let ((emul
           (make-emulated-system
             :imem (make-imem (max (+ (list-length prog-list) imem-padding)
@@ -1099,15 +1168,12 @@
             :dmem dmem
             :processor (make-processor))))
     (setf (processor-state-debug (emulated-system-processor emul)) debug)
-    (setf (processor-state-write-callback
-            (emulated-system-processor emul))
-            'write-cb-write-char)
     (set-program (emulated-system-imem emul) prog-list)
     emul))
 
 (defun run-emul ( emul max-instr &optional (debug t))
-    (setf (processor-state-write-callback
-            (emulated-system-processor emul))
+    (processor-add-wr-callback 
+        (emulated-system-processor emul) 
           'write-cb-write-char)
     (dotimes (n max-instr)
       (execute-instruction
@@ -1245,7 +1311,7 @@
         do (setf addr (+ addr 16)))
   (charms:refresh-window window))
 
-(defun run-with-curses ( emul &optional symtab write-callback read-callback)
+(defun run-with-curses ( emul &optional symtab )
   (setq *print-pretty* nil)
   (setf (processor-state-debug 
           (emulated-system-processor emul)) nil)
@@ -1260,16 +1326,11 @@
           (dump-window (charms:make-window    75 50 87 0))
           (breakpoints (make-hash-table))
           (mem-was-written nil))
-      (setf (processor-state-write-callback
-              (emulated-system-processor emul))
+      (processor-add-wr-callback 
+        (emulated-system-processor emul)
             (lambda (addr data)
               (setf mem-was-written t)
-              (if write-callback (write-callback addr data))
-              (write-cb-write-win addr data output-window)
-              ))
-      (setf (processor-state-read-callback
-              (emulated-system-processor emul))
-            read-callback)
+              (write-cb-write-win addr data output-window)))
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
@@ -2175,7 +2236,7 @@
            (sub-r 1)
            (jz ret-prtstr)
            (r->a 1)
-           (st.b-r->a 2)
+           (M[Rx].b=A 2)
            (mvi->a 1)
            (add-r 0)
            (a->r 0)
