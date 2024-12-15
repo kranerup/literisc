@@ -7,6 +7,7 @@
 ;;;(load "charms-extra")
 ;;;(load "emulator")
 (asdf:load-system :literisc)
+(load "lisp")
 
 (use-package :unit)
 
@@ -14,7 +15,8 @@
   (combine-results
     (lr-asm::test-asm)
     (lr-disasm::test-disasm)
-    (lr-emulator::test-instructions)))
+    (lr-emulator::test-instructions)
+    (test-lisp)))
 
 (if (test-regression)
     (format t "======== Regression PASS ========~%")

@@ -861,7 +861,7 @@
      (jsr prtstr)
 
      ;; rpar
-     (jsr f-scan)kj
+     (jsr f-scan)
 
      (label end-reader)
      (j end-reader)))
@@ -1567,7 +1567,14 @@
   
 (deftest test-lisp ()
   (combine-results
-
+    (run-t1)
+    (run-t2)
+    (run-t3)
+    (run-t4)
+    (run-t5)
+    (run-t7)
+    (run-t10)
+    (run-t11)))
 
 ;(run-emul e 200 nil)
 
