@@ -12,4 +12,5 @@
                (:file "opcode-parse")
                (:file "assembler")
                (:file "disassembler")
+               (:file "pty-lib")
                (:file "emulator")))

@@ -40,7 +40,7 @@
 (setq dmem (make-dmem 1000))
 (set-program dmem (string-to-mem "Hello World!"))
                                   
-(setf e (make-emulator *hello-world* dmem 200 t))
+(setf e (make-emulator *hello-world* dmem 0 t))
 (run-with-curses e)
 (quit)
 

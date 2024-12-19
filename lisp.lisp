@@ -1403,7 +1403,7 @@
               func-cons func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read))
-  (setf e (make-emulator *hello-world* dmem 9 debug))
+  (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem))
   (if no-curses (run-emul e nr-instr)
       (run-with-curses e *symtab*))

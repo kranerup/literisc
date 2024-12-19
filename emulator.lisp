@@ -222,13 +222,16 @@
 (defpackage :lr-emulator
   (:use :cl :unit :lr-asm :lr-disasm
         :charms :charms-extra
-        :lr-opcodes ) ; :pty)
-  (:export :make-dmem :make-emulator :run-with-curses :run-emul ))
+        :lr-opcodes :pty)
+  (:export :make-dmem :make-emulator :run-with-curses
+           :run-with-curses-io :run-emul ))
 (in-package :lr-emulator)
 
 (load-opcodes 
   (asdf:system-relative-pathname :literisc "rtl/literisc/cpu.py" ))
 
+;;; ==========================================================================
+;;; I/O device emulation
 ;;; definitions from cpu_sys.py and axi_slaves.py
 (defparameter io-base-address (- 65536 100))
 (defparameter io-hi 65535)
@@ -239,21 +242,82 @@
 (defparameter serial_rx_data_address  3)
 (defparameter serial_rx_status_address  4)
 
+(defparameter *uart-fd* nil)
+
+(defun uart-tx-data (data)
+  (format t "uart tx:~a~%" data)
+  (pty-write-char *uart-fd* (code-char data)))
+
+(defun uart-write-char-cb (addr data)
+  ;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
+  (cond ((and (>= addr io-base-address) (<= addr io-hi))
+         (let ((offs (- addr io-base-address)))
+           (cond ((= offs serial_tx_data_address)
+                  (uart-tx-data data)
+                  nil)
+                 (t t))))
+        (t t)))
+
+(defun uart-tx-status ()
+  1)
+
+(defun uart-rx-data ()
+  nil)
+(defun uart-rx-status ()
+  nil)
+
+(defun uart-read-char-cb (addr)
+  (let ((ret
+          (cond ((and (>= addr io-base-address) (<= addr io-hi))
+                 (let ((offs (- addr io-base-address)))
+                   (cond ((= offs serial_tx_status_address)
+                          (uart-tx-status))
+                         ((= offs serial_rx_status_address)
+                          (uart-rx-status))
+                         ((= offs serial_rx_data_address)
+                          (uart-rx-data))
+                         (t nil))))
+                (t nil))))
+    ;(format t "in uart-read-char-cb  ~a ret:~a~%" addr ret)
+    ret))
+
+
+
+(defun add-uart (emul)
+  (let ((proc (emulated-system-processor emul)))
+    (processor-add-wr-callback  proc 'uart-write-char-cb)
+    (processor-add-rd-callback  proc 'uart-read-char-cb)))
+  
+;;; ==========================================================================
 (defun add-callback (callback-list fn)
   (if fn
     (push fn callback-list)))
 
-(defun execute-callbacks (callback-list addr data)
-  (dolist (fn callback-list)
-    (funcall fn addr data))
-  data)
+;; For read callbacks.
+;; A read callback must return nil if it doesn't match the address,
+;; otherwise return the read value.
+;(defun execute-callbacks (callback-list addr)
+;  (if callback-list
+;    (let ((res (funcall (car callback-list) addr)))
+;      (format t "execute callback ~a~%" res)
+;      res)
+;    nil))
+(defun execute-callbacks (callback-list addr)
+  (or
+    (loop for fn in callback-list
+          collect (funcall fn addr) into results
+          finally (return (find-if #'identity results)))))
 
+;; For write callbacks.
+;; A write callback must return true when it doesn't match the address.
+;; When all of the callbacks returns nil it will result in that the memory
+;; write will take effect. Otherwise it is assume to be a non-memory write.
 (defun execute-predicate-callbacks (callback-list addr data)
   (if (null callback-list)
       t
       (let ((results (loop for fn in callback-list
                            collect (funcall fn addr data))))
-        (some #'identity results))))
+        (every #'identity results))))
 
 (defstruct processor-state 
   R
@@ -594,17 +658,20 @@
 
 ;;;--------------------- memory access functions --------------------------
 (defun mem-read-dword (dmem addr &optional read-callbacks)
-  (execute-callbacks read-callbacks addr
-    (let ((res (aref dmem addr)))
-      (assert (= 0 (logand addr 3)))
-      (setf res (logior res 
-                        (ash (aref dmem (+ addr 1)) 8)))
-      (setf res (logior res 
-                        (ash (aref dmem (+ addr 2)) 16)))
-      (setf res (logior res 
-                        (ash (aref dmem (+ addr 3)) 24)))
-      ;(format t "mem-read-dword a:~a d:~a~%" addr res)
-      res)))
+  (let ((cb-res (execute-callbacks read-callbacks addr)))
+    ;(format t "mem-read-dword a:~a cb-res:~a~%" addr cb-res)
+    (if cb-res
+        cb-res
+        (let ((res (aref dmem addr)))
+          (assert (= 0 (logand addr 3)))
+          (setf res (logior res 
+                            (ash (aref dmem (+ addr 1)) 8)))
+          (setf res (logior res 
+                            (ash (aref dmem (+ addr 2)) 16)))
+          (setf res (logior res 
+                            (ash (aref dmem (+ addr 3)) 24)))
+          ;(format t "mem-read-dword a:~a d:~a~%" addr res)
+          res))))
 
 (defun test-mem-read-dw ()
   (let ((dmem (make-dmem 10))
@@ -613,9 +680,15 @@
         (setf (aref dmem 4) 123)
         (mem-read-dword dmem 4 callbacks)))
 
-(defun mem-read-byte (dmem addr &optional read-callbacks)
-  (execute-callbacks read-callbacks addr
-    (logand #xff (aref dmem addr))))
+;(defun mem-read-byte (dmem addr &optional read-callbacks)
+;  (execute-callbacks read-callbacks addr
+;    (logand #xff (aref dmem addr))))
+(defun mem-read-byte (dmem addr &optional (read-callbacks nil))
+  (let ((cb-res (execute-callbacks read-callbacks addr)))
+    ;(format t "mem-read-byte a:~a cb-res:~a~%" addr cb-res)
+    (if cb-res
+        cb-res
+        (logand #xff (aref dmem addr)))))
 
 (defun mem-read-word (dmem addr &optional read-callbacks)
   (assert (= 0 (logand addr 1)))
@@ -817,7 +890,7 @@
 (defun i-ld-w-a-rx (ps rx dmem)
   (setf (aref (processor-state-r ps) rx)
         (mem-read-word dmem (processor-state-a ps)
-                       (process-state-read-callback ps)))
+                       (processor-state-read-callback ps)))
   (if (processor-state-debug ps) 
       (format t "ld Rx = M[~a].w = ~a~%"
           (processor-state-a ps)
@@ -1120,23 +1193,6 @@
          nil)
         (t t)))
 
-(defun uart-write-char-cb (addr data)
-  ;;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
-  (if (and (>= addr io-base-address) (<= addr io-hi))
-      (let ((offs (- addr io-base-address)))
-        (if (= serial_tx_data_address)
-               (uart_tx_data data)))))
-
-(defun uart-read-char-cb (addr)
-  ;;(format t "in uart-read-char-cb  ~a ~a~%" addr data)
-  (if (and (>= addr io-base-address) (<= addr io-hi))
-      (let ((offs (- addr io-base-address)))
-        (cond ((= offs serial_tx_status_address)
-               (uart-tx-status))
-              ((= offs serial_rx_status_address)
-               (uart-rx-status))
-              ((= offs serial_rx_data_address)
-               (uart-rx-data))))))
 
 (defun run-prog ( prog-list dmem-list max-instr &optional (debug t) )
   (let ((the-prog prog-list)
@@ -1160,15 +1216,23 @@
 
 (defconstant imem-padding 7) ; disassembler reads ahead so need this much after end of program
 
-(defun make-emulator ( prog-list dmem &optional (imem-size 0) (debug t))
+; 1. dmem allocated outside of emulator so that it can be initialized and inspected
+; 2. imem created from list of program bytes
+; 3. dmem separate from imem (both have start address 0 but are different memories)
+; 4. dmem and imem are the same memory. programs always starts at 0 
+(defun make-emulator ( prog-list dmem &key (shared-mem nil) (debug t))
   (let ((emul
-          (make-emulated-system
-            :imem (make-imem (max (+ (list-length prog-list) imem-padding)
-                                  imem-size))
-            :dmem dmem
-            :processor (make-processor))))
-    (setf (processor-state-debug (emulated-system-processor emul)) debug)
+          (if shared-mem
+              (make-emulated-system
+                :imem dmem
+                :dmem dmem
+                :processor (make-processor))
+              (make-emulated-system
+                :imem (make-imem (+ (list-length prog-list) imem-padding))
+                :dmem dmem
+                :processor (make-processor)))))
     (set-program (emulated-system-imem emul) prog-list)
+    (setf (processor-state-debug (emulated-system-processor emul)) debug)
     emul))
 
 (defun run-emul ( emul max-instr &optional (debug t))
@@ -1241,7 +1305,7 @@
       (format nil "i: ~a" (str:substring 0 20 dis-str))
       1 *instr-row*)))
 
-(defun write-disasm (window proc imem symtab row)
+(defun write-disasm (window proc imem symtab)
   (let* ((pc (processor-state-pc proc))
          (mem-at-pc (coerce (subseq imem pc (+ pc 7)) 'list))
          (dis-str (str:trim-right
@@ -1364,8 +1428,7 @@
                          disasm-window
                          (emulated-system-processor emul)
                          (emulated-system-imem emul)
-                         symtab
-                         39)
+                         symtab)
                        (charms:refresh-window disasm-window)
                        ;(charms:refresh-window (charms:standard-window))
                        (charms:refresh-window output-window)
@@ -1396,6 +1459,15 @@
                        breakpoints)
                      (setf run nil))
                  (setf single-step nil))))))
+
+
+(defun run-with-curses-io ( emul pty &optional symtab )
+  (add-uart emul) ; add callbacks
+  (with-open-pty (fd pty)
+    (with-raw-pty (fd)
+      (setf *uart-fd* fd)
+      (run-with-curses emul symtab)))
+  (setf *uart-fd* nil))
 
 
 ;;; =========================== unit test =====================================
@@ -2247,13 +2319,13 @@
          (dmem (make-dmem 1000))
          (prog-output nil))
     (set-program dmem (string-to-mem "Hello World!"))
-    ;(let ((emul (make-emulator hw-prog dmem 0 nil)))
+    ;(let ((emul (make-emulator hw-prog dmem :shared-mem nil :debug nil)))
     ;  (format t "emulator:~a~%" emul)
     ;  (run-emul emul 180))))
     ;(run-emul (make-emulator hw-prog dmem 0 nil) 180)))
     (setf prog-output
           (with-output-to-string (*standard-output*)
-            (run-emul (make-emulator hw-prog dmem 0 nil) 180)))
+            (run-emul (make-emulator hw-prog dmem :shared-mem nil :debug nil) 180)))
     (format t "program-output:~%~a~%" prog-output)
     (check (equal prog-output "Hello World!"))))
 
@@ -2293,6 +2365,48 @@
   )
 |#
 
+(deftest test-run-hello-serial ()
+  (let* ((hw-prog (assemble 
+        '( 
+           ; --- main ---
+           (mvi->r 0 0)
+           (lr-asm::jsr prtstr)
+           (label end)
+           (j end)
+           ; --- prtstr ---
+           ; r0 - ptr to zero terminated string
+           (label prtstr)
+           (ld.b-r->a 0)
+           (mask-a-b)
+           (a->r 1)
+           (mvi->r (+ io-base-address serial_tx_data_address) 2) ; ptr to uart tx data reg
+           (mvi->a 0)
+           (sub-r 1)
+           (jz ret-prtstr)
+           (r->a 1)
+           (M[Rx].b=A 2)
+           (mvi->a 1)
+           (add-r 0)
+           (a->r 0)
+           (j prtstr)
+           (label ret-prtstr)
+           (r->a srp)
+           (j-a))))
+         (dmem (make-dmem 1000))
+         (prog-output nil))
+    (set-program dmem (string-to-mem "Hello World!"))
+    (let ((emul (make-emulator hw-prog dmem :shared-mem nil :debug nil)))
+      (processor-add-wr-callback 
+        (emulated-system-processor emul) 
+        'uart-write-char-cb)
+      (run-emul emul 180))))
+    ;(run-emul (make-emulator hw-prog dmem 0 nil) 180)))
+
+    ;(setf prog-output
+    ;      (with-output-to-string (*standard-output*)
+    ;        (run-emul (make-emulator hw-prog dmem 0 nil) 180)))
+    ;(format t "program-output:~%~a~%" prog-output)
+    ;(check (equal prog-output "Hello World!"))))
 
 (deftest test-instructions ()
   (combine-results
