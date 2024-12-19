@@ -244,9 +244,21 @@
 
 (defparameter *uart-fd* nil)
 
+;;; uart pty device connection
 (defun uart-tx-data (data)
   (format t "uart tx:~a~%" data)
   (pty-write-char *uart-fd* (code-char data)))
+
+(defun uart-tx-status () 1)
+
+(defun uart-rx-data ()
+  (let ((char (pty-read-char-no-hang *uart-fd*)))
+        (char-code char)))
+
+(defun uart-rx-status ()
+  (if (pty-char-available-p *uart-fd*)
+      1
+      0))
 
 (defun uart-write-char-cb (addr data)
   ;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
@@ -258,13 +270,6 @@
                  (t t))))
         (t t)))
 
-(defun uart-tx-status ()
-  1)
-
-(defun uart-rx-data ()
-  nil)
-(defun uart-rx-status ()
-  nil)
 
 (defun uart-read-char-cb (addr)
   (let ((ret

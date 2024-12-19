@@ -99,6 +99,8 @@
            :Rx=A
            :A=
            :Rx=
+           :M[A]=Rx
+           :M[A].b=Rx
            ))
 
 (in-package :lr-asm)
@@ -268,6 +270,7 @@
 (def-reg ld-a->r OPC_LD_A)
 (def-reg ld-r->a OPC_LD_RX)
 (def-reg st-r->a OPC_ST_A)
+(setf (symbol-function 'M[A]=Rx) #'st-r->a)
 (def-reg st-a->r OPC_ST_RX) ;;; 7   st A,Rx  M[Rx].l = A
 (setf (symbol-function 'M[Rx]=A) #'st-a->r)
 
