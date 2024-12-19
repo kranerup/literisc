@@ -38,9 +38,22 @@
   (c-ispeed :unsigned-int)
   (c-ospeed :unsigned-int))
 
-;; Constants
-(defconstant +ICANON+ #o0000002)
+;; Constants from termios.h
+(defconstant +IGNBRK+ #o0000001)
+(defconstant +BRKINT+ #o0000002)
+(defconstant +PARMRK+ #o0000010)
+(defconstant +ISTRIP+ #o0000040)
+(defconstant +INLCR+ #o0000100)
+(defconstant +IGNCR+ #o0000200)
+(defconstant +ICRNL+ #o0000400)
+(defconstant +IXON+ #o0002000)
+(defconstant +OPOST+ #o0000001)
 (defconstant +ECHO+ #o0000010)
+(defconstant +ECHONL+ #o0000100)
+(defconstant +ICANON+ #o0000002)
+(defconstant +ISIG+ #o0000001)
+(defconstant +IEXTEN+ #o0100000)
+(defconstant +ONLCR+ #o0000004)
 (defconstant +TCSANOW+ 0)
 (defconstant +O-RDWR+ #o2)
 (defconstant +O-NOCTTY+ #o400)
@@ -121,8 +134,13 @@
           (new-termios-ptr (copy-termios old-termios-ptr)))
      (unwind-protect
           (progn
-            (with-foreign-slots ((c-lflag) new-termios-ptr (:struct termios))
-              (setf c-lflag (logand c-lflag (lognot (logior +ICANON+ +ECHO+)))))
+            (with-foreign-slots ((c-iflag c-oflag c-lflag c-cflag) new-termios-ptr (:struct termios))
+              ;; Equivalent to cfmakeraw
+              (setf c-iflag (logand c-iflag (lognot (logior +IGNBRK+ +BRKINT+ +PARMRK+ +ISTRIP+
+                                                            +INLCR+ +IGNCR+ +ICRNL+ +IXON+)))
+                    c-oflag (logand c-oflag (lognot +OPOST+))
+                    c-lflag (logand c-lflag (lognot (logior +ECHO+ +ECHONL+ +ICANON+ +ISIG+ +IEXTEN+)))
+                    c-cflag (logior (logand c-cflag (lognot +ONLCR+)) #o0000060)))
             (set-terminal-attrs ,fd new-termios-ptr)
             ,@body)
        (progn
@@ -161,7 +179,7 @@
   (with-foreign-object (buf :char)
     (let ((bytes-read (c-read fd buf 1)))
       (if (= bytes-read 1)
-          (code-char (mem-ref buf :char))
+          (code-char (logand #xff (mem-ref buf :char)))
           nil))))
 
 (defun pty-read-char-no-hang (fd)

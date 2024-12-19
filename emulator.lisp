@@ -253,6 +253,7 @@
 
 (defun uart-rx-data ()
   (let ((char (pty-read-char-no-hang *uart-fd*)))
+    (format t "uart rx:~a ~a~%" (char-code char) char)
         (char-code char)))
 
 (defun uart-rx-status ()
@@ -719,8 +720,9 @@
 
 (defun mem-write-dword (dmem addr data &optional (write-callbacks nil))
   (assert (= 0 (logand addr 3)))
+  ;(format t "mem-write-dword a:~a d:~a~%" addr data)
   (if (execute-predicate-callbacks write-callbacks addr data)
-      (progn ;(format t "mem-write-dword a:~a d:~a~%" addr data)
+      (progn ;(format t "mem-write-dword do a:~a d:~a~%" addr data)
         (if (and (>= addr 0) (<= 65535))
             (progn
               (setf (aref dmem addr)
@@ -1382,8 +1384,8 @@
 
 (defun run-with-curses ( emul &optional symtab )
   (setq *print-pretty* nil)
-  (setf (processor-state-debug 
-          (emulated-system-processor emul)) nil)
+  ;(setf (processor-state-debug 
+  ;        (emulated-system-processor emul)) nil)
   (charms:with-curses ()
     (charms:disable-echoing)
     (charms:enable-raw-input)
@@ -1399,7 +1401,8 @@
         (emulated-system-processor emul)
             (lambda (addr data)
               (setf mem-was-written t)
-              (write-cb-write-win addr data output-window)))
+              (write-cb-write-win addr data output-window)
+              t))
       (charms:clear-window disasm-window)
       (charms:clear-window output-window)
       (charms:clear-window cpu-window)
