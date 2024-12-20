@@ -6,6 +6,8 @@ from modules.common.Common import copySignal
 from cpu_common import flop
 from sub_always import sub3_w_sig
 
+# byte 1: [ o o o o  r r r r ]
+# opcode field (upper 4 bits) in byte 1:
 OPC_A_RX      = 0  # Rx = A
 OPC_RX_A      = 1  # A = Rx
 OPC_LD_A_OFFS = 2  # Rx = M[A+nn].l
@@ -16,12 +18,12 @@ OPC_ST_A      = 6  # M[A].l = Rx
 OPC_ST_RX     = 7  # M[Rx].l = A
 OPC_MVI       = 8  # Rx = sex(nn)
 OPC_MVIA      = 9  # A = sex(n)
-OPC_JMP       = 10 # j #nn
+OPC_JMP       = 10 # j #nn, uses the r-field to encode type of jump
 OPC_ADD       = 11 # A = A + Rx
 OPC_SUB       = 12 # A = A - Rx
 OPC_AND       = 13 # A = A & Rx
 OPC_OR        = 14 # A = A | Rx
-OPC_NEXT      = 15
+OPC_NEXT      = 15 # -> r-field is an additional opcode field
 
 # op code jump
 OPCJ_J        = 0  # jump always
@@ -41,7 +43,9 @@ OPCJ_JZ16     = 13 # jump on zero         z16
 OPCJ_JNZ16    = 14 # jump on not zero    !z16
 OPCJ_JSR      = 15 # SRP = PC; PC = PC + sex(nn)
 
-# op code inner
+# op code inner, the r-field is used as additional opcodes
+# byte 1: [ o o o o  i i i i ]
+# oooo = OPC_NEXT iiii = OPCI_...
 OPCI_NOT     = 0  # A = ~A
 OPCI_LSL     = 1  # c = A, A = A << 1, A<0> = 0
 OPCI_LSR     = 2  # c = A, A = A >> 1, A<31> = 0
@@ -60,6 +64,9 @@ OPCI_J_A     = 14 # PC = A
 OPCI_NOP     = 15 # NOP
 
 # op code inner 2
+# byte 1: [ f f f f  i i i i ], ffff=OPC_NEXT iiii=OPCI_NEXT
+# byte 2: [ o o o o  r r r r ]
+# oooo = OPCI2_*
 OPCI2_ADC        = 0  # c,A = A + Rx + c
 OPCI2_UNUSED1    = 1
 OPCI2_LDB_A_OFFS = 2  # Rx = M[A+nn].b
@@ -68,7 +75,7 @@ OPCI2_LDB_RX     = 4  # A = M[Rx].b
 OPCI2_STB_A_OFFS = 5  # M[A+nn].b = Rx
 OPCI2_STB_A      = 6  # M[A].b = Rx
 OPCI2_STB_RX     = 7  # M[Rx].b = A
-OPCI2_NEXT       = 8
+OPCI2_NEXT       = 8  # -> r-field is an additional opcode field
 OPCI2_XOR        = 9  # A = A xor Rx
 OPCI2_LDW_A_OFFS = 10 # Rx = M[A+nn].w
 OPCI2_LDW_A      = 11 # Rx = M[A].w
@@ -77,6 +84,9 @@ OPCI2_STW_A_OFFS = 13 # M[A+nn].w = Rx
 OPCI2_STW_A      = 14 # M[A].w = Rx
 OPCI2_STW_RX     = 15 # M[Rx].w = A
 
+# op code inner 3
+# byte 1: [ f f f f  i i i i ], ffff=OPC_NEXT iiii=OPCI_NEXT
+# byte 2: [ g g g g  o o o o ], gggg=OPCI2_NEXT, oooo = OPCI3_*
 OPCI3_EI         = 0
 OPCI3_DI         = 1
 
