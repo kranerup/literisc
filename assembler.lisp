@@ -11,6 +11,7 @@
            :masm
            :set-program
            :hexdump
+           :output-binary-file 
 
            :srp :sp
            :r0 
@@ -74,7 +75,9 @@
            :st.w-r->a-rel
            :not-a   
            :lsl-a    
+           :A=A<<1
            :lsr-a    
+           :A=A>>1
            :asr-a    
            :pop-a    
            :mask-a-b 
@@ -122,8 +125,8 @@
 (defconstant R11 11) (defconstant P1 R11)
 (defconstant R12 12) (defconstant P2 R12)
 (defconstant R13 13) (defconstant P3 R13)
-(defconstant srp 15)
-(defconstant sp 14)
+(defconstant srp 14)
+(defconstant sp 15)
 
 ;;; lsb is returned at start of list
 (defun integer-to-byte-list (data bytes)
@@ -343,7 +346,9 @@
 
 (def-acc not-a    OPCI_NOT)
 (def-acc lsl-a    OPCI_LSL)
+(setf (symbol-function 'A=A<<1) #'lsl-a)
 (def-acc lsr-a    OPCI_LSR)
+(setf (symbol-function 'A=A>>1) #'lsr-a)
 (def-acc asr-a    OPCI_ASR)
 (def-acc pop-a    OPCI_POP_A)
 (def-acc mask-a-b OPCI_MASKB)
@@ -514,6 +519,13 @@
                             (code-char b)
                             #\.)))
         (format t"|~%")))
+
+(defun output-binary-file (mcode filename)
+  (with-open-file (stream filename
+                       :direction :output
+                       :element-type '(unsigned-byte 8)
+                       :if-exists :supersede)
+  (write-sequence mcode stream)))
 
 ;;;---------- unit tests --------------------
 ;(defmacro part3 (reg)
