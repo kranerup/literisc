@@ -2142,7 +2142,7 @@
       (progn
         (setf (processor-state-pc p) #x12345678)
         (i-jsr p 10)
-        (equal (aref (processor-state-r p) 15) #x12345678)) ; SRP
+        (equal (aref (processor-state-r p) SRP) #x12345678)) ; SRP
       (progn
         (equal (processor-state-pc p) (+ #x12345678 10))))))
   

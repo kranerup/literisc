@@ -577,7 +577,7 @@
                   (label l1)
                   (r->a srp)
                   (j-a))))
-        (mcode '(175 1 17 31 254)))
+        (mcode '(175 1 17 30 254)))
     (check (equal pjsr mcode))))
 
 (deftest test-misc-asm ()
@@ -745,7 +745,7 @@
            (label ret-prtstr)
            (r->a srp)
            (j-a))))
-        (mcode '( 128 0 175 2 160 126 248 64 250 1 130 127 144 193 165 7 17 114 145 176 0 160 111 31 254)))
+        (mcode '( 128 0 175 2 160 126 248 64 250 1 130 127 144 193 165 7 17 114 145 176 0 160 111 30 254)))
     (check (equal hello-world mcode))))
 ; (run-prog hello-world (string-to-mem "Hello World!") 200 t)
 

@@ -49,4 +49,4 @@ def tb():
 traceSignals.filename = 'trace'
 itb = traceSignals( tb ) 
 sim = Simulation( itb )
-sim.run( 10000 )
+sim.run( 100000 )
