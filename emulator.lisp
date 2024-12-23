@@ -257,9 +257,12 @@
         (char-code char)))
 
 (defun uart-rx-status ()
-  (if (pty-char-available-p *uart-fd*)
-      1
-      0))
+  (cond ((pty-char-available-p *uart-fd*)
+         ;(format t "uart rx s:1~%")
+         1)
+        (t
+         ;(format t "uart rx s:0~%")
+         0)))
 
 (defun uart-write-char-cb (addr data)
   ;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
