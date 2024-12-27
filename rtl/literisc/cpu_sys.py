@@ -117,7 +117,8 @@ def cpu_sys(
         ):
 
     # Memory map:
-    # 0 - 8191          : IMEM (and accessible from DMEM bus)
+    # 0 - X             : boot rom
+    # X - 8191          : IMEM (and accessible from DMEM bus)
     # 8192 - 8192+32768 : DMEM
     # 65536-100 - 65535 : IO
     perip_addr_bits = 16

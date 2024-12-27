@@ -1,6 +1,4 @@
-;(ql:quickload :str)
 (asdf:load-system :literisc)
-;(require :literisc)
 (use-package :lr-asm)
 (use-package :lr-disasm)
 

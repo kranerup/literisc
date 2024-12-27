@@ -27,11 +27,12 @@
 (defparameter CAN #x18)
 
 (format t "~%")
-(defvar program nil)
+(defparameter program nil)
 
-(defparameter *symtab* (make-hash-table))
+(defparameter *symtab* nil)
 
-(let* ((text (assemble
+(let* ((symtab (make-hash-table))
+       (text (assemble
            '(
              (Rx= dmem-end SP)
              (Rx= 0 R9) ; counter
@@ -43,18 +44,19 @@
              (A+=Rx R1) ; A = gpio-address
              (Rx=A R0) ; R0 = gpio-address
 
-             (A= 1)
+             (A= 2)
              (A+=Rx R9) ; inc counter
              (Rx=A R9)
              
              (M[Rx]=A R0) ; counter -> gpio
             
              (j the-loop)
-             ) nil *symtab*)))
+             ) nil symtab)))
 
              ;; ---------------------------------
        (disasm text)
        (format t "~%")
        (hexdump text)
        (output-binary-file text "asm.bin")
+       (setf *symtab* symtab)
        (setf program text))
