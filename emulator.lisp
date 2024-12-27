@@ -222,7 +222,7 @@
 (defpackage :lr-emulator
   (:use :cl :unit :lr-asm :lr-disasm
         :charms :charms-extra
-        :lr-opcodes :pty)
+        :lr-opcodes :pty :lr-soc)
   (:export :make-dmem :make-emulator :run-with-curses
            :run-with-curses-io :run-emul ))
 (in-package :lr-emulator)
@@ -232,15 +232,6 @@
 
 ;;; ==========================================================================
 ;;; I/O device emulation
-;;; definitions from cpu_sys.py and axi_slaves.py
-(defparameter io-base-address (- 65536 100))
-(defparameter io-hi 65535)
-;; io register offsets from base address
-(defparameter gpio_address 0)
-(defparameter serial_tx_data_address  1)
-(defparameter serial_tx_status_address  2)
-(defparameter serial_rx_data_address  3)
-(defparameter serial_rx_status_address  4)
 
 (defparameter *uart-fd* nil)
 

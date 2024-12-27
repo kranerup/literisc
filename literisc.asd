@@ -13,4 +13,5 @@
                (:file "assembler")
                (:file "disassembler")
                (:file "pty-lib")
+               (:file "soc")
                (:file "emulator")))

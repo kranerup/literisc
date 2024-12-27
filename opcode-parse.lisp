@@ -47,5 +47,5 @@ OPC_ST_A_OFFS = 5  # M[A+nn].l = Rx")
     (loop for (k . v) in opcodes
           do (let ((symbol (intern k)))
                (setf (symbol-value symbol) v)
-               (format t "sym:~a = ~a~%" k v)
+               ;(format t "sym:~a = ~a~%" k v)
                (proclaim `(special ,symbol))))))
