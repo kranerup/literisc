@@ -525,7 +525,7 @@
                        :direction :output
                        :element-type '(unsigned-byte 8)
                        :if-exists :supersede)
-  (write-sequence mcode stream)))
+    (write-sequence mcode stream)))
 
 ;;;---------- unit tests --------------------
 ;(defmacro part3 (reg)
