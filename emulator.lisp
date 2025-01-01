@@ -224,7 +224,7 @@
         :charms :charms-extra
         :lr-opcodes :pty :lr-soc)
   (:export :make-dmem :make-emulator :run-with-curses
-           :run-with-curses-io :run-emul ))
+           :run-with-curses-io :run-emul :get-reg))
 (in-package :lr-emulator)
 
 (load-opcodes 
@@ -334,6 +334,7 @@
   debug
   write-callback
   read-callback
+  break
   )
 (defun make-processor ()
  (make-processor-state :R (make-array '(16))
@@ -350,7 +351,8 @@
                                     :z16 0
                                     :debug t
                                     :write-callback nil
-                                    :read-callback nil))
+                                    :read-callback nil
+                                    :break nil))
 
 (defun processor-add-wr-callback (proc cb-func)
   (setf (processor-state-write-callback proc)
@@ -543,6 +545,7 @@
   (if (processor-state-debug ps) (format t "j A~%")))
 
 (defun i-j (ps offset)
+  (if (equal offset -2) (setf (processor-state-break ps) t))
   (setf (processor-state-pc ps)
         (+ (processor-state-pc ps)
            offset))
@@ -1241,10 +1244,12 @@
         (emulated-system-processor emul) 
           'write-cb-write-char)
     (dotimes (n max-instr)
-      (execute-instruction
-        (emulated-system-processor emul) 
-        (emulated-system-imem emul)
-        (emulated-system-dmem emul))))
+      (if (processor-state-break (emulated-system-processor emul))
+          (format t "break due to infinite loop")
+          (execute-instruction
+            (emulated-system-processor emul) 
+            (emulated-system-imem emul)
+            (emulated-system-dmem emul)))))
 
 (defvar *instr-row* 1)
 (defvar *pc-row* 3)
@@ -1460,6 +1465,8 @@
                        (processor-state-pc (emulated-system-processor emul))
                        breakpoints)
                      (setf run nil))
+                 (if (processor-state-break (emulated-system-processor emul))
+                     (return-from emulate))
                  (setf single-step nil))))))
 
 
@@ -1524,6 +1531,11 @@
 ;;; Y     14    j     A                 PC = A
 ;;; -     15
 ;;; -------------------------------------
+
+(defun get-reg (rnr e)
+  (let ((p (emulated-system-processor e)))
+    (aref (processor-state-r p) rnr)))
+  
 
 ;;; set registers to unique values and return the values as a list
 ;;; with A at the end
