@@ -12,6 +12,7 @@
            :set-program
            :hexdump
            :output-binary-file 
+           :get-label
 
            :srp :sp
            :r0 
@@ -104,6 +105,8 @@
            :Rx=
            :M[A]=Rx
            :M[A].b=Rx
+           :Rx=M[A].w
+           :Rx=M[A].b
            ))
 
 (in-package :lr-asm)
@@ -288,6 +291,7 @@
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)
   (opci2 OPCI2_LDB_A :reg r))
+(setf (symbol-function 'Rx=M[A].b) #'ld.b-a->r)
 
 (defun ld.b-r->a (r)
   (opci2 OPCI2_LDB_RX :reg r))
@@ -315,6 +319,7 @@
 
 (defun ld.w-a->r (r)
   (opci2 OPCI2_LDW_A :reg r))
+(setf (symbol-function 'Rx=M[A].w) #'ld.w-a->r)
 
 (defun ld.w-r->a (r)
   (opci2 OPCI2_LDW_RX :reg r))
@@ -463,6 +468,13 @@
     (if (equal (car item) 'label)
         (setf (gethash (symbol-value (cadr item)) symtab)
               (symbol-name (cadr item))))))
+
+(defun get-label (label-name symtab)
+  (let ((lbl (string-upcase label-name)))
+    (maphash (lambda (addr label) 
+               (when (equal label lbl) 
+                 (return-from get-label addr)))
+             symtab)))
 
 ;;; Calculate label positions until there are no more changes.
 (defun minimize-labels (aprog verbose)
