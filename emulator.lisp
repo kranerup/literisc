@@ -1246,7 +1246,9 @@
           'write-cb-write-char)
     (dotimes (n max-instr)
       (if (processor-state-break (emulated-system-processor emul))
-          (format t "break due to infinite loop")
+          (progn
+            ;(format t "break due to infinite loop")
+            (return-from run-emul nil))
           (execute-instruction
             (emulated-system-processor emul) 
             (emulated-system-imem emul)
@@ -2311,6 +2313,10 @@
            (mvi->r 0 0)
            (lr-asm::jsr prtstr)
            (label end)
+           (A= 0)
+           (A= 0)
+           (A= 0)
+           (A= 0)
            (j end)
            ; --- prtstr ---
            ; r0 - ptr to zero terminated string
@@ -2337,7 +2343,7 @@
     ;(let ((emul (make-emulator hw-prog dmem :shared-mem nil :debug nil)))
     ;  (format t "emulator:~a~%" emul)
     ;  (run-emul emul 180))))
-    ;(run-emul (make-emulator hw-prog dmem 0 nil) 180)))
+    ;(run-emul (make-emulator hw-prog dmem 0 nil) 180))
     (setf prog-output
           (with-output-to-string (*standard-output*)
             (run-emul (make-emulator hw-prog dmem :shared-mem nil :debug nil) 180)))
