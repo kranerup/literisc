@@ -107,6 +107,8 @@
            :M[A].b=Rx
            :Rx=M[A].w
            :Rx=M[A].b
+           :Rx=M[A]
+           :A=M[Rx]
            ))
 
 (in-package :lr-asm)
@@ -274,7 +276,9 @@
 
 ;;; ----- load / store 32-bit words
 (def-reg ld-a->r OPC_LD_A)
+(setf (symbol-function 'Rx=M[A]) #'ld-a->r)
 (def-reg ld-r->a OPC_LD_RX)
+(setf (symbol-function 'A=M[Rx]) #'ld-r->a)
 (def-reg st-r->a OPC_ST_A)
 (setf (symbol-function 'M[A]=Rx) #'st-r->a)
 (def-reg st-a->r OPC_ST_RX) ;;; 7   st A,Rx  M[Rx].l = A
