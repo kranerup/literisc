@@ -156,9 +156,10 @@ Leaf functions are called with "JSR func" and return is then done
 with the "func: ... SRP->A; J A" sequence.
 
 Non-leaf functions have to save the PC on the stack and then the
-sequence is "JSR func; func: STST SRP; ... POP A; J A"
+sequence is "JSR func; func: PUSH-SRP; ... POP A; J A"
 
-The PUSH Rx and POP Rx instructions are primarily for function calls.
+The PUSH Rx and POP Rx instructions are primarily for function calls
+(note that they push a sequence of registers R0 to Rn).
 
 Parameters P0-P3 are passed in R10-R13. Return value in R10.
 Parameters can be clobbered but registers R0-R9 are not allowed
@@ -167,7 +168,20 @@ to be clobbered.
 A function should use registers R0 and up for temporaries and
 save on stack at start of function.
 
-func: STST SRP; PUSH R4; ...use R0-4... POP R4; POP A; J A
+func: PUSH-SRP; PUSH R4; ...use R0-4... POP R4; POP A; J A
+
+Passing parameters on the stack.
+
+  PUSH R0 ; push parameter
+  JSR func
+  POP R0 ; deallocate parameter
+
+func:
+  PUSH-SRP
+  PUSH R2 ; save temporaries
+  A=M[SP-4] ; get the parameter
+...
+
 
 The boundary R0-R9 / R10-R13 is not required by the instruction
 and can be choosen differently.
