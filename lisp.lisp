@@ -28,12 +28,12 @@
 ;;;         6 - function
 ;;;         7 - primitive
 ;;;
-;;; cons: [ f1:16 | f2:16 ]
-;;;       [      f:32     ]
+;;; cons:    [ f1:16    |    f2:16 ]
+;;;          [         f:32        ]
 ;;;
-;;;          msb ... lsb
-;;;       [   f1  |    f2 ]
-;;; byte     3  2    1  0
+;;;             msb    ...    lsb
+;;;          [   f1     |       f2 ]
+;;; byte        3  2          1  0
 ;;;
 ;;;   type   |    f1    |     f2    |
 ;;;   -------+----------+-----------+
@@ -189,6 +189,7 @@
   (alloc n-read-sym-str 24)
 
   (alloc n-string-space 248)
+  (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
   (format t "n-string-space ~x~%" n-string-space)
 
@@ -231,7 +232,9 @@
 
     (when (not str-ptr)
       (set-program dmem str (+ n-string-space string-space-free))
-      (setf str-ptr string-space-free))
+      (setf str-ptr string-space-free)
+      (setq string-space-free (+ string-space-free (list-length str)))
+      (mem-write-word dmem n-string-space-free string-space-free))
 
     (if verbose (format t "add-symbol str at:~x~%" (+ n-string-space string-space-free)))
     (if verbose (format t "str-ptr ~x~%" str-ptr))
@@ -254,8 +257,6 @@
     (setf cons-free (1+ cons-free))
     (setf (aref dmem n-cons-free) (logand #xff cons-free))
     (setf (aref dmem (1+ n-cons-free)) (ash cons-free -8))
-    (setq string-space-free (+ string-space-free
-                               (list-length str)))
     cons-ptr))
 
 ;(set-program dmem (string-to-mem "symbol2") (+ (* sym-length n-sym-strings)))
@@ -293,34 +294,6 @@
     (setf cons-free (1+ cons-free))
     (mem-write-word dmem n-cons-free cons-free)
     cons-ptr))
-#|
-(defun add-prim (dmem sym-name asm-label &optional (verbose nil))
-  (let ((str (string-to-mem sym-name))
-        (str-ptr nil)
-        (code-ptr (get-label asm-label *symtab*))
-        (cons-ptr cons-free)) ; cons index, not address
-    (set-program dmem str (+ n-string-space string-space-free))
-    (if verbose (format t "add-prim str at:~x~%" (+ n-string-space string-space-free)))
-    (setf str-ptr string-space-free)
-    (if verbose (format t "str-ptr ~x~%" str-ptr))
-
-    (mem-write-byte dmem (+ n-cons-type cons-ptr) c-cons-primitive) ; one byte per cons-type item 
-    (if verbose (format t "cons-type ~d at ~x~%"  c-cons-primitive (+ n-cons-type cons-ptr)))
-
-    (set-program dmem
-                 (cons-bytes 
-                   (cons-cell str-ptr code-ptr))
-                 (+ n-cons (* cons-size cons-ptr)))
-    (if verbose (format t "cons-cell at ~x car:~x cdr:~x~%"
-                        (+ n-cons (* cons-size cons-ptr))
-                        str-ptr code-ptr))
-
-    (setf cons-free (1+ cons-free))
-    (mem-write-word dmem n-cons-free cons-free)
-    (setq string-space-free (+ string-space-free
-                               (list-length str)))
-    cons-ptr))
-|#
 
 (defun mem-write-dword ( dmem addr word32b )
   (assert (equal (logand addr 3) 0))
@@ -777,9 +750,14 @@
      (pop-r R3)
      (pop-a)
      (j-a)
-     
+
+     ;; new symbol, copy to string space and box the pointer
      (label l-parse-new-sym)
-     ;; new symbol TBD
+     (mvi->r n-read-sym-str P0)
+     (jsr l-copy-sym) ; copy string from read-sym-str to string space (P0->P0)
+     (jsr l-box-sym) ; wrap the pointer in a cons (P0->P0)
+
+     (j l-parse-ret)
 
      ;; -----------------
      ;; P0=number -> P0=cons
@@ -854,6 +832,46 @@
      (pop-r R1)
      (pop-a)
      (j-a)
+
+     ;; --- copy-sym ---------------------------
+     ;; input: P0 - reader buffer
+     ;; output: P0 - start of string in string space
+     (label l-copy-sym)
+     (push-r R4)
+
+     (Rx= n-string-space R0)
+     (Rx= n-string-space-free R1)
+     (A=M[Rx].w R1)
+     (Rx=A R2) ; save free index as start of string
+     (Rx=A R4) ; relative pointer
+
+     (A=Rx R1)
+     (A+=Rx R0)
+     (Rx=A R0) ; n-string-space + M[n-string-space-free], start of free string space, string dest
+
+     (label l-cp-str)
+     (A=M[Rx].b P0) ; src
+     (M[Rx].b=A R0) ; dst
+     (Rx=A R3) ; char
+     (A= 0)
+     (A-=Rx R3)
+     (jz l-end-cp) ; = 0? end of string
+    
+     ;; inc pointers
+     (A= 1) (A+=Rx P0) (Rx=A P0)
+     (A= 1) (A+=Rx R0) (Rx=A R0)
+     (A= 1) (A+=Rx R4) (Rx=A R4)
+     (j l-cp-str)
+    
+     (label l-end-cp)
+     (A=Rx R4)
+     (M[Rx].w=A R1) ; update n-string-space-free with the relative pointer
+     (A=Rx R2) (Rx=A P0) ; return start of string
+     
+     (pop-r R4)
+     (A=Rx SRP)
+     (j-a)
+     
 ))
 
 (defvar func-read nil)
@@ -926,6 +944,36 @@
      (r->a SRP)
      (j-a)
 
+     ;; --- alloc box -------------------------------
+     ;; input: -
+     ;; output: P0 - new allocated cons index
+     (label l-box)
+     (push-r R0)
+
+     (Rx= n-cons-free R0)
+     (A=M[Rx].w R0) ; A = next free cons
+     (Rx=A P0) ; return value = cons index
+     (A= 1)
+     (A+=Rx P0) ; cons-free += 1
+     (M[Rx].w=A R0)
+
+     (A=Rx SRP)
+     (j-a)
+     
+     ;; --- set box type -------------------------------
+     ;; input: P0 - cons index
+     ;;        P1 - type
+     ;; output: -
+     (label l-set-type)
+     (push-r R0)
+     
+     (Rx= n-cons-type R0)
+     (A=Rx P0)
+     (A+=Rx R0) ; A = n-cons-type + cons-idx
+     (M[A].b=Rx P1) ; n-cons-type[cons-idx] = P1
+
+     (A=Rx SRP) (j-a)
+
      ;; --- box integer -------------------------------
      ;; input: P0 - integer value
      ;; output: P0 - integer cons cell
@@ -943,7 +991,7 @@
      (mvi->r n-cons-type R1)
      (r->a R2)
      (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-cons
+     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-number
      ;; set value
      (A=Rx R2)
      (lsl-a) (lsl-a)
@@ -957,6 +1005,31 @@
      (r->a SRP)
      (j-a)
      
+     ;; --- box symbol string -------------------------------
+     ;; input: P0 - string
+     ;; output: P0 - integer cons cell
+     (label l-box-sym)
+     (push-srp)
+     (push-r R1)
+
+     (A=Rx P0) (Rx=A R0) ; R0 = string
+     (jsr l-box) ; -> P0=box
+     (A=Rx P0) (Rx=A R1) ; R1 = new box
+
+     ;; set type
+     (Rx= c-cons-symbol P1)
+     (jsr l-set-type)
+
+     ;; set value
+     (A=Rx R1) (Rx=A P0) ; P0 - cons
+     (A=Rx R0) (Rx=A P1) ; P1 - val (string)
+     (jsr l-rplcd)
+     
+     (A=Rx R1) (Rx=A P0) ; return new cons
+     
+     (pop-r R1)
+     (pop-a)
+     (j-a)
      ))
 
 (defvar func-div10 nil)
@@ -1214,27 +1287,8 @@
      ;; because we jumped the primitive must "pop-a/j-a" and will
      ;; then return to caller of l-apply using the srp on the stack.
      ))
-;;;
-;;;
-;;;  a=1 b=2
-;;;  (setf c (* (+ a b) 3))
-;;;  + args (a b)
-;;;    returns t1
-;;;  * args (t1 3)
-;;;    returns t2
-;;;  setf args (c t2)
-;;;    returns t2
-;;;
-;;;  eval (setf c ...)
-;;;    eval (* ...)
-;;;       eval (+ ...)
-;;;         prim+
-;;;           eval a
-;;;           eval b
-;;;           ret t1
-;;;       eval 3
-;;;  
-;;;
+
+
 (defparameter func-primitives
   '( ;; --- not -----------------------------------
      ;; input: P0=arg-list (but only one arg allowed)
@@ -1620,6 +1674,52 @@
      (jsr l-eval)
      (label end-fe) (j end-fe)))
 
+(defparameter test-re
+  '( ;; --- not -----------------------------------
+     (Rx= n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr l-read) ; P0 = result (cons-ptr)
+
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P1)
+
+     (jsr l-eval)
+     (label end-fe) (j end-fe)))
+
+(defparameter test-rep
+  '( ;; --- not -----------------------------------
+     (Rx= n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (jsr l-read) ; P0 = result (cons-ptr)
+
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P1)
+
+     (jsr l-eval)
+
+     (jsr l-print)
+     
+     (label end-fe) (j end-fe)))
 
 (defvar main nil)
 (setq main 
@@ -2151,9 +2251,9 @@
         (add-symbol dmem "nil" 0) ; nil must be symbol 0
         (add-symbol dmem "sym1" 0)
         (add-symbol dmem "sym2" 0)
-        ;;(set-program dmem (string-to-mem "(123 (sym2 sym1))") n-source-start))
+        (set-program dmem (string-to-mem "(123 (sym2 sym1))") n-source-start))
         ;;(set-program dmem (string-to-mem "123") n-source-start))
-        (set-program dmem (string-to-mem "sym1") n-source-start))
+        ;;(set-program dmem (string-to-mem "sym1") n-source-start))
     nil regression 10000)
     (format t "res: P0=~a~%" (get-reg P0 e)))
 
@@ -2430,7 +2530,7 @@
          (head (make-cons dmem func arg1)))
     head))
 
-;;; (not nil) -> t
+;;; (+ 10 11) -> 21
 (defun test-eval-add ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
@@ -2447,6 +2547,35 @@
     (format t "P0:~a~%"
             (aref (lr-emulator::processor-state-r proc) P0))))
 
+;;; (eval (read "(+ 10 11)"))
+(defun test-eval-read ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-re
+               #'(lambda (dmem proc)
+                   (init-lisp)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
+               nil regression 10000)
+    (print-conses dmem n-cons n-cons-type)
+    (format t "P0:~a~%"
+            (aref (lr-emulator::processor-state-r proc) P0))))
+
+;;; (print (eval (read "(+ 10 11)")))
+(defun test-eval-read-print ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-rep
+               #'(lambda (dmem proc)
+                   (init-lisp)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
+               nil regression 10000)
+    (print-conses dmem n-cons n-cons-type)
+    (format t "P0:~a~%"
+            (aref (lr-emulator::processor-state-r proc) P0))))
 
 (deftest test-lisp ()
   (combine-results

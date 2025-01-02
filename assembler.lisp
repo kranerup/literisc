@@ -91,12 +91,14 @@
            :stst-srp
            :push-srp
            :A=M[Rx].b
+           :A=M[Rx].w
            :A-=Rx
            :A+=Rx
            :A&=Rx
            :A\|=Rx
            :M[Rx]=A
            :M[Rx].b=A
+           :M[Rx].w=A
            :Rx=M[A+n].b
            :M[A+n].b=Rx
            :A=Rx
@@ -327,6 +329,7 @@
 
 (defun ld.w-r->a (r)
   (opci2 OPCI2_LDW_RX :reg r))
+(setf (symbol-function 'A=M[Rx].w) #'ld.w-r->a)
 
 (defun st.w-a->r (r)
   (opci2 OPCI2_STW_RX :reg r))
