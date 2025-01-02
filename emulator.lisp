@@ -85,9 +85,9 @@
 ;;;  +------------+
 ;;;  |    ...     |
 ;;;  +------------+
-;;;  |  R14 (SRP) |
+;;;  |  R14 (SRP) |  subroutine return pointer, points to instruction after jsr
 ;;;  +------------+
-;;;  |  R15 ( SP) |
+;;;  |  R15 ( SP) |  points to last pushed word
 ;;;  +------------+
 ;;;
 ;;;  CC: n v z c8 z8 c16 z16
@@ -185,7 +185,8 @@
 ;;;    5    pop   R0..Rn            for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
 ;;; 
 ;;; 
-;;; Variable size immediate data:
+;;; All instructions that use variable size immediate data use
+;;; the following format. The values are always sign extended.
 ;;; 
 ;;; 7-bits
 ;;;   [    instr        ]
