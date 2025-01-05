@@ -101,6 +101,8 @@
            :M[Rx].w=A
            :Rx=M[A+n].b
            :M[A+n].b=Rx
+           :Rx=M[A+n]
+           :M[A+n]=Rx
            :A=Rx
            :Rx=A
            :A=
@@ -289,10 +291,12 @@
 (defun ld-a-rel->r (offs r)
   (cons (opc OPC_LD_A_OFFS :reg r)
         (asm-immediate offs)))
+(setf (symbol-function 'Rx=M[A+n]) #'ld-a-rel->r)
 
 (defun st-r->a-rel (offs r)
   (cons (opc OPC_ST_A_OFFS :reg r)
         (asm-immediate offs)))
+(setf (symbol-function 'M[A+n]=Rx) #'st-r->a-rel )
 
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)
@@ -494,7 +498,7 @@
   (minimize-labels aprog verbose)
   (if symtab
       (progn
-        (list-labels aprog)
+        (when verbose (list-labels aprog))
         (create-symtab aprog symtab)))
   (if verbose (format t "--- assemble ---~%"))
   (loop with mcode := nil and curr-pc := 0
