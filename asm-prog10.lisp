@@ -4,7 +4,8 @@
 (in-package :cl-user)
 
 ;;; ---- xmodem boot loader --------
-
+;;; https://www.menie.org/georges/embedded/xmodem_specification.html
+;;;
 (defparameter imem-ram 500); just large enough to jump over rom
 (defparameter dmem 8192) ; start of dmem
 (defparameter dmem-end (logand (+ 8192 16383) #xfffffffc))
