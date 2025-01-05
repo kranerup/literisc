@@ -1469,7 +1469,7 @@
                        breakpoints)
                      (setf run nil))
                  (if (processor-state-break (emulated-system-processor emul))
-                     (return-from emulate))
+                     (setf run nil)) ;(return-from emulate))
                  (setf single-step nil))))))
 
 
