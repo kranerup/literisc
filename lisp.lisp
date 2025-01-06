@@ -187,10 +187,10 @@
   ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
   (format t "n-source-start: ~a~%" (alloc n-source-start 32))
   (format t "n-sym-string-start: ~a~%" (alloc n-sym-string-start 32))
-#|
-  (alloc-init n-print-sep        (string-to-mem "---
-"))
-|#
+
+  (alloc-init n-print-sep (string-to-mem
+                            (format nil "~C~C> " #\Return #\Linefeed)))
+
   (format t "n-read-sym-str: ~a~%" (alloc n-read-sym-str 24))
 
   (format t "n-string-space: ~a~%" (alloc n-string-space 248))
@@ -458,6 +458,7 @@
      ;; after seeing eof we only read from input stream
      (label l-at-eof)
      (jsr l-getchar) ; -> P0
+     (jsr l-putchar) ; echo
      (A=Rx R0) ; A = base-ptr
      (j l-update-read)
      ))
@@ -794,7 +795,7 @@
      (jnz l-parse-sym)
 
      (r->a P1) (a->r P0)
-     (jsr l-num-atom) ; P0=number -> P0=cons
+     (jsr l-box-int); P0=number -> P0=cons
      (j l-parse-ret)
      
      ;; symbol
@@ -820,30 +821,6 @@
 
      (j l-parse-ret)
 
-     ;; -----------------
-     ;; P0=number -> P0=cons
-     (label l-num-atom)
-     (push-srp)
-     (push-r R2)
-     (r->a P0) (a->r R0) ; R0=num
-     (jsr l-cons) ; P0 = cons-cell
-     (r->a P0) (a->r R1) ; R1=cons
-     (lsl-a)
-     (lsl-a)
-     (mvi->r n-cons R2)
-     (add-r R2) ; cons-addr = n-cons + cons-idx * 4
-     (st-r->a R0) ; cons-cell-content = number
-     ;; set type to num
-     ;; set type to cons
-     (mvi->r c-cons-number R0)
-     (mvi->r n-cons-type R1)
-     (r->a P0)
-     (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-number
-
-     (pop-r R2)
-     (pop-a)
-     (j-a)
      ;; -----------------
      ;; L list() {
      ;;   L x;
@@ -985,31 +962,12 @@
      
 (defvar func-cons nil)
 (setq func-cons
-  '( ;; --- cons -------------------------------------
-     ;; P0 - returns a ptr to a new allocated cons cell
-     (label l-cons)
-     (push-r R1)
-     (mvi->r n-cons-free R0)
-     (ld.w-r->a R0) ; A = next free cons
-     (a->r P0) ; return value
-     (mvi->a 1) ; cons-free += 1
-     (add-r P0)
-     (st.w-a->r R0)
-     ;; set type to cons
-     (mvi->r c-cons-cons R0)
-     (mvi->r n-cons-type R1)
-     (r->a P0)
-     (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-cons
-     (pop-r R1)
-     (r->a SRP)
-     (j-a)
-
+  '( 
      ;; --- alloc box -------------------------------
      ;; input: -
      ;; output: P0 - new allocated cons index
      (label l-box)
-     (push-r R0)
+     (push-r R1)
 
      (Rx= n-cons-free R0)
      (A=M[Rx].w R0) ; A = next free cons
@@ -1018,8 +976,17 @@
      (A+=Rx P0) ; cons-free += 1
      (M[Rx].w=A R0)
 
+     (Rx= nr-cons R1)
+     (A-=Rx R1)
+     (jz l-cons-full)
+
+     (pop-r R1)
      (A=Rx SRP)
      (j-a)
+
+     (label l-cons-full)
+     (j l-cons-full) ; just halt when we run out of cons cells
+     ;; eventually we'll garbage collect at this point
      
      ;; --- set box type -------------------------------
      ;; input: P0 - cons index
@@ -1033,37 +1000,56 @@
      (A+=Rx R0) ; A = n-cons-type + cons-idx
      (M[A].b=Rx P1) ; n-cons-type[cons-idx] = P1
 
-     (A=Rx SRP) (j-a)
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
+
+     ;; --- cons -------------------------------
+     ;; input: -
+     ;; output: P0 - returns a ptr to a new allocated cons cell
+     (label l-cons)
+
+     (push-srp)
+     (push-r R0)
+
+     (jsr l-box) ; -> P0=box
+     (A=Rx P0) (Rx=A R0) ; R0 = new box
+
+     ;; set type
+     (Rx= c-cons-cons P1)
+     (jsr l-set-type)
+
+     (A=Rx R0) (Rx=A P0) ; return new cons
+     
+     (pop-r R0)
+     (pop-a)
+     (j-a)
 
      ;; --- box integer -------------------------------
      ;; input: P0 - integer value
      ;; output: P0 - integer cons cell
      (label l-box-int)
-     (push-r R2)
 
-     (mvi->r n-cons-free R0)
-     (ld.w-r->a R0) ; A = next free cons
-     (a->r R2) ; return value = cons index
-     (mvi->a 1) ; cons-free += 1
-     (add-r r2)
-     (st.w-a->r R0)
-     ;; set type to integer
-     (mvi->r c-cons-number R0)
-     (mvi->r n-cons-type R1)
-     (r->a R2)
-     (add-r R1) ; A = n-cons-type + cons-idx
-     (st.b-r->a R0) ; n-cons-type[cons-idx] = c-cons-number
+     (push-srp)
+     (push-r R1)
+
+     (A=Rx P0) (Rx=A R0) ; R0 = save integer
+     (jsr l-box) ; -> P0=box
+     (A=Rx P0) (Rx=A R1) ; R1 = new box
+
+     ;; set type
+     (Rx= c-cons-number P1)
+     (jsr l-set-type)
+
      ;; set value
-     (A=Rx R2)
-     (lsl-a) (lsl-a)
-     (Rx= n-cons R0)
-     (A+=Rx R0)
-     (M[A]=Rx P0); n-cons[idx] = int
-     (A=Rx R2)
-     (Rx=A P0) ; return new cons
+     (A=Rx R1) (Rx=A P0) ; P0 - cons
+     (A=Rx R0) (Rx=A P1) ; P1 - val (integer)
+     (jsr l-setcons)
      
-     (pop-r R2)
-     (r->a SRP)
+     (A=Rx R1) (Rx=A P0) ; return new cons
+     
+     (pop-r R1)
+     (pop-a)
      (j-a)
      
      ;; --- box symbol string -------------------------------
@@ -1442,6 +1428,21 @@
      (A=Rx SRP)
      (j-a)
 
+     ;; --- setcons -----------------------------------
+     ;; input: P0=cons-index
+     ;;        P1=cons content as a 32-bit value
+     ;; output: -
+     (label l-setcons)
+     (push-r R0)
+     (Rx= n-cons R0)
+     (A=Rx P0)
+     (lsl-a)
+     (lsl-a)
+     (A+=Rx R0)
+     (M[A]=Rx P1)
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
      ))
 
 ;;; expected: "ssymb"
@@ -1807,8 +1808,18 @@
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
      (label l-repl)
+    
+     (Rx= n-print-sep P0)
+     (jsr prtstr)
      
      (jsr l-read) ; P0 = result (cons-ptr)
+
+     (A=Rx P0) (Rx=A R2)
+     (Rx= (char-code #\Return) P0)
+     (jsr l-putchar) 
+     (Rx= (char-code #\Linefeed) P0)
+     (jsr l-putchar) 
+     (A=Rx R2) (Rx=A P0)
 
      (Rx= n-global-env R0)
      (A=Rx R0)
@@ -2535,7 +2546,6 @@
 (defun print-conses (dmem n-cons n-cons-type)
   (let ((incr 4))
     (loop with addr := n-cons and taddr := n-cons-type and index := 0
-          for row from 1 to 20
           do (print-cons-cell dmem index addr taddr)
           until (equal (aref dmem taddr) c-cons-free)
           do (setf addr (+ addr incr))
