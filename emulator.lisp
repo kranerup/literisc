@@ -336,6 +336,7 @@
   write-callback
   read-callback
   break
+  last-instr
   )
 (defun make-processor ()
  (make-processor-state :R (make-array '(16))
@@ -353,7 +354,8 @@
                                     :debug t
                                     :write-callback nil
                                     :read-callback nil
-                                    :break nil))
+                                    :break nil
+                                    :last-instr nil))
 
 (defun processor-add-wr-callback (proc cb-func)
   (setf (processor-state-write-callback proc)
@@ -413,6 +415,7 @@
 ;    15 jsr #nn                 SRP = PC; PC = PC + sex(nn)
 
 (defun i-jsr (ps imm)
+  (setf (processor-state-last-instr ps) 'jsr)
   (setf (aref (processor-state-r ps) SRP)
         (processor-state-pc ps))
   (setf (processor-state-pc ps)
@@ -542,6 +545,7 @@
         (sex (processor-state-a ps) 16)))
  
 (defun i-j-a (ps)
+  (setf (processor-state-last-instr ps) 'j-a)
   (setf (processor-state-pc ps) (processor-state-a ps))
   (if (processor-state-debug ps) (format t "j A~%")))
 
@@ -1072,6 +1076,7 @@
          (param (logand instr0 15)))
     (progn
       (if (processor-state-debug p) (format t "pc:~d opc:~2d p:~d " pc opcode param))
+      (setf (processor-state-last-instr p) nil)
       (setf (processor-state-pc p) (+ pc 1))
       (cond ((equal opcode OPC_A_RX)
              (i-mv-a p param))
@@ -1426,6 +1431,7 @@
       (charms:refresh-window dump-window)
       (loop named emulate
             with single-step := nil and run := nil and update-windows := t
+                 and fcall-break := nil
             do (progn
                  (if update-windows
                      (progn
@@ -1449,6 +1455,10 @@
                    ((nil) nil)
                    ((#\Space) (setf single-step 1))
                    ((#\r) (setf run (not run)))
+                   ((#\n) (progn
+                            (setf run t)
+                            (setf single-step nil)
+                            (setf fcall-break t)))
                    ((#\R) (progn
                             (reset-processor (emulated-system-processor emul))
                             (setf update-windows t)))
@@ -1461,7 +1471,12 @@
                        (execute-instruction
                          (emulated-system-processor emul) 
                          (emulated-system-imem emul)
-                         (emulated-system-dmem emul))))
+                         (emulated-system-dmem emul))
+                       (let ((p (emulated-system-processor emul)))
+                         (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
+                           (setf run nil)
+                           (setf fcall-break nil)))
+                       ))
                  (if mem-was-written 
                      (dump-mem (emulated-system-dmem emul) dump-window))
                  (if (gethash 
