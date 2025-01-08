@@ -97,7 +97,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 1000))
+(setq dmem (make-dmem 2000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -167,6 +167,9 @@
 (defconstant c-cons-func      6)
 (defconstant c-cons-primitive 7)
 
+(defconstant c-cons-gc-mask #b00001000)
+(defconstant c-cons-type-mask #b00000111)
+
 (defparameter cons-type-names (make-hash-table))
 (setf (gethash 0 cons-type-names) "free")
 (setf (gethash 1 cons-type-names) "num")
@@ -197,7 +200,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 40)
+  (defparameter nr-cons 100)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -967,25 +970,37 @@
      ;; input: -
      ;; output: P0 - new allocated cons index
      (label l-box)
-     (push-r R1)
+     (push-r R2)
+
+     (label l-retry-alloc)
 
      (Rx= n-cons-free R0)
      (A=M[Rx].w R0) ; A = next free cons
      (Rx=A P0) ; return value = cons index
      (A= 1)
      (A+=Rx P0) ; cons-free += 1
-     (M[Rx].w=A R0)
-
+     (Rx=A R2) ; R2= cons-free
+     
      (Rx= nr-cons R1)
      (A-=Rx R1)
      (jz l-cons-full)
+     
+     (A=Rx R2) ; cons-free
+     (M[Rx].w=A R0) ; update n-cons-free
 
-     (pop-r R1)
+     (pop-r R2)
      (A=Rx SRP)
      (j-a)
 
      (label l-cons-full)
-     (j l-cons-full) ; just halt when we run out of cons cells
+     ;; prepare garbage collection
+     (push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
+     (jsr l-garbage-collect)
+     (pop-r R13)
+    
+     (j l-retry-alloc)
+     
+     ;(j l-cons-full) ; just halt when we run out of cons cells
      ;; eventually we'll garbage collect at this point
      
      ;; --- set box type -------------------------------
@@ -1075,6 +1090,149 @@
      (A=Rx R1) (Rx=A P0) ; return new cons
      
      (pop-r R1)
+     (pop-a)
+     (j-a)
+     ))
+
+(defparameter func-gc
+  '(
+     ;; --- mark and trace reachable -------------------------------
+     ;; -- input: P0 - cons to trace
+     öö 
+     ;; This is a recursive depth-first search. It could consume more
+     ;; stack than all the cons:es if all conses are in a long chain.
+     ;; This algorithm should be rewritten.
+     (label l-mark-trace)
+     (push-srp)
+     (push-r R3)
+
+     (Rx= (1- nr-cons) R0) ; R0 = last index in cons space (first index is 0)
+
+     ;; last cons index < cons index to trace -> outside of cons space, do not follow
+     (A=Rx R0)
+     (A-=Rx P0)
+     (jlo l-trace-no-more)
+
+     (Rx= n-cons-type R0)
+     (A=Rx P0) ; cons-idx
+     (A+=Rx R0) ; A = type-ptr = n-cons-type + cons-idx
+     (Rx=A R3) ; R3 = type-ptr
+     (Rx=M[A].b R2) ; R2 = type = n-cons-type[cons-idx]
+
+     (Rx= c-cons-gc-mask R1) ; gc-bit
+     (A=Rx R2) ; type
+     (A&=Rx R1) ; type & gc-bit
+     (A-=Rx R1)
+     (jz l-already-done)
+
+     ;; mark gc:ed before recursing to avoid endless loops
+     (Rx= c-cons-gc-mask R1) ; gc-bit
+     (A=Rx R1) ; gc-bit
+     (A\|=Rx R2) ; set gc-bit
+     (M[Rx].b=A R3) ; write back to n-cons-type[idx]
+
+     (Rx= c-cons-type-mask R1) ; type-mask
+
+     (A=Rx R1)
+     (A&=Rx R2) ; type w/o gc bit
+     (Rx=A R0) ; R0 = type-no-gc
+
+     ;; cons and symbol are the only types that contains cons pointer
+     (A= c-cons-cons)
+     (A-=Rx R0)
+     (jz l-trace-cons)
+
+     (A= c-cons-symbol)
+     (A-=Rx R0)
+     (jz l-trace-symbol)
+
+     ;; no cons pointers in this type
+     (label l-trace-no-more)
+
+     (label l-already-done)
+     (pop-r R3)
+     (pop-a)
+     (j-a)
+
+     ;; --- cons cell: trace car then cdr
+     (label l-trace-cons)
+     (A=Rx P0) (Rx=A R0) ; save P0 cons idx
+     (jsr l-car)
+     (jsr l-mark-trace)
+     (A=Rx R0) (Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-mark-trace)
+     (j l-trace-no-more)
+
+     ;; --- symbol cell: trace car then cdr
+     (label l-trace-symbol)
+     (jsr l-car)
+     (jsr l-mark-trace)
+     (j l-trace-no-more)
+
+     ;; --- garbage collector -------------------------------
+     ;; input: -
+     ;; output: -
+     (label l-garbage-collect)
+     (push-r R4)
+
+     ;; --- anything reachable from the global env can not be garbage.
+     (label l-trace-env)
+     (push-srp)
+     (push-r R0)
+
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P0)
+
+     (jsr l-mark-trace)
+
+     (pop-r R0)
+     (pop-a)
+     (j-a)
+
+
+     ;; --- scan the stack for values that might be cons cells. These can
+     ;;     not be compacted/moved since we can not know if the value just coincide
+     ;;     with a cons.
+     (label l-trace-stack)
+     (push-srp)
+     
+     (Rx= n-stack-highest R1) ; R1 = sp-idx starting at stack bottom
+     (A=Rx SP) (Rx=A R0) ; R0 = current stack top
+     (Rx= (1- nr-cons) R2) ; R2 = last index in cons space (first index is 0)
+
+     (label l-stack-loop)
+     (A=Rx R1) ; sp-idx
+     (Rx=M[A] R3) ; stack word
+
+     ;; last cons index < stack word
+     (A=Rx R2)
+     (A-=Rx R3)
+     (jlo l-next-item)
+
+     (label l-possible-cons)
+     ;; TODO: here we should sanity check that cons type isn't free
+     (A=Rx R3) (Rx=A P0)
+     
+     ;; --- cons cell: trace car then cdr
+     (jsr l-mark-trace)
+
+     ;(jsr l-car)
+     ;(jsr l-mark-trace)
+     ;(A=Rx R3) (Rx=A P0)
+     ;(jsr l-cdr)
+     ;(jsr l-mark-trace)
+     
+     
+     (label l-next-item)
+     (A= -4)
+     (A+=Rx R1) ; sp-idx-=4
+     (Rx=A R1)
+
+     (A-=Rx R0) ; stack top
+     (jnz l-stack-loop)
+     
      (pop-a)
      (j-a)
      ))
@@ -1959,8 +2117,8 @@
      (j-a)))
 
 
-(defparameter char-output :emul-io) ; :uart-io / :emul-io
-(defparameter char-input :emul-io) ; :uart-io / :emul-io
+(defparameter char-output :uart-io) ; :uart-io / :emul-io
+(defparameter char-input :uart-io) ; :uart-io / :emul-io
 
 (defparameter func-putchar
   (cond ((equal char-output :emul-io)
@@ -2269,7 +2427,7 @@
               func-putchar func-getchar
               func-find-symbol func-cdr
               func-car func-parse func-rplca func-rplcd
-              func-cons func-print-symbol func-print
+              func-cons func-gc func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
               func-apply func-primitives ))
@@ -2350,7 +2508,7 @@
 
 
 ;;; will read from pty, should input " symbol " to pty
-(defparameter pty "/dev/pts/11")
+(defparameter pty "/dev/pts/6")
 
 (defun t13 ( &optional (regression nil) )
   (init-lisp)
@@ -2473,6 +2631,7 @@
     (format t "res: P0=~a~%" (get-reg P0 e)))
 
 
+
 ;;; expected: "nil"
 (defun t15 ( &optional (regression nil) )
   (asm-n-run test-print-nil
@@ -2482,6 +2641,59 @@
 
 (deftest run-t15 () (run-test #'t15 "nil"))
 
+(defparameter test-trace-env
+  '( (Rx= n-stack-highest SP)
+
+     (Rx= 100000 R0)
+     (Rx= 100000 R1)
+     (Rx= 100000 R2)
+     (Rx= 100000 R3)
+     (Rx= 100000 R4)
+     (Rx= 100000 R5)
+     (Rx= 100000 R6)
+     (Rx= 100000 R7)
+     (Rx= 100000 R8)
+     (Rx= 100000 R9)
+     (Rx= 100000 R10)
+     (Rx= 100000 R11)
+     (Rx= 100000 R12)
+    
+     (Rx= 12321 P0)
+     (jsr l-box-int) ; reachable
+     (A=Rx P0) (Rx=A R1)
+     (Rx= 12322 P0)
+     (jsr l-box-int) ; reachable
+     (A=Rx P0) (Rx=A R2)
+     (Rx= 12323 P0)
+     (jsr l-box-int) ; reachable
+     (A=Rx P0) (Rx=A R3)
+     (Rx= 12324 P0)
+     (jsr l-box-int) ; unreachable, not stored in any reg
+     (Rx= 12325 P0)
+     (jsr l-box-int) ; reachable
+
+
+     (push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
+     (jsr l-trace-stack)
+     (pop-r R13)
+
+     (jsr l-trace-env)
+
+     (label end-prn)
+     (j end-prn)))
+
+(defun t16 ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-trace-env
+               #'(lambda (dmem proc)
+                   (init-lisp)
+                   (default-env dmem))
+               nil regression 10000)
+    (print-conses dmem n-cons n-cons-type)
+    (format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
+    (print-stack dmem 
+                 n-stack-highest
+                 (aref (lr-emulator::processor-state-r proc) SP))))
 
 (defun dump-cons (dmem n-cons n-cons-type)
   (let ((incr 4))
@@ -2532,9 +2744,15 @@
       (format t "c:~a" res)
       (format t "n:~a" res))))
 
+(defun print-gc-state (dmem cons-index)
+  (if (not (equal 0 (logand c-cons-gc-mask (aref dmem (+ n-cons-type cons-index)))))
+      "gc" "  "))
+                     
+
 (defun print-cons-cell (dmem cons-index cons-addr t-addr)
   (let ((cons-type (logand 7 (aref dmem t-addr))))
-    (format t "~4a: ~a " cons-index 
+    (format t "~4a: ~a ~a " cons-index 
+            (print-gc-state dmem cons-index)
             (gethash cons-type cons-type-names))
     (cond ((equal c-cons-symbol cons-type) (print-symbol dmem cons-index))
           ((equal c-cons-free cons-type) t)
@@ -2561,6 +2779,11 @@
     (setf env (push-env dmem (add-symbol dmem "symbol2" numval) env))
     (setf env (push-env dmem (add-symbol dmem "symbol" 0) env))
     (mem-write-word dmem n-global-env env)))
+
+(defun print-stack (dmem stack-top stack-bottom)
+  (loop for ptr from stack-top downto stack-bottom by 4
+        do (let ((stack-val (lr-emulator::mem-read-dword dmem ptr)))
+             (format t "~5d: ~8x ~d~%" ptr stack-val stack-val))))
 
 ;;; search env for a symbol and returns it's value
 ;;; searching for "symbol2" and returns cons index to num 1234
