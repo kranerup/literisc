@@ -167,8 +167,10 @@
 (defconstant c-cons-func      6)
 (defconstant c-cons-primitive 7)
 
-(defconstant c-cons-gc-mask #b00001000)
-(defconstant c-cons-type-mask #b00000111)
+(defconstant c-cons-gc-mask     #b00001000)
+(defconstant c-cons-pin-mask    #b00010000)
+(defconstant c-cons-marked-mask #b00011000)
+(defconstant c-cons-type-mask   #b00000111)
 
 (defparameter cons-type-names (make-hash-table))
 (setf (gethash 0 cons-type-names) "free")
@@ -181,50 +183,6 @@
 (setf (gethash 7 cons-type-names) "prim")
 
 (defvar n-stack-highest nil)
-
-(defun init-lisp ()
-  (setq dmem-allocated 0)
-  (loop for idx from 0 to (1- (length dmem))
-        do (setf (aref dmem idx) 0))
-  ;;(alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
-  ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
-  (format t "n-source-start: ~a~%" (alloc n-source-start 32))
-  (format t "n-sym-string-start: ~a~%" (alloc n-sym-string-start 32))
-
-  (alloc-init n-print-sep (string-to-mem
-                            (format nil "~C~C> " #\Return #\Linefeed)))
-
-  (format t "n-read-sym-str: ~a~%" (alloc n-read-sym-str 24))
-
-  (format t "n-string-space: ~a~%" (alloc n-string-space 248))
-  (alloc-words n-string-space-free 1) ; index to next free byte in string space
-  (setq string-space-free 0)
-
-  (defparameter nr-cons 100)
-  (defparameter cons-size 4) ; bytes
-
-  (alloc-words n-cons-free 1) ; cons index to next free cons cell
-  (set-program dmem '(0 0) n-cons-free)
-
-  (format t "n-cons: ~a~%" (alloc-dwords n-cons nr-cons))
-  (setq n-cons-end dmem-allocated)
-  (format t "n-cons-type: ~a~%" (alloc n-cons-type nr-cons)) ; holds type of each cons cell, one byte per cons
-  (setq cons-free 0) ; points to entry nr in n-cons table
-
-  ;; use-unread, last-read, read-ptr
-  (alloc-dwords reader-state 4)
-  (defparameter rs-use-unread 0)
-  (defparameter rs-last-read 4)
-  (defparameter rs-read-ptr 8)
-  (defparameter rs-eof 12)
-
-  (alloc-words n-global-env 1)
-  
-  (alloc-dwords n-stack 50)
-  (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
-
-
-(init-lisp)
 
 ;;; -- sym-strings --
 (defun add-symbol (dmem sym-name value-ptr &optional (verbose nil))
@@ -373,6 +331,52 @@
         do (setf i (print-string dmem i))
         do (format t "~%")))
 
+;; ----------------------------------------------------------------------------
+(defun init-lisp ()
+  (setq dmem-allocated 0)
+  (loop for idx from 0 to (1- (length dmem))
+        do (setf (aref dmem idx) 0))
+  ;;(alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
+  ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
+  (format t "n-source-start: ~a~%" (alloc n-source-start 32))
+  (format t "n-sym-string-start: ~a~%" (alloc n-sym-string-start 32))
+
+  (alloc-init n-print-sep (string-to-mem
+                            (format nil "~C~C> " #\Return #\Linefeed)))
+
+  (format t "n-read-sym-str: ~a~%" (alloc n-read-sym-str 24))
+
+  (format t "n-string-space: ~a~%" (alloc n-string-space 248))
+  (alloc-words n-string-space-free 1) ; index to next free byte in string space
+  (setq string-space-free 0)
+
+  (defparameter nr-cons 100)
+  (defparameter cons-size 4) ; bytes
+
+  (alloc-words n-cons-free 1) ; cons index to next free cons cell
+  (mem-write-word dmem n-cons-free 0)
+
+  (format t "n-cons: ~a~%" (alloc-dwords n-cons nr-cons))
+  (setq n-cons-end dmem-allocated)
+  (format t "n-cons-type: ~a~%" (alloc n-cons-type nr-cons)) ; holds type of each cons cell, one byte per cons
+  (setq cons-free 0) ; points to entry nr in n-cons table
+
+  ;; use-unread, last-read, read-ptr
+  (alloc-dwords reader-state 4)
+  (defparameter rs-use-unread 0)
+  (defparameter rs-last-read 4)
+  (defparameter rs-read-ptr 8)
+  (defparameter rs-eof 12)
+
+  (alloc-words n-global-env 1)
+  
+  (alloc-dwords n-stack 50)
+  (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
+
+
+(init-lisp)
+
+;;; ----------------------------------------------------------------------------
 ;;; read-c keeps it's state in global memory variables relative
 ;;; reader-state base address.
 ;;; 
@@ -969,39 +973,69 @@
      ;; --- alloc box -------------------------------
      ;; input: -
      ;; output: P0 - new allocated cons index
+     ;;
+     ;; We always start searching for a free cons from
+     ;; n-cons-free pointer and upwards. Wrapping to 0
+     ;; at end of cons space. 
      (label l-box)
-     (push-r R2)
+     (push-r R4)
+
+     (Rx= n-cons-free R0)
+     (A=M[Rx].w R0) ; A = next cons to search from
+     (Rx=A P0) ; return value = cons index
+     (Rx=A R4) ; original start point
 
      (label l-retry-alloc)
 
-     (Rx= n-cons-free R0)
-     (A=M[Rx].w R0) ; A = next free cons
-     (Rx=A P0) ; return value = cons index
+     ;; increment for next allocation
      (A= 1)
      (A+=Rx P0) ; cons-free += 1
-     (Rx=A R2) ; R2= cons-free
-     
+     (Rx=A R2) ; R2= next cons-free
+
      (Rx= nr-cons R1)
      (A-=Rx R1)
-     (jz l-cons-full)
+     (jnz l-no-wrap)
+
+     (Rx= 0 R2) ; wrap to 0
+
+     (label l-no-wrap)
+
+     (A=Rx R2) ; next cons to try
+     (A-=Rx R4) ; start cons
+     (jnz l-cont) ; did we reached the start point without finding any free cons
      
-     (A=Rx R2) ; cons-free
+     (label l-out-of-mem) ; halt when we're out of memory
+     (j l-out-of-mem)
+
+     (label l-cont)
+ 
+     (Rx= n-cons-type R1)
+     (A=Rx R1)
+     (A+=Rx P0)
+     (Rx=M[A].b R3) ; R3 = cons-type
+     ; is the cons cell free?
+     (A= c-cons-free)
+     (A-=Rx R3)
+     (jz l-is-free)
+  
+     (A=Rx R2) (Rx=A P0) ; cons index
+     
+     (j l-retry-alloc)
+     
+     (label l-is-free)
+
+     (A=Rx R2) ; next cons-free
      (M[Rx].w=A R0) ; update n-cons-free
 
-     (pop-r R2)
+     (pop-r R4)
      (A=Rx SRP)
      (j-a)
 
      (label l-cons-full)
-     ;; prepare garbage collection
-     (push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
+
      (jsr l-garbage-collect)
-     (pop-r R13)
     
      (j l-retry-alloc)
-     
-     ;(j l-cons-full) ; just halt when we run out of cons cells
-     ;; eventually we'll garbage collect at this point
      
      ;; --- set box type -------------------------------
      ;; input: P0 - cons index
@@ -1092,16 +1126,26 @@
      (pop-r R1)
      (pop-a)
      (j-a)
+
+     ;;---------------------------------
+     ;; search for free cons cell
+     (label l-find-free)
+     (push-r R2)
+     
+     (pop-r R2)
+     (A=Rx SRP)
+     (j-a)
+     
      ))
 
 (defparameter func-gc
   '(
      ;; --- mark and trace reachable -------------------------------
      ;; -- input: P0 - cons to trace
-     öö 
+     ;; --        P1 - mark method, 1 - pin, 0 - normal (must be passed unmodified)
      ;; This is a recursive depth-first search. It could consume more
      ;; stack than all the cons:es if all conses are in a long chain.
-     ;; This algorithm should be rewritten.
+     ;; This algorithm should be rewritten to use pointer reversal.
      (label l-mark-trace)
      (push-srp)
      (push-r R3)
@@ -1113,29 +1157,34 @@
      (A-=Rx P0)
      (jlo l-trace-no-more)
 
-     (Rx= n-cons-type R0)
-     (A=Rx P0) ; cons-idx
-     (A+=Rx R0) ; A = type-ptr = n-cons-type + cons-idx
-     (Rx=A R3) ; R3 = type-ptr
-     (Rx=M[A].b R2) ; R2 = type = n-cons-type[cons-idx]
+     ;(Rx= n-cons-type R0)
+     ;(A=Rx P0) ; cons-idx
+     ;(A+=Rx R0) ; A = type-ptr = n-cons-type + cons-idx
+     ;(Rx=A R3) ; R3 = type-ptr
+     ;(Rx=M[A].b R2) ; R2 = type = n-cons-type[cons-idx]
 
-     (Rx= c-cons-gc-mask R1) ; gc-bit
-     (A=Rx R2) ; type
-     (A&=Rx R1) ; type & gc-bit
-     (A-=Rx R1)
-     (jz l-already-done)
+     ;(Rx= c-cons-gc-mask R1) ; gc-bit
+     ;(A=Rx R2) ; type
+     ;(A&=Rx R1) ; type & gc-bit
+     ;(A-=Rx R1)
+     ;(jz l-already-done)
 
-     ;; mark gc:ed before recursing to avoid endless loops
-     (Rx= c-cons-gc-mask R1) ; gc-bit
-     (A=Rx R1) ; gc-bit
-     (A\|=Rx R2) ; set gc-bit
-     (M[Rx].b=A R3) ; write back to n-cons-type[idx]
+     ;;; mark gc:ed before recursing to avoid endless loops
+     ;(Rx= c-cons-gc-mask R1) ; gc-bit
+     ;(A=Rx R1) ; gc-bit
+     ;(A\|=Rx R2) ; set gc-bit
+     ;(M[Rx].b=A R3) ; write back to n-cons-type[idx]
 
+     (jsr l-mark) ; P0,P1 -> P0,P1,P2(type),P3(marked)
+     (A= 0)
+     (A-=Rx P3) ; already marked?
+     (jnz l-already-done)
+     
      (Rx= c-cons-type-mask R1) ; type-mask
 
-     (A=Rx R1)
-     (A&=Rx R2) ; type w/o gc bit
-     (Rx=A R0) ; R0 = type-no-gc
+     (A=Rx R1) ; mask
+     (A&=Rx P2) ; type w/o gc bit
+     (Rx=A R0) ; R0 = type-wo-gc
 
      ;; cons and symbol are the only types that contains cons pointer
      (A= c-cons-cons)
@@ -1170,12 +1219,78 @@
      (jsr l-mark-trace)
      (j l-trace-no-more)
 
+     
+     ;; --- mark --------------------------------------
+     ;; -- input: P0 - cons to mark
+     ;; --        P1 - mark method, 1 - pin, 0 - normal  
+     ;; -- output: P0 - unchanged
+     ;;            P1 - unchanged
+     ;;            P2 - type
+     ;;            P3 - already marked -> P2 != 0 
+     
+     ;; Pin marking means that the node is reachable but that
+     ;; it can not be moved since it is found through the stack
+     ;; scan.
+     ;; Normal marking means that the node is reachable and movable.
+     ;; Pin marking overwrites normal mark but normal marking must not overwrite pin mark.
+     ;; 
+     (label l-mark)
+     (push-r R3)
+
+     (Rx= n-cons-type R0)
+     (A=Rx P0) ; cons-idx
+     (A+=Rx R0) ; A = type-ptr = n-cons-type + cons-idx
+     (Rx=A R3) ; R3 = type-ptr
+     (Rx=M[A].b R2) ; R2 = type = n-cons-type[cons-idx]
+
+     (Rx= c-cons-marked-mask R0)
+     (A=Rx R2) ; type
+     (A&=Rx R0) ; & mask
+     (Rx=A P3) ; return value, !=0 if marked
+
+     ;; which type of mark?
+     (A= 0)
+     (A-=Rx P1) ; P1=mark-method
+     (jz l-normal-mark)
+     
+     (label l-pin-mark)
+
+     (Rx= c-cons-pin-mask R1) ; pin-bit
+     (j l-do-mark)
+     
+     (label l-normal-mark)
+
+     (Rx= c-cons-gc-mask R1) ; gc-bit
+
+     (label l-do-mark)
+     (A=Rx R1)
+     (A\|=Rx R2) ; set bit
+     (M[Rx].b=A R3) ; write back to n-cons-type[idx]
+
+     (Rx=A P2) ; return type
+
+     (pop-r R3)
+     (A=Rx SRP)
+     (j-a)
+
      ;; --- garbage collector -------------------------------
      ;; input: -
      ;; output: -
      (label l-garbage-collect)
-     (push-r R4)
+     (push-srp)
 
+     (push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
+     (jsr l-trace-stack)
+     (pop-r R13)
+
+     (jsr l-trace-env)
+
+     (jsr l-free)
+
+     (pop-a)
+     (j-a)
+
+     ;; --- trace roots from env --------------------------------
      ;; --- anything reachable from the global env can not be garbage.
      (label l-trace-env)
      (push-srp)
@@ -1185,6 +1300,8 @@
      (A=Rx R0)
      (Rx=M[A].w P0)
 
+     (A= 0) ; normal mark
+     (Rx=A P1)
      (jsr l-mark-trace)
 
      (pop-r R0)
@@ -1216,15 +1333,10 @@
      (A=Rx R3) (Rx=A P0)
      
      ;; --- cons cell: trace car then cdr
+     (A= 1) ; pin mark
+     (Rx=A P1)
      (jsr l-mark-trace)
 
-     ;(jsr l-car)
-     ;(jsr l-mark-trace)
-     ;(A=Rx R3) (Rx=A P0)
-     ;(jsr l-cdr)
-     ;(jsr l-mark-trace)
-     
-     
      (label l-next-item)
      (A= -4)
      (A+=Rx R1) ; sp-idx-=4
@@ -1235,6 +1347,69 @@
      
      (pop-a)
      (j-a)
+
+     ;; -------------------------------------------------------------
+     ;; 
+     (label l-free)
+     (push-srp)
+     (push-r R6)
+
+     (Rx= 0 R0) ; cons idx 
+     (Rx= (1- (+ n-cons-type nr-cons)) R1) ; address of last type
+     (Rx= n-cons-type R2) ; type ptr
+     (Rx= c-cons-marked-mask R3) ; the pin/gc bits
+     (Rx= c-cons-pin-mask R4) ; pin bit
+     (Rx= 0 P1) ; value for l-setcons call
+
+     ;;; ----
+     (label l-free-loop)
+     
+     (A=M[Rx].b R2) ; M[type-ptr]
+     (Rx=A R6) ; curr type 
+     (A&=Rx R3) ; & marked-mask - get pin/gc bits
+     (Rx= 0 R5)
+     (A-=Rx R5) ; pin/gc==0?
+     (jz l-can-free)
+     
+     (label l-in-use)
+     ;; must remove gc bits
+     (A= c-cons-type-mask)
+     (A&=Rx R6) ; type without gc bits
+     (M[Rx].b=A R2) ; write back type with cleared gc state
+
+     (j l-next-type)
+    
+     (label l-can-free)
+     (A= c-cons-free)
+     (M[Rx].b=A R2) ; write back type with cleared gc state
+
+     (A=Rx R0) (Rx=A P0)
+     (jsr l-setcons)
+    
+     ;--- next
+     (label l-next-type)
+     (A=Rx R2) ; last type
+     (A-=Rx R1) ; type ptr == last type
+     (jz l-free-done)
+     
+     ; incr R0 cons idx
+     (Rx= 1 R6)
+     (A=Rx R0)
+     (A+=Rx R6)
+     (Rx=A R0)
+    
+     ; incr R2 type ptr
+     (A=Rx R2)
+     (A+=Rx R6)
+     (Rx=A R2)
+
+     (j l-free-loop)
+     
+     (label l-free-done)
+     (pop-r R6)
+     (pop-a)
+     (j-a)
+     
      ))
 
 (defvar func-div10 nil)
@@ -2117,8 +2292,8 @@
      (j-a)))
 
 
-(defparameter char-output :uart-io) ; :uart-io / :emul-io
-(defparameter char-input :uart-io) ; :uart-io / :emul-io
+(defparameter char-output :emul-io) ; :uart-io / :emul-io
+(defparameter char-input :emul-io) ; :uart-io / :emul-io
 
 (defparameter func-putchar
   (cond ((equal char-output :emul-io)
@@ -2445,7 +2620,7 @@
 
 (defun run-test (test &optional (expected-print nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 1000))
+    (setq dmem (make-dmem 2000))
     (init-lisp))
   (let ((printed 
     (with-output-to-string (*standard-output*)
@@ -2641,6 +2816,7 @@
 
 (deftest run-t15 () (run-test #'t15 "nil"))
 
+;;; needs to set nr-cons to 30 to test wrapping during allocation
 (defparameter test-trace-env
   '( (Rx= n-stack-highest SP)
 
@@ -2657,7 +2833,17 @@
      (Rx= 100000 R10)
      (Rx= 100000 R11)
      (Rx= 100000 R12)
-    
+   
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     
      (Rx= 12321 P0)
      (jsr l-box-int) ; reachable
      (A=Rx P0) (Rx=A R1)
@@ -2673,11 +2859,34 @@
      (jsr l-box-int) ; reachable
 
 
-     (push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
-     (jsr l-trace-stack)
-     (pop-r R13)
+     ;;(push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
+     ;;(jsr l-trace-stack)
+     ;;(pop-r R13)
 
-     (jsr l-trace-env)
+     ;;(jsr l-trace-env)
+
+     ;;(jsr l-free)
+
+     (jsr l-garbage-collect)
+     
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+     (jsr l-box)
+
+     (Rx= 12326 P0)
+     (jsr l-box-int) ; reachable
+     (A=Rx P0) (Rx=A R4)
+     (Rx= 12327 P0)
+     (jsr l-box-int) ; reachable
+     (A=Rx P0) (Rx=A R5)
+
+     (jsr l-garbage-collect)
 
      (label end-prn)
      (j end-prn)))
@@ -2687,7 +2896,8 @@
     (asm-n-run test-trace-env
                #'(lambda (dmem proc)
                    (init-lisp)
-                   (default-env dmem))
+                   (default-env dmem)
+                   (mem-write-word dmem n-cons-free 0))
                nil regression 10000)
     (print-conses dmem n-cons n-cons-type)
     (format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
@@ -2745,9 +2955,11 @@
       (format t "n:~a" res))))
 
 (defun print-gc-state (dmem cons-index)
-  (if (not (equal 0 (logand c-cons-gc-mask (aref dmem (+ n-cons-type cons-index)))))
-      "gc" "  "))
-                     
+  (let ((gcbits (logand c-cons-marked-mask (aref dmem (+ n-cons-type cons-index)))))
+    (cond
+      ((equal 0 gcbits) "  ")
+      ((equal 0 (logand c-cons-pin-mask gcbits)) "gc")
+      (t "p "))))
 
 (defun print-cons-cell (dmem cons-index cons-addr t-addr)
   (let ((cons-type (logand 7 (aref dmem t-addr))))
@@ -2760,12 +2972,16 @@
           ((equal c-cons-primitive cons-type) (print-number dmem cons-index t))
           ((equal c-cons-cons cons-type) (print-cons dmem cons-index)))
     (format t "~%")))
+
+(defun rest-free-p (dmem index)
+  (every #'(lambda (item) (equal c-cons-free item))
+         (subseq dmem index (+ n-cons-type nr-cons))))
   
 (defun print-conses (dmem n-cons n-cons-type)
   (let ((incr 4))
     (loop with addr := n-cons and taddr := n-cons-type and index := 0
           do (print-cons-cell dmem index addr taddr)
-          until (equal (aref dmem taddr) c-cons-free)
+          until (rest-free-p dmem taddr)
           do (setf addr (+ addr incr))
           do (setf index (1+ index))
           do (setf taddr (1+ taddr)))))
