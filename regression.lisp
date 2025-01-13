@@ -16,7 +16,8 @@
     (lr-asm::test-asm)
     (lr-disasm::test-disasm)
     (lr-emulator::test-instructions)
-    (test-lisp)))
+    (test-lisp)
+    ))
 
 (if (test-regression)
     (format t "======== Regression PASS ========~%")

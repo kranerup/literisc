@@ -192,7 +192,7 @@
    
     (when str-ptr
       (setf str-ptr (- str-ptr n-string-space))
-      (format t "reuse string ~d~%" str-ptr))
+      (when verbose (format t "reuse string ~d~%" str-ptr)))
 
     (when (not str-ptr)
       (set-program dmem str (+ n-string-space string-space-free))
@@ -2631,12 +2631,13 @@
   (with-output-to-string (*standard-output*)
     (setq dmem (make-dmem 2000))
     (init-lisp))
-  (let ((printed 
-    (with-output-to-string (*standard-output*)
-      (funcall test t))))
-    (if (and expected-print (not (equal printed expected-print)))
-        (progn (format t "missmatch printed:~a expected:~a" printed expected-print) nil)
-        t)))
+  (check
+    (let ((printed 
+            (with-output-to-string (*standard-output*)
+              (funcall test t))))
+      (if (and expected-print (not (equal printed expected-print)))
+          (progn (format t "missmatch printed:~a expected:~a" printed expected-print) nil)
+          t))))
 
 
 ;;; expected: "ssymb"
@@ -2901,15 +2902,16 @@
   (destructuring-bind (dmem proc)
     (asm-n-run test-trace-env
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (default-env dmem)
                    (mem-write-word dmem n-cons-free 0))
-               nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
-    (print-stack dmem 
-                 n-stack-highest
-                 (aref (lr-emulator::processor-state-r proc) SP))))
+               nil regression 10000)))
+    ;(print-conses dmem n-cons n-cons-type)
+    ;(format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
+    ;(print-stack dmem 
+    ;             n-stack-highest
+    ;             (aref (lr-emulator::processor-state-r proc) SP))))
+
+(deftest run-t16 () (run-test #'t16 ""))
 
 (defun dump-cons (dmem n-cons n-cons-type)
   (let ((incr 4))
@@ -3013,7 +3015,6 @@
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-assoc
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (push-env dmem (add-symbol dmem "nil" 0) 0))
                           (numval (add-num dmem 1234))
                           (to-find (add-symbol dmem "symbol2" numval)))
@@ -3024,10 +3025,13 @@
                      (mem-write-word dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) to-find)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a P1:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0)
-            (aref (lr-emulator::processor-state-r proc) P1))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0))
+          (reg-p1 (aref (lr-emulator::processor-state-r proc) P1)))
+      (when (not regression) (format t "P0:~a P1:~a~%" reg-p0 reg-p1))
+      (check (and (equal reg-p0 2) (equal reg-p1 1))))))
+
+(deftest run-assoc () (run-test #'test-assoc nil))
 
 ;;; search env for a primitive symbol and return it's value
 ;;; searching for "not" and returns the code-ptr to the l-not label
@@ -3035,7 +3039,6 @@
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-assoc
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (push-env dmem (add-symbol dmem "nil" 0) 0))
                           (find-sym (add-symbol dmem "not" 0))
                           (to-find (add-prim dmem "l-not")))
@@ -3046,10 +3049,13 @@
                      (mem-write-word dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) find-sym)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a P1:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0)
-            (aref (lr-emulator::processor-state-r proc) P1))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0))
+          (reg-p1 (aref (lr-emulator::processor-state-r proc) P1)))
+      (when (not regression) (format t "P0:~a P1:~a~%" reg-p0 reg-p1))
+      (check (and (equal reg-p0 3) (equal reg-p1 1))))))
+
+(deftest run-assoc-prim () (run-test #'test-assoc-prim nil))
 
 ;;; search env for a symbol that is missing and return nil
 (defun test-assoc2 ( &optional (regression nil) )
@@ -3066,10 +3072,13 @@
                      (mem-write-word dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) to-find)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a P1:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0)
-            (aref (lr-emulator::processor-state-r proc) P1))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0))
+          (reg-p1 (aref (lr-emulator::processor-state-r proc) P1)))
+      (when (not regression) (format t "P0:~a P1:~a~%" reg-p0 reg-p1))
+      (check (and (equal reg-p0 0) (equal reg-p1 0))))))
+
+(deftest run-assoc2 () (run-test #'test-assoc2 nil))
 
 ;;; The initial cons cells and env.
 ;;; Note that to add primitives the symtab must be populated.
@@ -3087,25 +3096,29 @@
       (mem-write-word dmem n-global-env env)
     env))
   
-
+;; call eval with a num cons
+;; should return the num cons
 (defun test-eval-num ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let ((env (default-env dmem))
                          (numval (add-num dmem 1234)))
                      (setf (aref (lr-emulator::processor-state-r proc) P0) numval)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 12)))))
 
+(deftest run-eval-num () (run-test #'test-eval-num nil))
+
+;; call eval with a symbol with value a num cons
+;; should return the num consj
 (defun test-eval-symb ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem))
                           (numval (add-num dmem 1234))
                           (sym (add-symbol dmem "symbol" numval)))
@@ -3115,45 +3128,55 @@
                      (format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) sym)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 12)))))
 
+(deftest run-eval-symb () (run-test #'test-eval-symb nil))
 
+;; eval symbol with value nil
+;; should return nil cons
 (defun test-eval-symb-nil ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem))
                           (numval (add-num dmem 1234))
                           (sym (add-symbol dmem "symbol" numval)))
                      (setf env (push-env dmem sym env))
                      (mem-write-word dmem n-global-env env)
-                     (format t "env: ~d~%" env)
-                     (format t "sym ~d~%" sym)
+                     ;(format t "env: ~d~%" env)
+                     ;(format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) 0))) ; nil
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 0)))))
 
+(deftest run-eval-symb-nil () (run-test #'test-eval-symb-nil nil))
+
+;; eval the primitive symbol "not" and return the prim cons
 (defun test-eval-prim-symb ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem))
-                          (sym (add-prim dmem "not" "l-not")))
+                          (sym 7)) ; the not symbol in default-env
+                          ;(sym (add-prim dmem "not" "l-not")))
                      (setf env (push-env dmem sym env))
                      (mem-write-word dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) sym)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 6)))))
+
+(deftest run-eval-prim-symb () (run-test #'test-eval-prim-symb nil))
 
 ;;; (cons (symbol "not") (cons 111 nil)) i.e. (not 111)
 (defun make-not-fcall (dmem)
@@ -3194,7 +3217,6 @@
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem))
                           (fcall (make-not-fcall-nil dmem)))
                      (mem-write-word dmem n-global-env env)
@@ -3202,9 +3224,12 @@
                      (format t "fcall ~d~%" fcall)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) fcall)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 1)))))
+
+(deftest run-eval-not-nil () (run-test #'test-eval-not-nil nil))
 
 
 ;;; (cons (symbol "+") (cons 10 (cons 11 nil)))
@@ -3221,7 +3246,6 @@
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-eval
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem))
                           (fcall (make-add-fcall dmem)))
                      (mem-write-word dmem n-global-env env)
@@ -3229,39 +3253,45 @@
                      (format t "fcall ~d~%" fcall)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) fcall)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 18))))) ; num cons 18
+
+(deftest run-eval-add () (run-test #'test-eval-add nil))
 
 ;;; (eval (read "(+ 10 11)"))
 (defun test-eval-read ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-re
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem)))
                      (mem-write-word dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 17))))) ; num cons 17
+
+(deftest run-eval-read () (run-test #'test-eval-read nil))
 
 ;;; (print (eval (read "(+ 10 11)")))
 (defun test-eval-read-print ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-rep
                #'(lambda (dmem proc)
-                   (init-lisp)
                    (let* ((env (default-env dmem)))
                      (mem-write-word dmem n-global-env env)
-                     (format t "env: ~d~%" env)
+                     (when (not regression) (format t "env: ~d~%" env))
                      (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
                nil regression 10000)
-    (print-conses dmem n-cons n-cons-type)
-    (format t "P0:~a~%"
-            (aref (lr-emulator::processor-state-r proc) P0))))
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-eval-read-print  () (run-test #'test-eval-read-print "21"))
 
 ;;; use pty
 (defun test-eval-read-print-loop ( &optional (regression nil) )
@@ -3290,7 +3320,21 @@
     (run-t7)
     (run-t10)
     (run-t11)
-    (run-t15)))
+    (run-t15)
+    (run-t16)
+    (run-assoc)
+    (run-assoc-prim)
+    (run-assoc2)
+    (run-eval-num)
+    (run-eval-symb)
+    (run-eval-symb-nil)
+    (run-eval-prim-symb)
+    (run-eval-not-nil)
+    (run-eval-add)
+    (run-eval-read)
+    (run-eval-read-print)
+
+    ))
 
 ;(run-emul e 200 nil)
 
