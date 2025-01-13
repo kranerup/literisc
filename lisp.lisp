@@ -350,7 +350,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 100)
+  (defparameter nr-cons 50)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -370,7 +370,7 @@
 
   (alloc-words n-global-env 1)
   
-  (alloc-dwords n-stack 50)
+  (alloc-dwords n-stack 200)
   (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
 
 
@@ -978,12 +978,14 @@
      ;; n-cons-free pointer and upwards. Wrapping to 0
      ;; at end of cons space. 
      (label l-box)
-     (push-r R4)
+     (push-srp)
+     (push-r R5)
 
      (Rx= n-cons-free R0)
      (A=M[Rx].w R0) ; A = next cons to search from
      (Rx=A P0) ; return value = cons index
      (Rx=A R4) ; original start point
+     (Rx= 0 R5) ; have we garbage collected?
 
      (label l-retry-alloc)
 
@@ -1004,6 +1006,15 @@
      (A-=Rx R4) ; start cons
      (jnz l-cont) ; did we reached the start point without finding any free cons
      
+     (A= 0)
+     (A-=Rx R5) ; have garbage collated?
+     (jnz l-out-of-mem) ; gc:ed and still didn't find free cons
+
+     (jsr l-garbage-collect)
+     (Rx= 1 R5) ; set that we have gc:ed 
+    
+     (j l-retry-alloc)
+
      (label l-out-of-mem) ; halt when we're out of memory
      (j l-out-of-mem)
 
@@ -1027,15 +1038,10 @@
      (A=Rx R2) ; next cons-free
      (M[Rx].w=A R0) ; update n-cons-free
 
-     (pop-r R4)
-     (A=Rx SRP)
+     (pop-r R5)
+     (pop-a)
      (j-a)
 
-     (label l-cons-full)
-
-     (jsr l-garbage-collect)
-    
-     (j l-retry-alloc)
      
      ;; --- set box type -------------------------------
      ;; input: P0 - cons index
@@ -2162,6 +2168,7 @@
 
      (jsr l-print)
 
+     ;(jsr l-garbage-collect)
      (j l-repl)
      ))
 
@@ -2292,6 +2299,8 @@
      (j-a)))
 
 
+;;;(defparameter char-output :uart-io) ; :uart-io / :emul-io
+;;;(defparameter char-input :uart-io) ; :uart-io / :emul-io
 (defparameter char-output :emul-io) ; :uart-io / :emul-io
 (defparameter char-input :emul-io) ; :uart-io / :emul-io
 
@@ -2819,7 +2828,7 @@
 ;;; needs to set nr-cons to 30 to test wrapping during allocation
 (defparameter test-trace-env
   '( (Rx= n-stack-highest SP)
-
+     ;; set values that can not be cons cells to simplify debug
      (Rx= 100000 R0)
      (Rx= 100000 R1)
      (Rx= 100000 R2)
@@ -2833,7 +2842,9 @@
      (Rx= 100000 R10)
      (Rx= 100000 R11)
      (Rx= 100000 R12)
-   
+  
+     ;; allocate conses but don't use them so there will be
+     ;; garbage to collect
      (jsr l-box)
      (jsr l-box)
      (jsr l-box)
@@ -2843,7 +2854,9 @@
      (jsr l-box)
      (jsr l-box)
      (jsr l-box)
-     
+    
+     ;; create some conses that will be held in registers to see
+     ;; that they are marked and not deallocated
      (Rx= 12321 P0)
      (jsr l-box-int) ; reachable
      (A=Rx P0) (Rx=A R1)
@@ -2858,17 +2871,9 @@
      (Rx= 12325 P0)
      (jsr l-box-int) ; reachable
 
-
-     ;;(push-r R13) ; save all register to the stack for later gc scanning the stack. skip SRP and SP since they can never contain cons pointers.
-     ;;(jsr l-trace-stack)
-     ;;(pop-r R13)
-
-     ;;(jsr l-trace-env)
-
-     ;;(jsr l-free)
-
      (jsr l-garbage-collect)
-     
+    
+     ;; allocate more so that the free pointer can wrap
      (jsr l-box)
      (jsr l-box)
      (jsr l-box)
@@ -2891,6 +2896,7 @@
      (label end-prn)
      (j end-prn)))
 
+;;; test the garbage collector and allocation
 (defun t16 ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-trace-env

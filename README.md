@@ -3,8 +3,14 @@ The LiteRISC processor
 
 The idea was to create a compact instruction set like the early 8-bit
 processor (6502, 6809) but with 32-bit operations and a large general purpose
-register bank. It should also be efficient for compiling high-level
-languages which basically means efficient stack handling.
+register bank. The target systems is small embedded systems where the
+memory space is constrained. For example as auxiliary processors in SoCs.
+
+One big issue with the early 8-bit processors is that it is very hard to make
+an efficient compiler. Therefore the instruction set should also be efficient
+for compiling high-level languages which basically means efficient stack
+handling and general purpose register.
+
 Variable length instructions is choosen to get a memory efficient
 instruction set. Basically only immediate data is variable length.
 All instructions are encoded in one byte with the exception of immediate

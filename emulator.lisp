@@ -77,6 +77,10 @@
 ;;;  - no c32, chaining of 32-bit to 64-bit is difficult
 ;;;  - only sub affects flag, but chaining of 32-bit adds is desirable
 ;;;
+;;;  - stack protection to easily detect stack overflow
+;;;  - support for debugger, i.e. single stepping and breakpoints (trap instruction?)
+;;;  - efficient garbage collection would need a memory protection (writes to one
+;;;    memory area would be trapped so that concurrent garbage collection can be done).
 ;;;
 ;;;  +------------+
 ;;;  |    R0      |
