@@ -97,7 +97,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 2000))
+(setq dmem (make-dmem 4000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -146,7 +146,7 @@
      (assert (< dmem-allocated (length dmem)))))
 
 (defvar string-space-free 0) ; relative n-string-space
-
+(defparameter source-region-size 256) ; allocated bytes to source buffer
 (defvar cons-free nil)
 (defvar n-cons-end nil)
 
@@ -338,7 +338,7 @@
         do (setf (aref dmem idx) 0))
   ;;(alloc-init n-source-start     (string-to-mem "symbol symbol2 ( inner )"))
   ;;(alloc-init n-sym-string-start (string-to-mem "symbol"))
-  (format t "n-source-start: ~a~%" (alloc n-source-start 32))
+  (format t "n-source-start: ~a~%" (alloc n-source-start source-region-size))
   (format t "n-sym-string-start: ~a~%" (alloc n-sym-string-start 32))
 
   (alloc-init n-print-sep (string-to-mem
@@ -350,7 +350,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 50)
+  (defparameter nr-cons 70)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -370,7 +370,7 @@
 
   (alloc-words n-global-env 1)
   
-  (alloc-dwords n-stack 200)
+  (alloc-dwords n-stack 300)
   (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
 
 
@@ -2629,7 +2629,7 @@
 
 (defun run-test (test &optional (expected-print nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 2000))
+    (setq dmem (make-dmem 4000))
     (init-lisp))
   (check
     (let ((printed 
@@ -3293,6 +3293,44 @@
 
 (deftest run-eval-read-print  () (run-test #'test-eval-read-print "21"))
 
+(defun set-source (dmem source-string)
+  (let ((l (length source-string)))
+    (assert (< l source-region-size))
+    (set-program dmem (string-to-mem source-string) n-source-start)))
+  
+(defun test-source-repl ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "(not t)(not (not (not nil)))(+ 10 11)
+                                     (+ 6 5 4 3 2 1) (+ 1 1 1 1 1 1 1 1 1 1)
+                                     (+ 1 2 3 4 5 6) (not (+ 1 2 3))")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-source-repl  () (run-test #'test-source-repl "
+> 
+nil
+> 
+t
+> 
+21
+> 
+21
+> 
+10
+> 
+21
+> 
+nil
+> "))
+
 ;;; use pty
 (defun test-eval-read-print-loop ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
@@ -3333,7 +3371,7 @@
     (run-eval-add)
     (run-eval-read)
     (run-eval-read-print)
-
+    (run-source-repl)
     ))
 
 ;(run-emul e 200 nil)
