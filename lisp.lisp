@@ -1679,6 +1679,65 @@
      ;; then return to caller of l-apply using the srp on the stack.
      ))
 
+(defparameter func-evlis
+  '(
+    ;; L evlis(L t,L e) {
+    ;;   return T(t) == CONS ? cons( eval(  car(t),e),
+    ;;                               evlis( cdr(t),e)) :
+    ;;          T(t) == ATOM ? assoc(t,e) :
+    ;;          nil;
+    ;; }
+     (label l-evlis)
+     ;; input: P0 = cons index to a list. The car of each list time should be evaluated.
+     ;;             and a new list with the evaluated results should be returned.
+     ;;        P1 = an env/association list, cons index
+     ;; output: P0 = cons index to a new list of evaluation results
+     ;; env is a list: ( ( syma . vala ) (symb . valb) ... )
+     (push-srp)
+     (push-r R4)
+
+     (Rx= n-cons-type R0)
+     (A=Rx R0)
+     (A+=Rx P0) ; index in cons-type
+     (Rx=M[A].b R0) ; R0=type of cons
+
+     (A= c-cons-cons)
+     (A-=Rx R0)
+     (jnz l-no-cons) ; a cons
+     ;; -------------------
+     ;; (eval (car t))
+     (A=Rx P0) (Rx=A R0) ; R0 = t
+     (A=Rx P1) (Rx=A R1) ; R1 = e
+
+     (jsr l-car) ; -> P0
+     (jsr l-eval) ; -> P0
+     (A=Rx P0) (Rx=A R2) ; R2 = (eval (car t))
+    
+     (A=Rx R0) (Rx=A P0) ; t
+     (jsr l-cdr) ; P0 = (cdr t)
+     (A=Rx R1) (Rx=A P1) ; e
+     
+     (jsr l-evlis) ; -> P0
+     (A=Rx P0) (Rx=A R3) ; R3 = (evlis (cdr t))
+    
+     (jsr l-cons) ; -> P0 = new cons
+     (A=Rx P0) (Rx=A R4) ; R4 = new cons
+     (A=Rx R2) (Rx=A P1)
+     (jsr l-rplca) ; P0=cons P1=val <-> (rplca cons (eval (car t)))
+     (A=Rx R3) (Rx=A P1)
+     (jsr l-rplcd) ; P0=cons P1=val <-> (rplcd cons (evlis (cdr t) e))
+     ;; P0 = new cons
+     (j l-ret-evlis)
+     ;; -------------------
+     (label l-no-cons)
+
+     (jsr l-eval) ; -> P0
+
+     (label l-ret-evlis)
+     (pop-r R4)
+     (pop-a)
+     (j-a)
+    ))
 
 (defparameter func-primitives
   '( ;; --- not -----------------------------------
@@ -1690,14 +1749,14 @@
   
      (jsr l-car) ; P0=car(arg-list)
      (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
-    
+ 
      (A= 0) ; nil
      (A-=Rx P0)
      (jz l-is-nil)
      (A= 0) ; is not nil-> return nil 
      (Rx=A P0)
      (j l-not-ret)
-     
+    
      (label l-is-nil)
      (A= 1) ; is nil -> return t
      (Rx=A P0)
@@ -2614,7 +2673,7 @@
               func-cons func-gc func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
-              func-apply func-primitives ))
+              func-apply func-evlis func-primitives ))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -2912,6 +2971,9 @@
     ;             (aref (lr-emulator::processor-state-r proc) SP))))
 
 (deftest run-t16 () (run-test #'t16 ""))
+
+
+
 
 (defun dump-cons (dmem n-cons n-cons-type)
   (let ((incr 4))
@@ -3347,6 +3409,42 @@ nil
             (aref (lr-emulator::processor-state-r proc) P0))))
 
 
+;;; ------------------------------------------------------------------------
+(defparameter test-func-evlis
+  '( (Rx= n-stack-highest SP)
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P1)
+
+     (jsr l-evlis)
+
+     (label l-e-evlis) (j l-e-evlis)
+     ))
+
+;;; (cons 123 (cons 11 nil))
+(defun make-num-list (dmem)
+  (let* ((num2 (add-num dmem 11))
+         (cons2 (make-cons dmem num2 0))
+         (num1 (add-num dmem 123))
+         (head (make-cons dmem num1 cons2)))
+    head))
+
+(defun test-evlis ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-func-evlis
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem))
+                          (lst (make-num-list dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (format t "lst ~d~%" lst)
+                     (setf (aref (lr-emulator::processor-state-r proc) P0) lst)))
+               nil regression 10000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
