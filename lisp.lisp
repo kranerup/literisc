@@ -933,8 +933,8 @@
 (defvar func-rplca nil)
 (setq func-rplca
   '( ;; rplca
-     ;; P0 - cons ptr
-     ;; P1 - value to replace car of cons cell
+     ;; P0 - cons ptr (reg unmodified)
+     ;; P1 - value to replace car of cons cell (reg unmodified)
      (label l-rplca)
      (push-r R0)
      (mvi->r n-cons R0)
@@ -950,8 +950,8 @@
 (defvar func-rplcd nil)
 (setq func-rplcd
   '( ;; rplcd
-     ;; P0 - cons ptr
-     ;; P1 - value to replace cdr of cons cell
+     ;; P0 - cons ptr (reg unmodified)
+     ;; P1 - value to replace cdr of cons cell (reg unmodified)
      (label l-rplcd)
      (push-r R0)
      (mvi->r n-cons R0)
@@ -1059,10 +1059,10 @@
      (A=Rx SRP)
      (j-a)
 
-     ;; --- cons -------------------------------
+     ;; --- box-cons -------------------------------
      ;; input: -
      ;; output: P0 - returns a ptr to a new allocated cons cell
-     (label l-cons)
+     (label l-box-cons)
 
      (push-srp)
      (push-r R0)
@@ -1080,6 +1080,31 @@
      (pop-a)
      (j-a)
 
+     ;; --- cons -------------------------------------
+     ;; allocate a new cons and set car/cdr
+     ;; input: P0 - value to be the car
+     ;;        P1 - value to be the cdr
+     ;; output: P0 - the new cons
+     ;;         (P1 - the cdr)
+     (label l-cons)
+     (push-srp)
+     (push-r R1)
+
+     (A=Rx P0) (Rx=A R0) ; R0=car
+     (A=Rx P1) (Rx=A R1) ; R1=cdr
+
+     (jsr l-box-cons) ; -> P0
+
+     (A=Rx R0) (Rx=a P1)
+     (jsr l-rplca) ; P0=cons P1=the-car
+
+     (A=Rx R1) (Rx=A P1)
+     (jsr l-rplcd) ; P0=cons P1=the-cdr
+    
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+     
      ;; --- box integer -------------------------------
      ;; input: P0 - integer value
      ;; output: P0 - integer cons cell
@@ -1484,10 +1509,11 @@
      ;;        P1 = an env/association list, cons index
      ;; output: P0 = cons index to the value (nil if not found)
      ;;         P1 = 0 if not found
-     ;; env is a list: ( ( syma . vala ) (symb . valb) ... )
+     ;; env is a list: (cons `sym-a (cons `sym-b nil))
+     ;; a symbols value is embedded in the symbol cons cell
      (push-srp)
      (push-r R2)
-   
+
      (A=Rx P0) (Rx=A R0)  ; R0 = symb cons
      (A=Rx P1) (Rx=A R1)  ; R1 = env
 
@@ -1569,7 +1595,8 @@
      ;; input: P0 = cons index to an expression to be evaluated
      ;;        P1 = an env/association list, cons index
      ;; output: P0 = cons index to the value
-     ;; env is a list: ( ( syma . vala ) (symb . valb) ... )
+     ;; env is a list: (cons `sym-a (cons `sym-b nil))
+     ;; a symbols value is embedded in the symbol cons cell
      (push-srp)
      (push-r R2)
 
@@ -1681,6 +1708,8 @@
 
 (defparameter func-evlis
   '(
+    ;; evlis is used to evaluate the arguments in a function call
+    ;;
     ;; L evlis(L t,L e) {
     ;;   return T(t) == CONS ? cons( eval(  car(t),e),
     ;;                               evlis( cdr(t),e)) :
@@ -1688,11 +1717,12 @@
     ;;          nil;
     ;; }
      (label l-evlis)
-     ;; input: P0 = cons index to a list. The car of each list time should be evaluated.
+     ;; input: P0 = cons index to a list. The car of each list item should be evaluated.
      ;;             and a new list with the evaluated results should be returned.
      ;;        P1 = an env/association list, cons index
      ;; output: P0 = cons index to a new list of evaluation results
-     ;; env is a list: ( ( syma . vala ) (symb . valb) ... )
+     ;; env is a list: (cons `sym-a (cons `sym-b nil))
+     ;; a symbols value is embedded in the symbol cons cell
      (push-srp)
      (push-r R4)
 
@@ -1737,6 +1767,113 @@
      (pop-r R4)
      (pop-a)
      (j-a)
+    ))
+
+(defparameter func-bind
+  '(
+    ;;
+    ;; bind creates an environment from a list of symbols and a list of values.
+    ;; This binds the formal parameter names to the evaluated actual parameters in a function call.
+    ;;
+    ;; This is the C code from Lisp in 99 lines but we don't use the same env data structure.
+    ;; L bind(L v,L t,L e) {
+    ;;   return T(v) == NIL ? e :
+    ;;          T(v) == CONS ? bind( cdr(v),
+    ;;                               cdr(t),
+    ;;                               pair( car(v), car(t), e)) :
+    ;;          pair(v,t,e);
+    ;; }
+    (label l-bind)
+    ;; input: P0 = cons index to a list. The car of each list item is a symbol.
+    ;;        P1 = cons index to a list. The car of each list item is a value.
+    ;;        P2 = an env/association list, cons index
+    ;; output: P0 = cons index to a new environment list: ( ( syma . vala ) (symb . valb) ... )
+    (push-srp)
+    (push-r R4)
+
+    (A= 0)
+    (A-=Rx P0)
+    (jz l-bind-nil)
+
+    (Rx= n-cons-type R0)
+    (A=Rx R0)
+    (A+=Rx P0) ; index in cons-type
+    (Rx=M[A].b R0) ; R0=type of cons
+
+    (A= c-cons-cons)
+    (A-=Rx R0)
+    (jnz l-bind-no-cons) ; a cons
+
+    ;; -----
+    ;; it's a list so add the car of v and t lists to env
+    ;; and recursively the rest of the lists
+    (A=Rx P0) (Rx=A R0) ; R0 = v-list
+    (A=Rx P1) (Rx=A R1) ; R1 = t-list
+
+    (jsr l-car) ; (car v)
+    (A=Rx P0) (Rx=A R3) ; R3 = (car v)
+
+    (A=Rx R1) (Rx=A P0)
+    (jsr l-car) ; (car t)
+    (A=Rx P0) (Rx=A R4) ; R4 = (car t)
+
+    (A=Rx R3) (Rx=A P0)
+    (A=Rx R4) (Rx=A P1) ; P2 is already env
+    (jsr l-pair) ; -> P0
+    (A=Rx P0) (Rx=A P2) ; P2 = new env
+
+    (A=Rx R0) (Rx=A P0) ; v-list
+    (jsr l-cdr) ; P0 = (cdr v-list)
+    (A=Rx P0) (Rx=A R0) ; R0 = (cdr v-list)
+
+    (A=Rx R1) (Rx=A P0) ; t-list
+    (jsr l-cdr) ; P0 = (cdr t-list)
+    (A=Rx P0) (Rx=A P1) ; P1 = (cdr t-list)
+
+    (A=Rx R0) (Rx=A P0) ; (cdr v-list)
+    (jsr l-bind) ; P0 = (cdr v-list), P1 = (cdr t-list), P2 = new env -> P0 = bind result
+
+    (j l-bind-ret)
+
+    ;; -----
+    (label l-bind-no-cons)
+    ;; it's not a list so must be a single symbol, add it to env
+    (jsr l-pair) ; pair has same params and return val as bind
+    (j l-bind-ret)
+    
+    ;; -----
+    (label l-bind-nil)
+    ;; nil means nothing to bind, just return env unmodified
+    (A=Rx P2) (Rx=A P0)
+
+    (label l-bind-ret)
+    (pop-r R4)
+    (pop-a)
+    (j-a)
+
+    ;; ------------------
+    ;; prepends a symbol to an env list
+    ;; from lisp in 99 lines:
+    ;;   pair(L v,L x,L e) { return cons( cons(v,x), e ); }
+    ;; but we store symbol value in symbol cons
+    (label l-pair)
+    ;; input: P0 = symbol
+    ;;        P1 = value
+    ;;        P2 = env, an list, cons index
+    ;; output: P0 = head of new env cons
+    ;;         (P1 = env)
+    ;;         (P2 = env)
+    (push-srp)
+
+    ;; set symbol value
+    (jsr l-rplca) ; P0=symbol P1=value -> P0=symbol
+
+    (A=Rx P2) (Rx=A P1) ; P1=env
+    (jsr l-cons) ; P0 = outer-cons = (cons P0=inner-cons P1=env)
+    
+    (pop-a)
+    (j-a)
+    
     ))
 
 (defparameter func-primitives
@@ -2673,7 +2810,7 @@
               func-cons func-gc func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
-              func-apply func-evlis func-primitives ))
+              func-apply func-evlis func-bind func-primitives ))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -3439,6 +3576,61 @@ nil
                      (format t "env: ~d~%" env)
                      (format t "lst ~d~%" lst)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) lst)))
+               nil regression 10000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+;;; ------------------------------------------------------------------------
+(defparameter test-func-bind
+  '( (Rx= n-stack-highest SP)
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P2) ; env
+
+     (jsr l-bind)
+
+     (label l-e-bind) (j l-e-bind)
+     ))
+
+
+;; (bind 'the-sym 1234 env)
+(defun test-bind ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-func-bind
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem))
+                          (sym (add-symbol dmem "the-sym" 0))
+                          (val (add-num dmem 1234)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (setf (aref (lr-emulator::processor-state-r proc) P0) sym)
+                     (setf (aref (lr-emulator::processor-state-r proc) P1) val)))
+               nil regression 10000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+;; (bind '( sym1 sym2 ) '( 111 222 ) env)
+(defun test-bind-lst ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-func-bind
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem))
+                          (sym1 (add-symbol dmem "sym1" 0))
+                          (sym2 (add-symbol dmem "sym2" 0))
+                          (val1 (add-num dmem 111))
+                          (val2 (add-num dmem 222))
+                          (cs2 (make-cons dmem sym2 0))
+                          (cs1 (make-cons dmem sym1 cs2))
+                          (cv2 (make-cons dmem val2 0))
+                          (cv1 (make-cons dmem val1 cv2)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (format t "cs1 ~d~%" cs1)
+                     (format t "cv1 ~d~%" cv1)
+                     (setf (aref (lr-emulator::processor-state-r proc) P0) cs1)
+                     (setf (aref (lr-emulator::processor-state-r proc) P1) cv1)))
                nil regression 10000)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
