@@ -1876,6 +1876,81 @@
     
     ))
 
+(defparameter func-reduce
+  '(
+    ;; L reduce(L f,L t,L e) {
+    ;;   return eval( cdr(car(f)),
+    ;;                bind( car(car(f)),
+    ;;                      evlis(t,e),
+    ;;                      not(cdr(f)) ?   ; if lambda has a nil env then use input env
+    ;;                        env :
+    ;;                        cdr(f)));
+    ;; }
+    ;;
+    ;; lambda definition: ( (formal-params . body) . env )
+    ;; (lambda (x) (body x)) -> (cons (cons '(x) '(body x)) env)
+    ;;
+    ;; calling lambda f with parameter p:
+    ;; (f p) -> (eval (cdr (car f))
+    ;;                (bind (car (car f)) ; symbol list of formal params
+    ;;                      (evlis p env) ; actual params
+    ;;                      (cdr f))) ; env from lambda
+    ;; In a function call then apply has already evaluated "f" which then must be
+    ;; a lambda. Reduce is then called.
+    (label l-reduce)
+    ;; input: P0 - f, the lambda with structure: ( (formal-params . body) . env )
+    ;;        P1 - t, a list with the actual params
+    ;;        P2 - the env
+    (push-srp)
+    (push-r R6)
+ 
+    (A=Rx P0)(Rx=A R0) ; R0=f
+    (A=Rx P1)(Rx=A R1) ; R1=t
+    (A=Rx P2)(Rx=A R2) ; R2=env
+
+    ;; prepare bind params
+    (jsr l-car)
+    (A=Rx P0)(Rx=A R3) ; R3 = (car f) = lambda outer cons
+    (jsr l-car)
+    (A=Rx P0)(Rx=A R4) ; -> R4(car(car f)) = lambda formal params
+ 
+    (A=Rx R1)(Rx=A P0) ; t - actual params
+    (A=Rx R2)(Rx=A P1) ; env
+    (jsr l-evlis)
+    (A=Rx P0)(Rx=A R5) ; R5 = evlis result, the evaluated params
+   
+    (A=Rx R0)(Rx=A P0)
+    (jsr l-cdr) ; P0 = (cdr f) = the lambda env
+   
+    (A= 0)
+    (A-=Rx P0)
+    (jnz l-no-env) ; lambda env is not nil
+
+    (A=Rx R2)(Rx=A P2) ; P2 = lambda env
+    (j l-bind-env)
+  
+    (label l-no-env)
+    (A=Rx R2)(Rx=A P2) ; P2 = incoming env
+
+    (label l-bind-env)
+   
+    (A=Rx R4)(Rx=A P0) ; P0 = lambda formal params
+    (A=Rx R5)(Rx=A P1) ; P1 = evaluated params
+
+    (jsr l-bind) ; bind params and create a new env to be used in the body evaluation
+    (A=Rx P0)(Rx=A R6) ; R6 = env from bind
+
+    (A=Rx R3)(Rx=A P0) ; P0 = (car f) = lambda outer cons
+    (jsr l-cdr) ; P0 = (cdr (car f)) = lambda body
+
+    (A=Rx R6)(Rx=A P1) ; P1 = env from bind
+    (jsr l-eval) ; P0 = evaluated body, to be the reduce return value
+    
+    (pop-r R6)
+    (pop-a)
+    (j-a)
+    ))
+
 (defparameter func-primitives
   '( ;; --- not -----------------------------------
      ;; input: P0=arg-list (but only one arg allowed)
@@ -2810,7 +2885,7 @@
               func-cons func-gc func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
-              func-apply func-evlis func-bind func-primitives ))
+              func-apply func-evlis func-bind func-reduce func-primitives ))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -3637,6 +3712,52 @@ nil
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
 
 ;;; ------------------------------------------------------------------------
+(defparameter test-func-reduce
+  '( (Rx= n-stack-highest SP)
+
+     (jsr l-reduce)
+
+     (label l-e-red) (j l-e-red)
+     ))
+
+(defun create-lambda (dmem)
+  (let* ((param (add-symbol dmem "x" 0))
+         (func  (add-symbol dmem "not" 0))
+         (body  (make-cons dmem func param))
+         (lambda-inner (make-cons dmem param body))
+         (lambda-outer (make-cons dmem lambda-inner 0))) ; env=nil
+    lambda-outer))
+
+(defun create-f-call (dmem)
+  (let* ((param (add-symbol dmem "nil" 0))
+         (plist (make-cons dmem param 0))
+         (the-lambda (create-lambda dmem))
+         (fcall (make-cons dmem the-lambda plist)))
+    fcall))
+         
+(defun test-reduce-not ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-func-reduce
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem))
+                          (param (add-symbol dmem "nil" 0))
+                          (the-lambda (create-lambda dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (format t "env: ~d~%" env)
+                     (format t "param ~d~%" param)
+                     (format t "lambda ~d~%" the-lambda)
+                     (setf (aref (lr-emulator::processor-state-r proc) P0) the-lambda)
+                     (setf (aref (lr-emulator::processor-state-r proc) P1) param)
+                     (setf (aref (lr-emulator::processor-state-r proc) P2) env)))
+               nil regression 10000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0))
+      (check (equal reg-p0 1)))))
+
+(deftest run-reduce-not  () (run-test #'test-reduce-not))
+  
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -3662,6 +3783,7 @@ nil
     (run-eval-read)
     (run-eval-read-print)
     (run-source-repl)
+    (run-reduce-not)
     ))
 
 ;(run-emul e 200 nil)
