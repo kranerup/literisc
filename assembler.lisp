@@ -109,6 +109,7 @@
            :Rx=
            :M[A]=Rx
            :M[A].b=Rx
+           :M[A].w=Rx
            :Rx=M[A].w
            :Rx=M[A].b
            :Rx=M[A]

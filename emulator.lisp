@@ -229,7 +229,8 @@
         :charms :charms-extra
         :lr-opcodes :pty :lr-soc)
   (:export :make-dmem :make-emulator :run-with-curses
-           :run-with-curses-io :run-emul :get-reg))
+           :run-with-curses-io :run-emul :get-reg
+           :mem-read-word :mem-read-dword :mem-read-byte))
 (in-package :lr-emulator)
 
 (load-opcodes 

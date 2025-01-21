@@ -350,7 +350,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 70)
+  (defparameter nr-cons 60)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -890,7 +890,7 @@
      (Rx=A R2) ; save free index as start of string
      (Rx=A R4) ; relative pointer
 
-     (A=Rx R1)
+     (A=Rx R2)
      (A+=Rx R0)
      (Rx=A R0) ; n-string-space + M[n-string-space-free], start of free string space, string dest
 
@@ -1678,6 +1678,10 @@
      (A-=Rx R0)
      (jz l-apply-prim)
 
+     (A= c-cons-func)
+     (A-=Rx R0)
+     (jz l-apply-func)
+
      (label l-apply-err)
      (A= 2) ; error
      (Rx=A P0)
@@ -1704,6 +1708,13 @@
      (j-a) ; jump to code-ptr
      ;; because we jumped the primitive must "pop-a/j-a" and will
      ;; then return to caller of l-apply using the srp on the stack.
+
+     (label l-apply-func)
+     (jsr l-reduce) ; same param as l-apply
+     
+     (pop-r R2)
+     (pop-a)
+     (j-a)
      ))
 
 (defparameter func-evlis
@@ -1949,8 +1960,28 @@
     (pop-r R6)
     (pop-a)
     (j-a)
+
+    
+    ;; L f_lambda(L t,L e) { return closure(car(t),car(cdr(t)),e); }
+    ;; (lambda (x y) (body ...))
+    
     ))
 
+;;
+;; (defun f () N)
+
+;; (defun f (x y z) N);
+;;  -> symbol f with value:
+;;  lambda: ( (formal-params . body) . env )
+;;          ( ((x y z ) . N ) . env )
+;; (defvar v N) 
+;;  -> symbol v with value N
+
+;; All primitives are called in the same way with unevaluated arguments.
+;; primitives: (prim args...)
+;;   input: P0=arg-list
+;;          P1=env
+;;
 (defparameter func-primitives
   '( ;; --- not -----------------------------------
      ;; input: P0=arg-list (but only one arg allowed)
@@ -2052,6 +2083,47 @@
      (M[A]=Rx P1)
      (pop-r R0)
      (A=Rx SRP)
+     (j-a)
+
+     
+     ;; --- defvar ---------------------------------- 
+     ;; input: P0=arg-list (#args >= 1)
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     ;; (defvar v N) -> add symbol (car args) to global env
+     ;;                 eval (car (cdr args)) to symval
+     (label l-defvar)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     (A=Rx P0)(Rx=A R0) ; R0=arg-list
+     (A=Rx P1)(Rx=A R1) ; R1=env
+
+     (jsr l-car) ; -> P0 = symbol = (car args)
+     (A=Rx P0)(Rx=A R2) ; R2=symbol
+
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-car) ; P0 = N
+     (A=Rx R1)(Rx=A P1) ; P1 = env
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A P1) ; P1 =  evaled arg
+
+     (A=Rx R2)(Rx=A P0) ; P0 = symb
+     (A=Rx R1)(Rx=A P2) ; P2 = env
+     (jsr l-bind) ; P0=symb P1=val P2=env
+     ;; P0 = new env
+
+     ;; write new env to the global env
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (M[A].w=Rx P0)
+
+     (A=Rx R2)(Rx=A P0) ; return symbol
+
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
      (j-a)
      ))
 
@@ -2358,7 +2430,7 @@
      (label end-fe) (j end-fe)))
 
 (defparameter test-re
-  '( ;; --- not -----------------------------------
+  '( 
      (Rx= n-stack-highest SP)
 
      ;; --- init scan -----------
@@ -2440,6 +2512,34 @@
      (jsr l-print)
 
      ;(jsr l-garbage-collect)
+     (j l-repl)
+     ))
+
+(defparameter test-repl-noecho
+  '( ;; --- test read/eval/print/loop -----------------------------------
+     (Rx= n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (label l-repl)
+    
+     (jsr l-read) ; P0 = result (cons-ptr)
+
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P1)
+
+     (jsr l-eval)
+
+     (jsr l-print)
+
      (j l-repl)
      ))
 
@@ -3367,6 +3467,8 @@
                   dmem (add-symbol dmem "not" (add-prim dmem "l-not")) env))
       (setf env (push-env
                   dmem (add-symbol dmem "+" (add-prim dmem "l-add")) env))
+      (setf env (push-env
+                  dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
       (mem-write-word dmem n-global-env env)
     env))
   
@@ -3713,12 +3815,13 @@ nil
 
 ;;; ------------------------------------------------------------------------
 (defparameter test-func-reduce
-  '( (Rx= n-stack-highest SP)
+  '((Rx= n-stack-highest SP)
+    
+    (jsr l-reduce)
+    (jsr l-print)
 
-     (jsr l-reduce)
-
-     (label l-e-red) (j l-e-red)
-     ))
+    (label l-e-red) (j l-e-red)
+    ))
 
 (defun create-lambda (dmem)
   (let* ((param (add-symbol dmem "x" 0))
@@ -3728,13 +3831,7 @@ nil
          (lambda-outer (make-cons dmem lambda-inner 0))) ; env=nil
     lambda-outer))
 
-(defun create-f-call (dmem)
-  (let* ((param (add-symbol dmem "nil" 0))
-         (plist (make-cons dmem param 0))
-         (the-lambda (create-lambda dmem))
-         (fcall (make-cons dmem the-lambda plist)))
-    fcall))
-         
+;; ( (lambda (x) (not x) nil)
 (defun test-reduce-not ( &optional (regression nil) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-func-reduce
@@ -3757,6 +3854,63 @@ nil
 
 (deftest run-reduce-not  () (run-test #'test-reduce-not))
   
+;;; ------------------------------------------------------------------------
+
+;; lambda definition: ( (formal-params . body) . env )
+(defun create-lambda-plus (dmem)
+  (let* ((param1 (add-symbol dmem "x" 0))
+         (param2 (add-symbol dmem "y" 0))
+         (pcons1 (make-cons dmem param2 0))
+         (pcons2 (make-cons dmem param1 pcons1))
+         (func  (add-symbol dmem "+" 0))
+         (body2 (make-cons dmem param2 0))
+         (body1 (make-cons dmem param1 body2))
+         (body  (make-cons dmem func body1))
+         (lambda-inner (make-cons dmem pcons2 body))
+         (lambda-outer (make-cons dmem lambda-inner 0))) ; env=nil
+    lambda-outer))
+
+;; ( (lambda (x y) (+ x y) 11 22)
+(defun test-reduce-add ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-func-reduce
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem))
+                          (param1 (add-num dmem 11))
+                          (param2 (add-num dmem 22))
+                          (pcons1 (make-cons dmem param2 0))
+                          (pcons2 (make-cons dmem param1 pcons1))
+                          (the-lambda (create-lambda-plus dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression)
+                       (format t "env: ~d~%" env)
+                       (format t "params ~d~%" pcons2)
+                       (format t "lambda ~d~%" the-lambda))
+                     (setf (aref (lr-emulator::processor-state-r proc) P0) the-lambda)
+                     (setf (aref (lr-emulator::processor-state-r proc) P1) pcons2)
+                     (setf (aref (lr-emulator::processor-state-r proc) P2) env)))
+               nil regression 10000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-reduce-add  () (run-test #'test-reduce-add "33"))
+;;; ------------------------------------------------------------------------
+(defun test-source-defvar ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "(defvar kalle 3)(+ 1 kalle)")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-defvar  () (run-test #'test-source-defvar "kalle4"))
 ;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
@@ -3784,6 +3938,8 @@ nil
     (run-eval-read-print)
     (run-source-repl)
     (run-reduce-not)
+    (run-reduce-add)
+    (run-defvar)
     ))
 
 ;(run-emul e 200 nil)
