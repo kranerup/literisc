@@ -1046,7 +1046,7 @@
      ;; --- set box type -------------------------------
      ;; input: P0 - cons index
      ;;        P1 - type
-     ;; output: -
+     ;; output: --
      (label l-set-type)
      (push-r R0)
      
@@ -2087,7 +2087,7 @@
 
      
      ;; --- defvar ---------------------------------- 
-     ;; input: P0=arg-list (#args >= 1)
+     ;; input: P0=arg-list
      ;;        P1=env
      ;; output: P0=result
      ;;
@@ -2125,6 +2125,45 @@
      (pop-r R2)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- lambda ---------------------------------- 
+     ;; input: P0=arg-list
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     ;; lambda definition: ( (formal-params . body) . env )
+     ;; (lambda (x) (body x)) -> (cons (cons '(x) '(body x)) env)
+     ;; (car args) - formal-params
+     ;; (car (cdr args) - body
+
+     (label l-lambda)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     (A=Rx P0)(Rx=A R0) ; R0=arg-list
+     (A=Rx P1)(Rx=A R1) ; R1=env
+
+     (jsr l-car) ; -> P0 = formal-params = (car args)
+     (A=Rx P0)(Rx=A R2) ; R2=formal-params
+
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-car) ; P0 = body
+     (A=Rx P0)(Rx=A P1) ; P1 = body
+     (A=Rx R2)(Rx=A P0) ; P0 = formal-params
+     (jsr l-cons) ; P0 = inner cons
+
+     (A=Rx R1)(Rx=A P1) ; P1 = env
+     (jsr l-cons) ; P0 = outer cons - return value
+
+     (A= c-cons-func)
+     (Rx=A P1)
+     (jsr l-set-type)
+      
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
      ))
 
 ;;; expected: "ssymb"
@@ -3469,6 +3508,8 @@
                   dmem (add-symbol dmem "+" (add-prim dmem "l-add")) env))
       (setf env (push-env
                   dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
+      (setf env (push-env
+                  dmem (add-symbol dmem "lambda" (add-prim dmem "l-lambda")) env))
       (mem-write-word dmem n-global-env env)
     env))
   
@@ -3911,6 +3952,23 @@ nil
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
 
 (deftest run-defvar  () (run-test #'test-source-defvar "kalle4"))
+
+;;; ------------------------------------------------------------------------
+(defun test-source-lambda ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "((lambda (x) (+ x x)) 3)")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-lambda  () (run-test #'test-source-lambda "6"))
 ;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
@@ -3940,6 +3998,7 @@ nil
     (run-reduce-not)
     (run-reduce-add)
     (run-defvar)
+    (run-lambda)
     ))
 
 ;(run-emul e 200 nil)
