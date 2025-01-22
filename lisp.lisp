@@ -350,7 +350,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 60)
+  (defparameter nr-cons 80)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -909,7 +909,7 @@
      (j l-cp-str)
     
      (label l-end-cp)
-     (A=Rx R4)
+     (A= 1) (A+=Rx R4) ; we exited loop before inc pointers
      (M[Rx].w=A R1) ; update n-string-space-free with the relative pointer
      (A=Rx R2) (Rx=A P0) ; return start of string
      
@@ -2164,6 +2164,48 @@
      (pop-a) ;; apply did push SRP
      (j-a)
 
+     ;; --- defun ---------------------------------- 
+     ;; input: P0=arg-list
+     ;;        P1=env
+     ;; output: P0=result
+     ;; (defun f (plist) body) -> add symbol (car args) to global env
+     ;;   symbol value: (lambda (plist) body)
+     (label l-defun)
+     ;; do not push SRP, apply already did that
+     (push-r R3)
+
+     (A=Rx P0)(Rx=A R1) ; R1=arg-list
+     (A=Rx P1)(Rx=A R2) ; R2=env
+
+     (jsr l-car) ; -> P0 = symbol = (car args)
+     (A=Rx P0)(Rx=A R3) ; R3=symbol
+
+     (A=Rx R1)(Rx=A P0)
+     (jsr l-cdr) ; -> P0 = (cdr arg-list)
+     ;; P1 = env
+     ;; use l-lambda to create a lambda since the arg-list after symbol is the same as for lambda
+     (Rx= l-defun-l-ret R0)
+     (push-r R0)
+     (j l-lambda)
+     (label l-defun-l-ret) ; we need a return point to push so that primtive can pop-a/j-a here
+
+     (A=Rx P0)(Rx=A R0) ; lambda / symbol value
+     (A=Rx R3)(Rx=A P0) ; symbol
+     (A=Rx R2)(Rx=A P2) ; env
+     (A=Rx R0)(Rx=A P1) ; sym-val
+     (jsr l-bind) ; P0=symb P1=val P2=env
+     ;; P0 = new env
+
+     ;; write new env to the global env
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (M[A].w=Rx P0)
+
+     (A=Rx R3)(Rx=A P0) ; return symbol
+
+     (pop-r R3)
+     (pop-a) ;; apply did push SRP
+     (j-a)
      ))
 
 ;;; expected: "ssymb"
@@ -3391,6 +3433,7 @@
           ((equal c-cons-free cons-type) t)
           ((equal c-cons-number cons-type) (print-number dmem cons-index nil))
           ((equal c-cons-primitive cons-type) (print-number dmem cons-index t))
+          ((equal c-cons-func cons-type) (print-cons dmem cons-index))
           ((equal c-cons-cons cons-type) (print-cons dmem cons-index)))
     (format t "~%")))
 
@@ -3510,6 +3553,8 @@
                   dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
       (setf env (push-env
                   dmem (add-symbol dmem "lambda" (add-prim dmem "l-lambda")) env))
+      (setf env (push-env
+                  dmem (add-symbol dmem "defun" (add-prim dmem "l-defun")) env))
       (mem-write-word dmem n-global-env env)
     env))
   
@@ -3970,6 +4015,22 @@ nil
 
 (deftest run-lambda  () (run-test #'test-source-lambda "6"))
 ;;; ------------------------------------------------------------------------
+(defun test-source-defun ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "(defvar z 3)(defun f (x) (+ x z))(f 12)")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-defun  () (run-test #'test-source-defun "zf15"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -3999,6 +4060,7 @@ nil
     (run-reduce-add)
     (run-defvar)
     (run-lambda)
+    (run-defun)
     ))
 
 ;(run-emul e 200 nil)
