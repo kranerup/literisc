@@ -26,6 +26,30 @@ but this also makes the average instruction length longer. Two 8-bit instruction
 can address two registers plus the accumulator compared to a single 16 bit
 instruction that could address three registers.
 
+Another inspiration from the 8-bit instruction sets is to have jump
+instructions combined with condition codes. Use of condition codes
+is unusual in RISC because it creates extra instruction dependencies
+making pipelineing and parallelism more difficult. With this instruction
+set there are no unnecessary instruction dependencies because only one
+instruction changes condition code values. Also the instruction set
+is not targeted for high performance making pipelining and parallel speculative
+execution less interesting. Instead the instruction set can utilize the
+sequential non-pipelined execution to make more efficient instructions
+(for example the multi-register push/pop instructions).
+
+The instruction set is pretty extensive so why call it RISC? Well, the
+RISC concept was never really about having few instructions. It was rather
+about optimizing the instruction set for compilers and only include
+instructions that make the compiled programs faster or smaller. In that
+sense this instruction set is RISC.
+
+I'm not claiming this instruction set is better than others as that
+would require a lot of more work to measure and compare with other instruction
+sets. I view this more as an experiment that merges the 8-bit variable
+length instruction sets with the RISC ideas of compiler friendly symmetric
+instructions.
+
+
 ## LiteRISC instruction set v 0.5
 
 ### Register Set
@@ -126,7 +150,6 @@ The jump offset is relative the first byte after the jump instruction.
 ``` 
 
 ### Second level instructions
-instruction format:
 ```
               second
               opcode
@@ -179,7 +202,7 @@ field that determines which registers to pop
 
      second
    | opcode |  instruction operation
-   +--------+----------------------------
+   +--------+----------------------------------------------------------
    |  5     | pop R0..Rn,  for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
    +--------+----------------------------------------------------------
 ```
