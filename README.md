@@ -19,16 +19,26 @@ data which is variable length and follows the first byte in the instruction.
 To make instructions 8 bits and still being able to address a larger set
 of registers, each instructions can only address one register. Each
 instruction implicitly addresses an accumulator register so that
-there can still be two operands and on result ( A = A op Rx ).
+there can still be two operands and one result ( A = A op Rx ).
 
 A wider instruction set would make it possible to address several registers
 but this also makes the average instruction length longer. Two 8-bit instructions
-can address two registers plus the accumulator compared two a single 16 bit
+can address two registers plus the accumulator compared to a single 16 bit
 instruction that could address three registers.
 
-## LiteRISC instruction set v 0.4
+## LiteRISC instruction set v 0.5
 
+### Register Set
 ```
+The register set consist of 16 general purpose, 32 bit wide registers.
+Most instructions can select any of the registers as operand but in some
+instructions the R15 and R14 registers are implied operand. The R14 register
+can act as a stack pointer (SP) and the R15 register can be used as a
+subroutine return pointer (SRP).
+
+There is also a condition code register (CC) that can not be accessed directly,
+only a few special instructions implicitly uses this register.
+
   +------------+
   |    R0      |
   +------------+
@@ -40,144 +50,286 @@ instruction that could address three registers.
   +------------+
   |  R15 (SRP) |
   +------------+
+  |    PC      |
+  +------------+------------+
+  | CC: n v z c8 z8 c16 z16 |
+  +-------------------------+
+```
+### First level instructions
+
+First instruction byte is divided into two fields, opcode and register.
+instruction format:
+```
+      opcode    Rx 
+     7     4  3     0
+   [ o o o o  r r r r ]
+```
+
+```
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |   0    |   Rx = A
+   |   1    |   A = Rx
+   |   2    |   Rx = M[A+nn].l, nn is 1 to 5 following bytes
+   |   3    |   Rx = M[A].l
+   |   4    |   A = M[Rx].l
+   |   5    |   M[A+nn].l = Rx
+   |   6    |   M[A].l = Rx
+   |   7    |   M[Rx].l = A
+   |   8    |   Rx = sex(nn), nn is 1 to 5 following bytes
+   |   9    |   A = sex(n), where n is the value of the register field
+   |  10    |   jump, register field is additional jump opcode
+   |  11    |   A = A + Rx
+   |  12    |   A = A - Rx, sets CC = n v z c8 z8 c16 z16
+   |  13    |   A = A & Rx
+   |  14    |   A = A | Rx
+   |  15    |   register field is additional opcode
+   +--------+----------------------------
+```
+### Jump instructions
+All jumps have an offset that is relative current PC. The offset is variable size
+with the same format as in immediate move instruction "Rx = nn".
+
+The jump offset is relative the first byte after the jump instruction.
+    - j #0 is therefore a NOP
+    - j #1 skips one byte after the jump instruction
+    - j #-1 jumps to last byte in jump instruction
+    - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
+
+instruction format:
+```
+               jump
+              opcode
+     7     4  3     0
+   [ 1 0 1 0  f f f f ]
+```
+
+```
+     jump                                        flag
+   | opcode |  instruction operation           | condition
+   +--------+----------------------------------+--------
+   |   0    |   j   #nn   - jump always        |  -
+   |   1    |   jlt #nn   - jump <   signed    |   n ^ v
+   |   2    |   jge #nn   - jump >=  signed    | !(n ^ v)
+   |   3    |   jlo #nn   - jump <   unsigned  |   c
+   |   4    |   jhs #nn   - jump >=  unsigned  |  !c
+   |   5    |   jz  #nn   - jump on zero       |   z
+   |   6    |   jnz #nn   - jump on not zero   |  !z
+   |   7    |   jlo.b #nn - jump <   unsigned  |   c8
+   |   8    |   jhs.b #nn - jump >=  unsigned  |  !c8
+   |   9    |   jz.b  #nn - jump on zero       |   z8
+   |   10   |   jnz.b #nn - jump on not zero   |  !z8
+   |   11   |   jlo.w #nn - jump <   unsigned  |   c16
+   |   12   |   jhs.w #nn - jump >=  unsigned  |  !c16
+   |   13   |   jz.w  #nn - jump on zero       |   z16
+   |   14   |   jnz.w #nn - jump on not zero   |  !z16
+   |   15   |   jsr #nn   - SRP = PC; PC = PC + sex(nn)
+   +--------+----------------------------------+--------
+``` 
+
+### Second level instructions
+instruction format:
+```
+              second
+              opcode
+     7     4  3     0
+   [ 1 1 1 1  f f f f ]
+```
+```
+     second
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |   0    | not  A,    A = ~A
+   |   1    | lsl  A,    c = A, A = A << 1, A<0> = 0
+   |   2    | lsr  A,    c = A, A = A >> 1, A<31> = 0
+   |   3    | asr  A,    c = A, A = A >> 1, A<31> = A<30>
+   |   4    | multi push, see below
+   |   5    | multi pop, see below
+   |   6    | push srp,  sp = sp - 4, M[sp].l = srp
+   |   7    | pop-a,     a = M[sp].l, sp = sp + 4
+   |   8    | third level opcodes
+   |   9    | reti,      pop pc, cc, A, r14-r0 and ei
+   |   10   | maskb A,   A = A & 0xff
+   |   11   | maskw A,   A = A & 0xffff
+   |   12   | sexb A,    A<31:8>  = A<7>
+   |   13   | sexw A,    A<31:16> = A<15>
+   |   14   | j-A,       PC = A
+   |   15   | inused
+   +--------+----------------------------
+```
+
+### Multiple register push and pop
+Two byte long push instruction. The second byte holds a register
+field that determines which registers to push.
+```
+            7     4  3     0
+   byte 0 [ 1 1 1 1  0 1 0 0 ]
+   byte 1 [ 0 0 0 0  r r r r ]
+
+     second
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |  4     | push R0..Rn,  for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
+```
+Two byte long pop instruction. The second byte holds a register
+field that determines which registers to pop
+```
+            7     4  3     0
+   byte 0 [ 1 1 1 1  0 1 0 1 ]
+   byte 1 [ 0 0 0 0  r r r r ]
+
+     second
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |  5     | pop R0..Rn,  for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
+```
+
+### Third level instructions
+```
+            7     4  3     0
+   byte 0 [ 1 1 1 1  1 0 0 0 ]
+   byte 1 [ o o o o  r r r r ]  third opcode, register field
+```
+```
+     third
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |    0   | adc,               c,A = A + Rx + c
+   |    1   | unused
+   |    2   | Rx = M[A+nn].b
+   |    3   | Rx = M[A].b
+   |    4   | A = M[Rx].b
+   |    5   | M[A+nn].b = Rx
+   |    6   | M[A].b = Rx
+   |    7   | M[Rx].b = A
+   |    8   | fourth level opcodes
+   |    9   | A = A xor Rx
+   |   10   | Rx = M[A+nn].w
+   |   11   | Rx = M[A].w
+   |   12   | A = M[Rx].w
+   |   13   | M[A+nn].w = Rx
+   |   14   | M[A].w = Rx
+   |   15   | M[Rx].w = A
+   +--------+----------------------------
+```
+
+### Fourth level instructions
+```
+            7     4  3     0
+   byte 0 [ 1 1 1 1  1 0 0 0 ]
+   byte 1 [ 1 0 0 0  o o o o ]  fourth opcode
+```
+```
+     fourth
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |  0     | ei
+   |  1     | di
+   |  2-15  | unused
+
+```
  
- [ o o o o  r r r r ]
- 
- 0   mv  A,Rx                Rx = A
- 1   mv  Rx,A                A = Rx
- 
- 2   ld   A+#nn,Rx           Rx = M[A+nn].l
- 3   ld   A,Rx               Rx = M[A].l
- 4   ld   Rx,A               A = M[Rx].l
- 5   st   Rx,A+#nn           M[A+nn].l = Rx
- 6   st   Rx,A               M[A].l = Rx
- 7   st   A,Rx               M[Rx].l = A
- 
- ! One opcode for all. Size is determined by bit in each following byte. See below.
- 8   mvi #nn,Rx              Rx = sex(nn)
-     mvi #nnnn,Rx            Rx = sex(nnnn)
-     mvi #nnnnnn,Rx          Rx = sex(nnnnnn)
- 
- [ o o o o  n n n n ]
- 9   mvi #n,A                A = sex(n)
- 
- ! All jumps relative, offset variable size as in mvi.
- [ o o o o  f f f f ]
- 10 0        j   #nn                 jump always
-    1        jlt #nn                 jump <   signed      n ^ v
-    2        jge #nn                 jump >=  signed    !(n ^ v)
-    3        jlo #nn                 jump <   unsigned    c
-    4        jhs #nn                 jump >=  unsigned   !c
-    5        jz  #nn                 jump on zero         z
-    6        jnz #nn                 jump on not zero    !z
- 
-    7        jlo.b #nn               jump <   unsigned    c8
-    8        jhs.b #nn               jump >=  unsigned   !c8
-    9        jz.b  #nn               jump on zero         z8
-    10       jnz.b #nn               jump on not zero    !z8
- 
-    11       jlo.w #nn               jump <   unsigned    c16
-    12       jhs.w #nn               jump >=  unsigned   !c16
-    13       jz.w  #nn               jump on zero         z16
-    14       jnz.w #nn               jump on not zero    !z16
- 
-    15       jsr #nn                 SRP = PC; PC = PC + sex(nn)
- 
- 11  add Rx,A                A = A + Rx
- 12  sub Rx,A                A = A - Rx      sets CC = n v z c8 z8 c16 z16
- 13  and Rx,A                A = A & Rx
- 14  or  Rx,A                A = A | Rx
- 
- [ o o o o  f f f f ]
- o  ffff
- 15 0        not   A                 A = ~A
-    1        lsl   A                 c = A, A = A << 1, A<0> = 0
-    2        lsr   A                 c = A, A = A >> 1, A<31> = 0
-    3        asr   A                 c = A, A = A >> 1, A<31> = A<30>
-    4 see below
-    5 see below
-    6        push srp                sp = sp - 4, M[sp].l = srp
-    7        popa                    a = M[sp].l, sp = sp + 4
-    8 
-       [ o o o o  r r r r ]
-       oooo
-       0-1 Unused
-       2    ld   A+#nn,Rx            Rx = M[A+nn].b
-       3    ld   A,Rx                Rx = M[A].b
-       4    ld   Rx,A                A = M[Rx].b
-       5    st   Rx,A+#nn            M[A+nn].b = Rx
-       6    st   Rx,A                M[A].b = Rx
-       7    st   A,Rx                M[Rx].b = A
-       8-15 Unused
-      
-    9 Unused
-    10       maskb A                 A = A & 0xff
-    11       maskw A                 A = A & 0xffff
-    12 sexb  A                       A<31:8>  = A<7>
-    13 sexw  A                       A<31:16> = A<15>
-    14       j     A                 PC = A
-    15 Unused
- 
- [ o o o o  f f f f ]
- [ 0 0 0 0  r r r r ]
- 15 4    push  R0..Rn            for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
-    5    pop   R0..Rn            for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
- 
- 
- Variable size immediate data:
- 
- 7-bits
-   [    instr        ]
-   [ 0 n n n n n n n ]
+### Variable size immediate data
+
+The msb bit in each byte encodes if the immediate value ends in this byte, when
+0, or continues in the following byte, when 1. 
+
+This can encode immediate values in sizes of 7, 14, 21, 28 or 32 bits.
+
+The value is constructed by, for each byte, left shifting previous value
+and inserting the 7 bits from current byte into lsb of the new value.
+
+ 7 bits
+   byte 0 [    instr        ]
+   byte 1 [ 0 n n n n n n n ]
  
  14-bits
-   [    instr        ]
-   [ 1 n n n n n n n ]
-   [ 0 m m m m m m m ] -> 0bnnnnnnnmmmmmmm
+   byte 0 [    instr        ]
+   byte 1 [ 1 n n n n n n n ]
+   byte 2 [ 0 m m m m m m m ] -> 0bnnnnnnnmmmmmmm
  
  21-bits
-   [    instr        ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 0 n n n n n n n ]
+   byte 0 [    instr        ]
+   byte 1 [ 1 n n n n n n n ]
+   byte 2 [ 1 n n n n n n n ]
+   byte 3 [ 0 n n n n n n n ]
  
  28-bits
-   [    instr        ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 0 n n n n n n n ]
+   byte 0 [    instr        ]
+   byte 1 [ 1 n n n n n n n ]
+   byte 2 [ 1 n n n n n n n ]
+   byte 3 [ 1 n n n n n n n ]
+   byte 4 [ 0 n n n n n n n ]
  
  32-bits
-   [    instr        ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 1 n n n n n n n ]
-   [ 0 0 0 0 n n n n ]
+   byte 0 [    instr        ]
+   byte 1 [ 1 n n n n n n n ]
+   byte 2 [ 1 n n n n n n n ]
+   byte 3 [ 1 n n n n n n n ]
+   byte 4 [ 1 n n n n n n n ]
+   byte 5 [ 0 0 0 0 n n n n ]
+
 ```
+## Interrupts
+
+After reset interrupts are disabled. The ei/di instructions are used
+to enable/disable interrupts. When an interrupt occurs and interrupts
+are enabled the processor will complete current instruction and then
+save the complete state onto the stack.
+
+The registers R0-R14 are pushed followed by A, CC and last PC. Each
+word pushed is 4 bytes. Interrupts are then disabled.
+
+To return from interrupt the `reti` instruction is used. This will
+restore the processor state py poping from the stack in reverser order,
+i.e. PC, CC, A, R14 - R0. Finally interrupts are enabled.
+
+
 ## Function calling convention
 
-Leaf functions are called with "JSR func" and return is then done
-with the "func: ... SRP->A; J A" sequence.
+Leaf functions are called with `JSR` instruction and return is then done
+with the instruction sequence:
+```
+  SRP=A
+  J-A
+```
 
 Non-leaf functions have to save the PC on the stack and then the
-sequence is "JSR func; func: PUSH-SRP; ... POP A; J A"
+sequence is
+```
+  JSR func
 
-The PUSH Rx and POP Rx instructions are primarily for function calls
+  func:
+   PUSH-SRP
+   ...
+   POP-A
+   J-A
+```
+
+The `PUSH Rx` and `POP Rx` instructions are primarily for function calls
 (note that they push a sequence of registers R0 to Rn).
 
-Parameters P0-P3 are passed in R10-R13. Return value in R10.
+Parameters (P0-P3) are passed in register R10-R13. Return value is in R10.
 Parameters can be clobbered but registers R0-R9 are not allowed
 to be clobbered.
 
 A function should use registers R0 and up for temporaries and
-save on stack at start of function.
+but must save them on stack at start of function.
 
-func: PUSH-SRP; PUSH R4; ...use R0-4... POP R4; POP A; J A
+```
+  func:
+    PUSH-SRP
+    PUSH R4
+    ...use R0-4...
+    POP R4
+    POP-A
+    J-A
+```
 
-Passing parameters on the stack.
+If number of parameters are more then 4 then they need to be passed
+on the stack in addition to the register R10-R13.
 
+```
   PUSH R0 ; push parameter
   JSR func
   POP R0 ; deallocate parameter
@@ -186,16 +338,13 @@ func:
   PUSH-SRP
   PUSH R2 ; save temporaries
   A=M[SP-4] ; get the parameter
-...
+```
 
-
-The boundary R0-R9 / R10-R13 is not required by the instruction
-and can be choosen differently.
-
+The choice of using R0-R9 as temporary registers and  R10-R13 for parameters
+is just a convention. There is nothing in the instruction set that treats
+the registers differently.
 
 ## Issues
-  - CC is not part of the register bank. Awkward to save CC on interrupt,
-  - no XOR instruction
   - should mvi really sign extend? Loading constants with upper zeros but
     with highest immediate bit set is not possible. Instead must add another
     immediate byte with all zeros.
@@ -206,11 +355,6 @@ and can be choosen differently.
     - byte order is little endian (lsb is a lowest address)
     - unaligned 32-bit access is never done. The lower 2 address bits
       are masked before memory access, resulting in aligned access.
-  - jump offset is relative the first byte after the jump instruction.
-    - j #0 is therefore a NOP
-    - j #1 skips one byte after the jump instruction
-    - j #-1 jumps to last byte in jump instruction
-    - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
   - byte operations like string ops seems inefficient
     - have added byte ld/st to solve this
   - no wait for interrupt instruction
@@ -218,50 +362,62 @@ and can be choosen differently.
 
 ## Screenshot
 
-Here is a screenshot of the emulator while running the hello world
-program.
+Here is a screenshot of the emulator while running a lisp interpreter. The
+emulator view has processor register content, breakpoints, symbolic disassember
+with labels, memory viewer.
 
 ```
-  ┌--------------------------------------┐
-  |i: j #-2           160                |     A = M[R0].b     248
-  |                                      |     maskb A         250
-  |PC  00000004          4               |     R1 = A          1
-  |A   00000004          4               |     R2 = 127        130 127
-  |R0  0000000C         12               |     A = sex(0)      144
-  |R1  00000000          0               |     A = A - R1      193
-  |R2  FFFFFFFF 4294967295               |     jz #7           165 7
-  |R3  00000000          0               |     A = R1          17
-  |R4  00000000          0               |     M[R2].l = A     114
-  |R5  00000000          0               |     A = sex(1)      145
-  |R6  00000000          0               |     A = A + R0      176
-  |R7  00000000          0               |     R0 = A          0
-  |R8  00000000          0               |     j #-17          160 111
-  |R9  00000000          0               |     A = M[R0].b     248
-  |R10 00000000          0               |     maskb A         250
-  |R11 00000000          0               |     R1 = A          1
-  |R12 00000000          0               |     R2 = 127        130 127
-  |R13 00000000          0               |     A = sex(0)      144
-  |R14 00000000          0               |     A = A - R1      193
-  |R15 00000004          4               |     jz #7           165 7
-  |                                      |     A = R1          17
-  |N V C Z8 C8 Z16 C16                   |     M[R2].l = A     114
-  |0 0 0 1  0  1   0                     |     A = sex(1)      145
-  |                                      |     A = A + R0      176
-  |                                      |     R0 = A          0
-  |                                      |     j #-17          160 111
-  |                                      |     A = M[R0].b     248
-  |                                      |     maskb A         250
-  └--------------------------------------┘     R1 = A          1
-                                               R2 = 127        130 127
-                                               A = sex(0)      144
-  Hello World!                                 A = A - R1      193
-                                               jz #7           165 7
-                                               A = R15         31
-                                               j A             254
-                                               j #-2           160 126
-                                               j #-2           160 126
-                                               j #-2           160 126
-                                               j #-2           160 126
+ ┌----------------------------┐                                                        ┌-------------------------------------------------------------------------┐
+ |i: jsr #-57        175      |             1076: j #-25          160 103              |0000: 28 31 32 33 20 27 73 79 6D 30 20 27 28 73 79 6D (123 'sym0 '(sym   |
+ |                            |     L-PR-LIST-LO: A = R0          16                   |0010: 32 20 73 79 6D 31 29 29 00 00 00 00 00 00 00 00 2 sym1))........   |
+ |PC  00000422       1058     |             1054: R10 = A         10                   |0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |A   00000422       1058     |             1055: jsr #-662       175 250 106          |0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R0  00000023         35     |     L-CAR       : A = R10         26                   |0040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R1  00000004          4     |              397: A = A << 1      241                  |0050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R2  00000000          0     |              398: A = A << 1      241                  |0060: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R3  00000000          0     |              399: R10 = M[A+572].w 248 170 132         |0070: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R4  00000000          0     |              403: A = R14         30                   |0080: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R5  00000000          0     |              404: j A             254                  |0090: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R6  00000000          0     |             1058: jsr #-57        175 71               |00A0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R7  00000000          0     |     L-PRINT     : push srp        246                  |00B0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R8  00000000          0     |             1004: push R0..R1     244 1                |00C0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R9  00000000          0     |             1006: R1 = 892        129 134 124          |00D0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R10 00000003          3     |             1009: A = R10         26                   |00E0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R11 00000002          2     |             1010: R0 = A          0                    |00F0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R12 00000000          0     |             1011: A = A + R1      177                  |0100: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R13 00000000          0     |             1012: R1 = M[A].b     248 49               |0110: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |R14 00000422       1058     |             1014: A = sex(2)      146                  |0120: 0D 0A 3E 20 00 73 79 6D 31 00 00 00 00 00 00 00 ..> .sym1.......   |
+ |R15 0000085C       2140     |             1015: A = A - R1      193                  |0130: 00 00 00 00 00 00 00 00 00 00 00 00 00 6E 69 6C .............nil   |
+ |                            |             1016: jnz #4          166 4                |0140: 00 74 00 65 72 72 6F 72 00 71 75 6F 74 65 00 6E .t.error.quote.n   |
+ |N V C Z8 C8 Z16 C16         |     L-NOT-SYM   : A = sex(4)      148                  |0150: 6F 74 00 2B 00 64 65 66 76 61 72 00 6C 61 6D 62 ot.+.defvar.lamb   |
+ |0 0 0 1  0  1   0           |             1023: A = A - R1      193                  |0160: 64 61 00 64 65 66 75 6E 00 73 79 6D 30 00 73 79 da.defun.sym0.sy   |
+ |                            |             1024: jnz #4          166 4                |0170: 6D 32 00 73 79 6D 31 00 00 00 00 00 00 00 00 00 m2.sym1.........   |
+ |                            |             1026: jsr #15         175 15               |0180: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |                            |     L-PRINT-LIST: push srp        246                  |0190: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |                            |             1044: push R0..R1     244 1                |01A0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |                            |             1046: A = R10         26                   |01B0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ └----------------------------┘             1047: R0 = A          0                    |01C0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                            1048: R10 = 40        138 40               |01D0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                            1050: jsr #-734       175 250 34           |01E0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ (123 (quote sym0) (                L-PUTCHAR   : push R0..R0     244 0                |01F0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                             321: R0 = 127        128 127              |0200: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                             323: A = R10         26                   |0210: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                             324: M[R0].b = A     248 112              |0220: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+                                             326: pop R0..R0      245 0                |0230: 00 00 00 00 00 00 3B 00 25 00 00 00 00 00 00 00 ......;.%.......   |
+                                             328: A = R14         30                   |0240: 01 00 04 00 00 00 06 00 04 00 0C 00 45 07 00 00 ............E...   |
+                                             329: j A             254                  |0250: 00 00 00 00 01 00 05 00 02 00 06 00 03 00 07 00 ................   |
+                                    L-PR-LIST-LO: A = R0          16                   |0260: 69 06 00 00 09 00 12 00 0A 00 08 00 7B 06 00 00 i...........{...   |
+                                            1054: R10 = A         10                   |0270: 0C 00 16 00 0D 00 0B 00 C2 06 00 00 0F 00 18 00 ................   |
+                                            1055: jsr #-662       175 250 106          |0280: 10 00 0E 00 EF 06 00 00 12 00 1F 00 13 00 11 00 ................   |
+                                    L-CAR       : A = R10         26                   |0290: 17 07 00 00 15 00 26 00 16 00 14 00 7B 00 00 00 ......&.....{...   |
+                                             397: A = A << 1      241                  |02A0: 18 00 1D 00 00 00 2C 00 1A 00 00 00 03 00 1B 00 ......,.........   |
+                                             398: A = A << 1      241                  |02B0: 1C 00 24 00 00 00 31 00 1E 00 21 00 00 00 36 00 ..$...1...!...6.   |
+ ┌----------------------------┐              399: R10 = M[A+572].w 248 170 132         |02C0: 20 00 00 00 1F 00 00 00 03 00 22 00 23 00 00 00  .........".#...   |
+ |                            |              403: A = R14         30                   |02D0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |                            |              404: j A             254                  |02E0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ |                            |             1058: jsr #-57        175 71               |02F0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................   |
+ └----------------------------┘                                                        └-------------------------------------------------------------------------┘
+
 ```
 
 ## Installation

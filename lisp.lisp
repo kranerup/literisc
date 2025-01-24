@@ -259,6 +259,9 @@
     (mem-write-word dmem n-cons-free cons-free)
     cons-ptr))
 
+(defun set-sym-val (dmem symb val)
+  (mem-write-word dmem (+ n-cons (* cons-size symb)) val))
+
 (defun mem-write-dword ( dmem addr word32b )
   (assert (equal (logand addr 3) 0))
   (setf (aref dmem addr) (logand #xff word32b))
@@ -544,6 +547,7 @@
 (defconstant reader-rpar 2)
 (defconstant reader-sym 3)
 (defconstant reader-num 4)
+(defconstant reader-quote 5)
 
 ;;; output:
 ;;;   P0 - returns read object type
@@ -574,7 +578,7 @@
 
     ;; ----------- reading-symbol --------------
     ;; end of symbol?
-    ;; if c in ['(',')',' ',0]:  
+    ;; if c in ['(', ')', ' ', ''', 0]:  
     (mvi->r (char-code #\( ) R2)
     (r->a R2)
     (sub-r R0)
@@ -589,6 +593,11 @@
     (r->a R2)
     (sub-r R0)
     (jz l-end-of-sym)
+
+    (mvi->r (char-code #\' ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jz l-end-of-sym-unrd)
 
     (Rx= 10 R2) ; LF
     (A=Rx R2)
@@ -653,6 +662,16 @@
     (j l-reader-ret)
    
     (label l-not-rpar)
+    ;;  if char == '
+    (mvi->r (char-code #\' ) R2)
+    (r->a R2)
+    (sub-r R0)
+    (jnz l-not-quote)
+    ;;   then return '
+    (mvi->r reader-quote P0)
+    (j l-reader-ret)
+
+    (label l-not-quote)
     ;; is it space, CR or LF then just read next char
     (mvi->r (char-code #\ ) R2)
     (r->a R2)
@@ -786,25 +805,37 @@
 
      (mvi->a reader-lpar)
      (sub-r P0)
-     (jnz l-parse-nxt)
+     (jnz l-parse-quo)
 
      ;; '('
      (jsr l-list) ; -> P0
      (j l-parse-ret)
      
-     ;; quote TBD
+     ;; quote  -> (cons 'quote (cons (read) nil))
+     (label l-parse-quo)
+     (A= reader-quote)
+     (A-=Rx P0)
+     (jnz l-parse-nxt)
 
+     (jsr l-read) ; -> P0
+     (A= 0) (Rx=A P1) 
+     (jsr l-cons) ; (cons P0=read P1) -> P0 = new cons
+     (A=Rx P0)(Rx=A P1)
+     (Rx= fixed-cons-quote P0)
+     (jsr l-cons) ; (cons P0=quote P1=(cons (read) nil)) -> P0 = new cons
+     (j l-parse-ret)
+     
      ;; atom
      (label l-parse-nxt)
      ;; number
-     (mvi->a reader-num)
-     (sub-r P0)
+     (A= reader-num)
+     (A-=Rx P0)
      (jnz l-parse-sym)
 
      (r->a P1) (a->r P0)
      (jsr l-box-int); P0=number -> P0=cons
      (j l-parse-ret)
-     
+
      ;; symbol
      (label l-parse-sym)
      (mvi->r n-read-sym-str P0)
@@ -2208,6 +2239,20 @@
      (j-a)
      ))
 
+(defparameter func-primitives2
+  '( ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-quote)
+     ;; do not push SRP, apply already did that
+
+     (jsr l-car) ; quote just returns the argument unevaluated
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+    ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
 (setq test-read-c 
@@ -2267,6 +2312,9 @@
      (jsr f-scan)
      (r->a P1) (a->r P0)
      (jsr l-prtdec)
+
+     ;; quote
+     (jsr f-scan)
 
      ;; num "123"
      (jsr f-scan)
@@ -3066,7 +3114,8 @@
               func-cons func-gc func-print-symbol func-print
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
-              func-apply func-evlis func-bind func-reduce func-primitives ))
+              func-apply func-evlis func-bind func-reduce
+              func-primitives func-primitives2))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -3109,7 +3158,7 @@
   (asm-n-run test-reader
     #'(lambda (dmem proc)
         (set-program dmem 
-                     (string-to-mem "symbol 123 123x symbol2 ( inner )") 
+                     (string-to-mem "symbol 123 ' 123x symbol2 ( inner )") 
                      n-source-start))
     nil regression 10000))
 
@@ -3538,23 +3587,26 @@
 
 ;;; The initial cons cells and env.
 ;;; Note that to add primitives the symtab must be populated.
+(defconstant fixed-cons-nil   0)
+(defconstant fixed-cons-t     1)
+(defconstant fixed-cons-err   2)
+(defconstant fixed-cons-quote 3)
+
 (defun default-env (dmem)
-  (let* ((sym-0-nil (add-symbol dmem "nil" 0))
-         (sym-1-t   (add-symbol dmem "t" 1))
-         (sym-2-err (add-symbol dmem "error" 0))
+  (let* ((sym-0-nil (add-symbol dmem "nil" 0)) ; fixed positioned symbol
+         (sym-1-t   (add-symbol dmem "t" 1)); fixed positioned symbol
+         (sym-2-err (add-symbol dmem "error" 0)); fixed positioned symbol
+         (sym-3-q   (add-symbol dmem "quote" 0)); fixed positioned symbol
+         (sym-3-p   (set-sym-val dmem sym-3-q (add-prim dmem "l-quote")))
          (env (push-env dmem sym-0-nil 0)))
       (setf env (push-env dmem sym-1-t env))
       (setf env (push-env dmem sym-2-err env))
-      (setf env (push-env
-                  dmem (add-symbol dmem "not" (add-prim dmem "l-not")) env))
-      (setf env (push-env
-                  dmem (add-symbol dmem "+" (add-prim dmem "l-add")) env))
-      (setf env (push-env
-                  dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
-      (setf env (push-env
-                  dmem (add-symbol dmem "lambda" (add-prim dmem "l-lambda")) env))
-      (setf env (push-env
-                  dmem (add-symbol dmem "defun" (add-prim dmem "l-defun")) env))
+      (setf env (push-env dmem sym-3-q env))
+      (setf env (push-env dmem (add-symbol dmem "not" (add-prim dmem "l-not")) env))
+      (setf env (push-env dmem (add-symbol dmem "+" (add-prim dmem "l-add")) env))
+      (setf env (push-env dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
+      (setf env (push-env dmem (add-symbol dmem "lambda" (add-prim dmem "l-lambda")) env))
+      (setf env (push-env dmem (add-symbol dmem "defun" (add-prim dmem "l-defun")) env))
       (mem-write-word dmem n-global-env env)
     env))
   
@@ -4031,6 +4083,38 @@ nil
 
 (deftest run-defun  () (run-test #'test-source-defun "zf15"))
 ;;; ------------------------------------------------------------------------
+(defun test-source-read-quote ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-parse-3
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "(123 'sym0 '(sym2 sym1))")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-read-quote  () (run-test #'test-source-read-quote "(123 (quote sym0) (quote (sym2 sym1)))"))
+;;; ------------------------------------------------------------------------
+(defun test-source-eval-quote ( &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem 
+                                    "(defvar kalle '(1 2 3)) kalle")))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-eval-quote  () (run-test #'test-source-eval-quote "kalle(1 2 3)"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -4061,6 +4145,8 @@ nil
     (run-defvar)
     (run-lambda)
     (run-defun)
+    (run-read-quote)
+    (run-eval-quote)
     ))
 
 ;(run-emul e 200 nil)
