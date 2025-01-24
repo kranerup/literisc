@@ -58,7 +58,6 @@ only a few special instructions implicitly uses this register.
 ### First level instructions
 
 First instruction byte is divided into two fields, opcode and register.
-instruction format:
 ```
       opcode    Rx 
      7     4  3     0
@@ -91,12 +90,11 @@ All jumps have an offset that is relative current PC. The offset is variable siz
 with the same format as in immediate move instruction "Rx = nn".
 
 The jump offset is relative the first byte after the jump instruction.
-    - j #0 is therefore a NOP
-    - j #1 skips one byte after the jump instruction
-    - j #-1 jumps to last byte in jump instruction
-    - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
+- j #0 is therefore a NOP
+- j #1 skips one byte after the jump instruction
+- j #-1 jumps to last byte in jump instruction
+- j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
 
-instruction format:
 ```
                jump
               opcode
