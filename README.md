@@ -83,7 +83,7 @@ instruction format:
    |  12    |   A = A - Rx, sets CC = n v z c8 z8 c16 z16
    |  13    |   A = A & Rx
    |  14    |   A = A | Rx
-   |  15    |   register field is additional opcode
+   |  15    |   second level opcodes
    +--------+----------------------------
 ```
 ### Jump instructions
@@ -154,7 +154,7 @@ instruction format:
    |   12   | sexb A,    A<31:8>  = A<7>
    |   13   | sexw A,    A<31:16> = A<15>
    |   14   | j-A,       PC = A
-   |   15   | inused
+   |   15   | unused
    +--------+----------------------------
 ```
 
@@ -168,8 +168,9 @@ field that determines which registers to push.
 
      second
    | opcode |  instruction operation
-   +--------+----------------------------
+   +--------+----------------------------------------------------------
    |  4     | push R0..Rn,  for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
+   +--------+----------------------------------------------------------
 ```
 Two byte long pop instruction. The second byte holds a register
 field that determines which registers to pop
@@ -182,6 +183,7 @@ field that determines which registers to pop
    | opcode |  instruction operation
    +--------+----------------------------
    |  5     | pop R0..Rn,  for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
+   +--------+----------------------------------------------------------
 ```
 
 ### Third level instructions
@@ -238,7 +240,7 @@ This can encode immediate values in sizes of 7, 14, 21, 28 or 32 bits.
 
 The value is constructed by, for each byte, left shifting previous value
 and inserting the 7 bits from current byte into lsb of the new value.
-
+```
  7 bits
    byte 0 [    instr        ]
    byte 1 [ 0 n n n n n n n ]
