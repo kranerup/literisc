@@ -2331,7 +2331,7 @@
      (push-r R1)
     
      (A=Rx P0)(Rx=A R0) ; R0 = arg list
-     (A=Rx P1)(Rx=A R1) ; R0 = arg list
+     (A=Rx P1)(Rx=A R1) ; R1 = env
 
      ;; eval first argument 
      (jsr l-car)
@@ -2363,6 +2363,56 @@
      (pop-r R1)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     ;; (cond  (condition result)
+     ;;        (condition result) ... ))
+     (label l-prim-cond)
+     ;; do not push SRP, apply already did that
+
+     (push-r R2)
+    
+     (A=Rx P0)(Rx=A R0) ; R0 = arg list
+     (A=Rx P1)(Rx=A R1) ; R1 = env
+
+     (label l-cond-loop)
+     (A=Rx R0)(Rx=A P0) ; R0 = current cond-list
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R2) ; R2 = (condition result) list
+     (jsr l-car) ; condition
+     (A=Rx R1)(Rx=A P1) ; env
+     (jsr l-eval) ; eval condition
+
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-cond-false)
+     ;; not nil -> true
+
+     ;; eval and return the result
+     (A=Rx R2)(Rx=A P0) ; (condition result) list
+     (jsr l-cdr)
+     (jsr l-car) ; result value to be evaluated
+     (A=Rx R1)(Rx=A P1) ; env
+     (jsr l-eval)
+     (j l-cond-ret)
+
+     (label l-cond-false)
+     ;; get next cond-list item and repeat
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (A=Rx P0)(Rx=A R0)
+     (jsr l-cond-loop)
+
+     (label l-cond-ret)
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     
     ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
@@ -3750,6 +3800,7 @@
       (setf env (push-env dmem (add-symbol dmem "cons" (add-prim dmem "l-prim-cons")) env))
       (setf env (push-env dmem (add-symbol dmem "list" (add-prim dmem "l-prim-list")) env))
       (setf env (push-env dmem (add-symbol dmem "if" (add-prim dmem "l-prim-if")) env))
+      (setf env (push-env dmem (add-symbol dmem "cond" (add-prim dmem "l-prim-cond")) env))
       (mem-write-word dmem n-global-env env)
     env))
 
@@ -4287,6 +4338,10 @@ nil
                               "(1 2)30"
                               "(if t (list 1 2) 33) (if nil (list 1 2) (+ 10 20))"))
 ;;; ------------------------------------------------------------------------
+(deftest run-cond  () (run-test #'test-source 
+                              "2330"
+                              "(cond (t 2)(t 3)) (cond (nil 2)(t 3)) (cond (nil 2)(nil 3)(t (+ 10 20)))"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -4323,6 +4378,7 @@ nil
     (run-cons)
     (run-list)
     (run-if)
+    (run-cond)
     ))
 
 ;(run-emul e 200 nil)
