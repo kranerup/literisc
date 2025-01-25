@@ -2310,6 +2310,59 @@
      (pop-r R1)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-list)
+     ;; do not push SRP, apply already did that
+     (jsr l-evlis)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-if)
+     ;; do not push SRP, apply already did that
+
+     (push-r R1)
+    
+     (A=Rx P0)(Rx=A R0) ; R0 = arg list
+     (A=Rx P1)(Rx=A R1) ; R0 = arg list
+
+     ;; eval first argument 
+     (jsr l-car)
+     (jsr l-eval)
+
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-if-false)
+     ;; not nil -> true
+
+     ;; eval and return second argument
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-car)
+     (A=Rx R1)(Rx=A P1)
+     (jsr l-eval)
+     (j l-if-ret)
+
+     (label l-if-false)
+     ;; eval and return third argument
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-cdr)
+     (jsr l-car)
+     (A=Rx R1)(Rx=A P1)
+     (jsr l-eval)
+
+     (label l-if-ret)
+     (pop-r R1)
+     (pop-a) ;; apply did push SRP
+     (j-a)
     ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
@@ -3695,9 +3748,11 @@
       (setf env (push-env dmem (add-symbol dmem "car" (add-prim dmem "l-prim-car")) env))
       (setf env (push-env dmem (add-symbol dmem "cdr" (add-prim dmem "l-prim-cdr")) env))
       (setf env (push-env dmem (add-symbol dmem "cons" (add-prim dmem "l-prim-cons")) env))
+      (setf env (push-env dmem (add-symbol dmem "list" (add-prim dmem "l-prim-list")) env))
+      (setf env (push-env dmem (add-symbol dmem "if" (add-prim dmem "l-prim-if")) env))
       (mem-write-word dmem n-global-env env)
     env))
-  
+
 ;; call eval with a num cons
 ;; should return the num cons
 (defun test-eval-num ( &optional (regression nil) )
@@ -4224,6 +4279,14 @@ nil
                                    "(1 . 2)"
                                    "(cons 1 2)"))
 ;;; ------------------------------------------------------------------------
+(deftest run-list  () (run-test #'test-source 
+                                   "(1 2 t)"
+                                   "(list 1 2 t)"))
+;;; ------------------------------------------------------------------------
+(deftest run-if  () (run-test #'test-source 
+                              "(1 2)30"
+                              "(if t (list 1 2) 33) (if nil (list 1 2) (+ 10 20))"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -4258,6 +4321,8 @@ nil
     (run-eval-quote)
     (run-car-cdr)
     (run-cons)
+    (run-list)
+    (run-if)
     ))
 
 ;(run-emul e 200 nil)
