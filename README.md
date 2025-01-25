@@ -1,5 +1,9 @@
 # LiteRISC
-The LiteRISC processor
+The LiteRISC processor - by Kenny Ranerup
+
+This is a small RISC processor with a novel instruction set that has
+been implemented in Verilog and ran in an FPGA. There is an assembler,
+an emulator, a serial boot loader as well as an, incomplete, Lisp interpreter.
 
 The idea was to create a compact instruction set like the early 8-bit
 processor (6502, 6809) but with 32-bit operations and a large general purpose
