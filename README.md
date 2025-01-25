@@ -261,6 +261,11 @@ This can encode immediate values in sizes of 7, 14, 21, 28 or 32 bits.
 
 The value is constructed by, for each byte, left shifting previous value
 and inserting the 7 bits from current byte into lsb of the new value.
+
+Note that the immediate value is sign extended to allow for jump and offsets
+to be negative. This has the consequence that loading a value shorter than 32 bits
+with the upper bits being 0 will might require and additional byte with all
+zeros to avoid sign extension setting the upper bits to 1.
 ```
  7 bits
    byte 0 [    instr        ]
@@ -293,6 +298,18 @@ and inserting the 7 bits from current byte into lsb of the new value.
    byte 5 [ 0 0 0 0 n n n n ]
 
 ```
+### Load/store instructions
+
+The addresses are always byte addresses but the the addresses must always
+be aligned to the storage size of the load/store instruction. There are
+byte, word and double word storage sizes (1,2 and 4 bytes wide data).
+The word instructions require word aligned addresses (address bit 0 == 0)
+and double word instructions require address bit 1,0 == 0.
+If an unaligned address is used the lowest bits will be used as 0.
+
+When writing integer data from a register into memory the byte order is little
+endian, meaning that the least significant byte is at the lowest address.
+
 ## Interrupts
 
 After reset interrupts are disabled. The ei/di instructions are used
@@ -367,21 +384,22 @@ The choice of using R0-R9 as temporary registers and  R10-R13 for parameters
 is just a convention. There is nothing in the instruction set that treats
 the registers differently.
 
-## Issues
-  - should mvi really sign extend? Loading constants with upper zeros but
-    with highest immediate bit set is not possible. Instead must add another
-    immediate byte with all zeros.
-  - document this:
-    But since ld/st can't do byte operations perhaps all should use word addresses.
-    - all memory accesses are 32-bit long
-    - memory addresses are byte addresses
-    - byte order is little endian (lsb is a lowest address)
-    - unaligned 32-bit access is never done. The lower 2 address bits
-      are masked before memory access, resulting in aligned access.
-  - byte operations like string ops seems inefficient
-    - have added byte ld/st to solve this
-  - no wait for interrupt instruction
-  - shouldn't STST SRP be PUSH SRP?
+## Miscellaneous
+
+There is no halt or wait for interrupt instruction. As halt the `jmp #-2` can
+be used.
+
+There is no instruction to push an arbitrary register to the stack. The
+shortest sequence is to use the push-r instruction:
+```
+  A=Rx RN
+  Rx=A R0
+  push-r R0
+```
+This creates an assymetry making the register R0 special. The need for pushing
+arbitrary register should be limited but it might be needed in subroutine calls
+with more than four parameters.
+
 
 ## Screenshot
 
