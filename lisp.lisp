@@ -353,7 +353,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 80)
+  (defparameter nr-cons 100)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -2412,7 +2412,65 @@
      (pop-a) ;; apply did push SRP
      (j-a)
      
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     ;; (let  ( (n1 v1)
+     ;;         (n2 v2) ,,, )
+     ;;       body)
+     (label l-prim-let)
+     ;; do not push SRP, apply already did that
+
+     (push-r R2)
+    
+     (A=Rx P0)(Rx=A R0) ; R0 = arg list
+     (A=Rx P1)(Rx=A R1) ; R1 = env
      
+     (jsr l-car) ; car of arg list is the let binding list 
+     (A=Rx P0)(Rx=A R2) ; R2 = bind list
+    
+     (label l-let-loop)
+     (A= 0)
+     (A-=Rx R2)
+     (jz l-let-eol)
+
+     (A=Rx R2)(Rx=A P0) ; bind list
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R3) ; R3 = (n v)
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R4) ; R4 = n
+     (A=Rx R3)(Rx=A P0)
+     (jsr l-cdr)
+     (jsr l-car) ; v
+     (A=Rx R1)(Rx=A P1) ; env
+     (jsr l-eval)
+
+     (A=Rx P0)(Rx=A P1) ; val -> P1
+     (A=Rx R4)(Rx=A P0) ; n -> P0
+     (A=Rx R1)(Rx=A P2) ; env -> P2
+
+     (jsr l-pair) ; P0-2: sym,val,env -> P0=new env 
+     (A=Rx P0)(Rx=A R1) ; updated env
+
+     (A=Rx R2)(Rx=A P0) ; bind list
+     (jsr l-cdr)
+     (A=Rx P0)(Rx=A R2)
+     
+     (j l-let-loop)
+     
+     (label l-let-eol)
+     (A=Rx R0)(Rx=A P0) ; R0 = arg list
+     (jsr l-cdr)
+     (jsr l-car) ; body to be evaluated with the new env
+    
+     (A=Rx R1)(Rx=A P1) ; new env
+     (jsr l-eval) ; eval body
+     
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
     ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
@@ -3801,6 +3859,7 @@
       (setf env (push-env dmem (add-symbol dmem "list" (add-prim dmem "l-prim-list")) env))
       (setf env (push-env dmem (add-symbol dmem "if" (add-prim dmem "l-prim-if")) env))
       (setf env (push-env dmem (add-symbol dmem "cond" (add-prim dmem "l-prim-cond")) env))
+      (setf env (push-env dmem (add-symbol dmem "let" (add-prim dmem "l-prim-let")) env))
       (mem-write-word dmem n-global-env env)
     env))
 
@@ -4342,6 +4401,10 @@ nil
                               "2330"
                               "(cond (t 2)(t 3)) (cond (nil 2)(t 3)) (cond (nil 2)(nil 3)(t (+ 10 20)))"))
 ;;; ------------------------------------------------------------------------
+(deftest run-let  () (run-test #'test-source 
+                              "3"
+                              "(let ((a 1)(b 2)) (+ a b))"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -4379,6 +4442,7 @@ nil
     (run-list)
     (run-if)
     (run-cond)
+    (run-let)
     ))
 
 ;(run-emul e 200 nil)
