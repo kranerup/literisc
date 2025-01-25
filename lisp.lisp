@@ -2252,6 +2252,64 @@
      (pop-a) ;; apply did push SRP
      (j-a)
 
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-car)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+
+     (jsr l-car) ; car on the evaluated argument
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-cdr)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+
+     (jsr l-cdr) ; cdr on the evaluated argument
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-cons)
+     ;; do not push SRP, apply already did that
+     (push-r R1)
+    
+     (A=Rx P0)(Rx=A R0) ; R0 = arg list
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R1) ; R1 = first cons arg after eval
+
+     (A=Rx R0)(Rx=A P0) ; arg list
+     (jsr l-cdr) 
+     (jsr l-car) ; second argument = (car (cdr arg-list))
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A P1) ; P1 = second cons arg after eval
+     (A=Rx R1)(Rx=A P0) ; P0 = first arg
+     (jsr l-cons) ; (cons P0 P1) -> P0
+
+     (pop-r R1)
+     (pop-a) ;; apply did push SRP
+     (j-a)
     ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
@@ -3055,20 +3113,47 @@
      (label l-print-list)
      (push-srp)
      (push-r R1)
+     (Rx= n-cons-type R1)
+
      (r->a P0) (a->r R0)
      (mvi->r (char-code #\() P0)
      (jsr l-putchar)
+
      (label l-pr-list-loop)
      (r->a R0) (a->r P0)
      (jsr l-car)
      (jsr l-print)
      (r->a R0) (a->r P0)
      (jsr l-cdr)
-     (r->a P0) (a->r R0)
+     (r->a P0) (a->r R0) ; R0 = cdr
+
      (mvi->a 0) ;; nil?
      (sub-r R0)
-     (jz l-eol)
+     (jz l-eol) ; proper end of list
 
+     (A=Rx R1)
+     (A+=Rx R0)
+     (Rx=M[A].b R2) ; R2 = cons-type
+
+     (A= c-cons-cons)
+     (A-=Rx R2)
+     (jz l-proper)
+     ;; cdr was not a cons so it's not a proper
+     ;; list. Print as a pair. It's also end of list.
+     (mvi->r (char-code #\ ) P0)
+     (jsr l-putchar)
+
+     (mvi->r (char-code #\.) P0)
+     (jsr l-putchar)
+
+     (mvi->r (char-code #\ ) P0)
+     (jsr l-putchar)
+
+     (A=Rx R0)(Rx=A P0) ; print cdr
+     (jsr l-print)
+     (j l-eol)
+
+     (label l-proper)
      (mvi->r (char-code #\ ) P0)
      (jsr l-putchar)
      (j l-pr-list-loop)
@@ -3079,8 +3164,6 @@
      (pop-r R1)
      (pop-a)
      (j-a)))
-     
-
 
 (defvar *hello-world* nil)
 ;(setq *hello-world*
@@ -3128,14 +3211,16 @@
 ;(setf e (make-emulator *hello-world* dmem 0 nil))
 ;(run-with-curses e)
 
-(defun run-test (test &optional (expected-print nil))
+(defun run-test (test &optional (expected-print nil) (source nil))
   (with-output-to-string (*standard-output*)
     (setq dmem (make-dmem 4000))
     (init-lisp))
   (check
     (let ((printed 
             (with-output-to-string (*standard-output*)
-              (funcall test t))))
+              (if source
+                  (funcall test source t)
+                (funcall test t)))))
       (if (and expected-print (not (equal printed expected-print)))
           (progn (format t "missmatch printed:~a expected:~a" printed expected-print) nil)
           t))))
@@ -3607,6 +3692,9 @@
       (setf env (push-env dmem (add-symbol dmem "defvar" (add-prim dmem "l-defvar")) env))
       (setf env (push-env dmem (add-symbol dmem "lambda" (add-prim dmem "l-lambda")) env))
       (setf env (push-env dmem (add-symbol dmem "defun" (add-prim dmem "l-defun")) env))
+      (setf env (push-env dmem (add-symbol dmem "car" (add-prim dmem "l-prim-car")) env))
+      (setf env (push-env dmem (add-symbol dmem "cdr" (add-prim dmem "l-prim-cdr")) env))
+      (setf env (push-env dmem (add-symbol dmem "cons" (add-prim dmem "l-prim-cons")) env))
       (mem-write-word dmem n-global-env env)
     env))
   
@@ -4115,6 +4203,27 @@ nil
 
 (deftest run-eval-quote  () (run-test #'test-source-eval-quote "kalle(1 2 3)"))
 ;;; ------------------------------------------------------------------------
+(defun test-source( source-string &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                   (let* ((env (default-env dmem)))
+                     (mem-write-word dmem n-global-env env)
+                     (when (not regression) (format t "env: ~d~%" env))
+                     (set-source dmem source-string)))
+               nil regression 200000)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+
+(deftest run-car-cdr  () (run-test #'test-source 
+                                   "1(2 3)"
+                                   "(car (quote (1 2 3))) (cdr (quote (1 2 3)))"))
+;;; ------------------------------------------------------------------------
+(deftest run-cons  () (run-test #'test-source 
+                                   "(1 . 2)"
+                                   "(cons 1 2)"))
+;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
   (combine-results
@@ -4147,6 +4256,8 @@ nil
     (run-defun)
     (run-read-quote)
     (run-eval-quote)
+    (run-car-cdr)
+    (run-cons)
     ))
 
 ;(run-emul e 200 nil)
