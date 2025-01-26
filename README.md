@@ -424,6 +424,81 @@ This creates an assymetry making the register R0 special. The need for pushing
 arbitrary register should be limited but it might be needed in subroutine calls
 with more than four parameters.
 
+## Instruction Set Table
+
+Here is a complete summary of all instructions and their instruction format.
+The instruction format consists of one or two bytes and each byte is subdivided
+into a most significant nybble (msn) and a least significant nybble (lsn).
+Instructions can have variable sized immediate data as well.
+
+```
+   [  byte 0 ]   [ byte 1  ] |
+   [ msn| lsn]   [ msn| lsn] | instruction description
+   ------------+-------------+--------------------------------------------
+   [  0 | Rx ]   -----------  Rx = A
+   [  1 | Rx ]   -----------  A = Rx
+   [  2 | Rx ]   immediate    Rx = M[A+nn].l, nn is 1 to 5 following bytes
+   [  3 | Rx ]   -----------  Rx = M[A].l
+   [  4 | Rx ]   -----------  A = M[Rx].l
+   [  5 | Rx ]   immediate    M[A+nn].l = Rx
+   [  6 | Rx ]   -----------  M[A].l = Rx
+   [  7 | Rx ]   -----------  M[Rx].l = A
+   [  8 | Rx ]   immediate    Rx = sex(nn), nn is 1 to 5 following bytes
+   [  9 | n  ]   -----------  A = sex(n), where n is the value of the register field
+   [ 10 | 0  ]   immediate    j   #nn   - jump always        |  -
+   [ 10 | 1  ]   immediate    jlt #nn   - jump <   signed    |   n ^ v
+   [ 10 | 2  ]   immediate    jge #nn   - jump >=  signed    | !(n ^ v)
+   [ 10 | 3  ]   immediate    jlo #nn   - jump <   unsigned  |   c
+   [ 10 | 4  ]   immediate    jhs #nn   - jump >=  unsigned  |  !c
+   [ 10 | 5  ]   immediate    jz  #nn   - jump on zero       |   z
+   [ 10 | 6  ]   immediate    jnz #nn   - jump on not zero   |  !z
+   [ 10 | 7  ]   immediate    jlo.b #nn - jump <   unsigned  |   c8
+   [ 10 | 8  ]   immediate    jhs.b #nn - jump >=  unsigned  |  !c8
+   [ 10 | 9  ]   immediate    jz.b  #nn - jump on zero       |   z8
+   [ 10 | 10 ]   immediate    jnz.b #nn - jump on not zero   |  !z8
+   [ 10 | 11 ]   immediate    jlo.w #nn - jump <   unsigned  |   c16
+   [ 10 | 12 ]   immediate    jhs.w #nn - jump >=  unsigned  |  !c16
+   [ 10 | 13 ]   immediate    jz.w  #nn - jump on zero       |   z16
+   [ 10 | 14 ]   immediate    jnz.w #nn - jump on not zero   |  !z16
+   [ 10 | 15 ]   immediate    jsr #nn   - SRP = PC; PC = PC + sex(nn)
+   [ 11 | Rx ]   -----------  A = A + Rx
+   [ 12 | Rx ]   -----------  A = A - Rx, sets CC = n v z c8 z8 c16 z16
+   [ 13 | Rx ]   -----------  A = A & Rx
+   [ 14 | Rx ]   -----------  A = A | Rx
+   [ 15 | 0  ]   -----------  not  A,    A = ~A
+   [ 15 | 1  ]   -----------  lsl  A,    c = A, A = A << 1, A<0> = 0
+   [ 15 | 2  ]   -----------  lsr  A,    c = A, A = A >> 1, A<31> = 0
+   [ 15 | 3  ]   -----------  asr  A,    c = A, A = A >> 1, A<31> = A<30>
+   [ 15 | 4  ]   [  0 | Rx ]  push R0..Rn,  for (r=R0..Rn) { sp = sp - 4; M[sp].l=r;  }
+   [ 15 | 5  ]   [  0 | Rx ]  pop R0..Rn,  for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
+   [ 15 | 6  ]   -----------  push srp,  sp = sp - 4, M[sp].l = srp
+   [ 15 | 7  ]   -----------  pop-a,     a = M[sp].l, sp = sp + 4
+   [ 15 | 8  ]   [  0 | Rx ]  adc,               c,A = A + Rx + c
+   [ 15 | 8  ]   [  1 | Rx ]  unused
+   [ 15 | 8  ]   [  2 | Rx ]  Rx = M[A+nn].b
+   [ 15 | 8  ]   [  3 | Rx ]  Rx = M[A].b
+   [ 15 | 8  ]   [  4 | Rx ]  A = M[Rx].b
+   [ 15 | 8  ]   [  5 | Rx ]  M[A+nn].b = Rx
+   [ 15 | 8  ]   [  6 | Rx ]  M[A].b = Rx
+   [ 15 | 8  ]   [  7 | Rx ]  M[Rx].b = A
+   [ 15 | 8  ]   [  8 | 0  ]  ei
+   [ 15 | 8  ]   [  8 | 1  ]  di
+   [ 15 | 8  ]   [  8 | 2-15 ]  unused
+   [ 15 | 8  ]   [  9 | Rx ]  A = A xor Rx
+   [ 15 | 8  ]   [ 10 | Rx ]  Rx = M[A+nn].w
+   [ 15 | 8  ]   [ 11 | Rx ]  Rx = M[A].w
+   [ 15 | 8  ]   [ 12 | Rx ]  A = M[Rx].w
+   [ 15 | 8  ]   [ 13 | Rx ]  M[A+nn].w = Rx
+   [ 15 | 8  ]   [ 14 | Rx ]  M[A].w = Rx
+   [ 15 | 8  ]   [ 15 | Rx ]  M[Rx].w = A
+   [ 15 | 9  ]   -----------  reti,      pop pc, cc, A, r14-r0 and ei
+   [ 15 | 10 ]   -----------  maskb A,   A = A & 0xff
+   [ 15 | 11 ]   -----------  maskw A,   A = A & 0xffff
+   [ 15 | 12 ]   -----------  sexb A,    A<31:8>  = A<7>
+   [ 15 | 13 ]   -----------  sexw A,    A<31:16> = A<15>
+   [ 15 | 14 ]   -----------  j-A,       PC = A
+   [ 15 | 15 ]   -----------  unused
+```
 
 ## Screenshot
 
