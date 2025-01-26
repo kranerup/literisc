@@ -114,6 +114,24 @@ First instruction byte is divided into two fields, opcode and register.
    +--------+----------------------------
 ```
 ### Jump instructions
+
+The conditional jump instructions are intended to be used after a
+`A-=Rx` subtraction instruction since that instruction sets the flags.
+This instruction can be regarded as a comparison.
+
+```
+A < R3 (unsigned 32-bit compare)
+if true jump to xxx
+```
+is equivalent to
+```
+A -= R3
+jlt xxx
+```
+
+There are signed and unsigned jumps and size of operands can be 8/16 or 32
+bits.
+
 All jumps have an offset that is relative current PC. The offset is variable size
 with the same format as in immediate move instruction "Rx = nn".
 
@@ -122,6 +140,8 @@ The jump offset is relative the first byte after the jump instruction.
 - j #1 skips one byte after the jump instruction
 - j #-1 jumps to last byte in jump instruction
 - j #-2 jumps to first byte in jump insruction, i.e. an endless loop.
+
+The jump instruction naming is inspired by the 6809 processor instruction set.
 
 ```
                jump

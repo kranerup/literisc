@@ -2472,6 +2472,52 @@
      (pop-a) ;; apply did push SRP
      (j-a)
     ))
+
+(defparameter func-primitives3
+  '( ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-less)
+     ;; do not push SRP, apply already did that
+
+     (push-r R2)
+
+     (A=Rx P0) (Rx=A R0) ; arg-list
+     (A=Rx P1) (Rx=A R1) ; env
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (jsr l-getcons) ; get number value, assume eval:ed arg is a number
+     (A=Rx P0)(Rx=A R2) ; first
+    
+     ;; next arg
+     (A=Rx R0)(Rx=A P0) ; arg-list
+     (jsr l-cdr) ; P0 = cdr(arg-list)
+     (jsr l-car) ; P0 = (car (cdr arg-list)) ; second arg
+     (A=Rx R1)(Rx=A P1)
+     (jsr l-eval)
+     (jsr l-getcons) ; second
+
+     ;;; R2 < P0 <-> first < second
+     (A=Rx R2)
+     (A-=Rx P0)
+     (jlt l-less-true)
+     
+     (A= 0)
+     (Rx=A P0) ; return nil
+     (j l-less-ret)
+
+     (label l-less-true)
+     (A= 1)
+     (Rx=A P0)
+     
+     (label l-less-ret)
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     ))
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
 (setq test-read-c 
@@ -3359,7 +3405,7 @@
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
-              func-primitives func-primitives2))
+              func-primitives func-primitives2 func-primitives3))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -3860,6 +3906,7 @@
       (setf env (push-env dmem (add-symbol dmem "if" (add-prim dmem "l-prim-if")) env))
       (setf env (push-env dmem (add-symbol dmem "cond" (add-prim dmem "l-prim-cond")) env))
       (setf env (push-env dmem (add-symbol dmem "let" (add-prim dmem "l-prim-let")) env))
+      (setf env (push-env dmem (add-symbol dmem "<" (add-prim dmem "l-prim-less")) env))
       (mem-write-word dmem n-global-env env)
     env))
 
