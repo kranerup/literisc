@@ -572,8 +572,18 @@ sudo snap install curl
 sudo apt install ncurses-dev
 curl -O https://beta.quicklisp.org/quicklisp.lisp
 sudo apt install build-essential
-sbcl --load quicklisp.lisp 
+sbcl --load quicklisp.lisp
+  (quicklisp-quickstart:install)
+  (ql:add-to-init-file)
+  (exit)
 git clone git@github.com:kranerup/literisc.git liteRISC
-cd liteRISC
+alternatively: git clone https://github.com/kranerup/literisc.git liteRISC
+cd ~/quicklisp/local-projects
+ln -s ~/liteRISC # or the path where you ran git clone
+sbcl
+  (ql:register-local-projects)
+  (ql:quickload "literisc")
+  (exit)
+cd ~/liteRISC # or the path where you ran git clone
 sbcl --load run.lisp
 ```
