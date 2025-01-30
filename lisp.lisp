@@ -353,7 +353,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 100)
+  (defparameter nr-cons 200)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -1534,11 +1534,11 @@
 
 
 (defparameter func-assoc
-  '( ;; assoc
+  '( ;; ------  assoc -----------------
      (label l-assoc)
      ;; input: P0 = cons index to a symbol cons
      ;;        P1 = an env/association list, cons index
-     ;; output: P0 = cons index to the value (nil if not found)
+     ;; output: P0 = cons index to the symbol cons (nil if not found)
      ;;         P1 = 0 if not found
      ;; env is a list: (cons `sym-a (cons `sym-b nil))
      ;; a symbols value is embedded in the symbol cons cell
@@ -1568,7 +1568,7 @@
      (label l-symb-found)
      (A=Rx R2) ; the symb cons
      (Rx=A P0)
-     (jsr l-car) ; P0 = the value ptr of the symb cons
+     ;(jsr l-car) ; P0 = the value ptr of the symb cons
      (A= 1)
      (Rx=A P1) ; #t / symbol found
      (j l-assoc-ret)
@@ -1660,12 +1660,13 @@
      (pop-a)
      (j-a)
 
-     ;; symbol value is returned by assoc search in the env
+     ;; symbol cons is returned by assoc search in the env
      (label l-eval-symbol)
      (jsr l-assoc)
      (A= 0)
      (A-=Rx P1) ; 0 -> not found then return error
      (jz l-ret-err)
+     (jsr l-car) ; get symbol value
      (j l-eval-ret) ; return value from assoc in P0
    
      ;; apply function
@@ -1901,7 +1902,7 @@
     (label l-pair)
     ;; input: P0 = symbol
     ;;        P1 = value
-    ;;        P2 = env, an list, cons index
+    ;;        P2 = env, a list, cons index
     ;; output: P0 = head of new env cons
     ;;         (P1 = env)
     ;;         (P2 = env)
@@ -2474,8 +2475,41 @@
     ))
 
 (defparameter func-primitives3
-  '( ;; --- -----------------------------------
+  '( 
+     ;; --- -----------------------------------
      ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P2= first argument after evaluation
+     ;;         P3= second argument after evaluation
+     ;;         P0,P1 unchanged
+     (label l-get-two-args)
+     (push-srp)
+     (push-r R3)
+     
+     (A=Rx P0) (Rx=A R0) ; arg-list
+     (A=Rx P1) (Rx=A R1) ; env
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R2) ; first
+    
+     ;; next arg
+     (A=Rx R0)(Rx=A P0) ; arg-list
+     (jsr l-cadr) ; P0 = (car (cdr arg-list)) ; second arg
+     (A=Rx R1)(Rx=A P1) ; env
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A P3) 
+     (A=Rx R0)(Rx=A P0) 
+     (A=Rx R1)(Rx=A P1) 
+     (A=Rx R2)(Rx=A P2) 
+
+     (pop-r R3)
+     (pop-a)
+     (j-a)
+     
+     ;; --- < -----------------------------------
+     ;; input: P0=arg-list (but only two args allowed)
      ;;        P1=env
      ;; output: P0=result
      (label l-prim-less)
@@ -2517,7 +2551,457 @@
      (pop-r R2)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- eq -----------------------------------
+     ;; Returns true if both params are the same object,
+     ;; i.e. their cons pointers are the same. 
+     ;;
+     ;; input: P0=arg-list (but only two args allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-eq)
+     ;; do not push SRP, apply already did that
+
+     (jsr l-get-two-args) ; P2=first, P3=second
+     (A=Rx P2)
+     (A-=Rx P3)
+     (jz l-is-eq)
+
+     ;; not eq, return nil
+     (A= 0)
+     (j l-eq-ret)
+
+     ;; eq, return t
+     (label l-is-eq)
+     (A= 1)
+    
+     (label l-eq-ret)
+     (Rx=A P0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- numberp -----------------------------------
+     ;; input: P0 - cons
+     ;; output: P0 - t/nil
+     (label l-numberp)
+     (push-r R0)
+     
+     (Rx= n-cons-type R0)
+     (A=Rx R0)
+     (A+=Rx P0) ; index in cons-type
+     (Rx=M[A].b R0) ; R0=type of cons
+
+     (A= c-cons-number)
+     (A-=Rx R0)
+     (jz l-nump-t)
+     (A= 0) ; nil
+     (j l-nump-ret)
+     
+     (label l-nump-t)
+     (A= 1) ; t
+
+     (label l-nump-ret)
+     (Rx=A P0)
+     
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
+     
+     ;; --- numberp -----------------------------------
+     ;; input: P0=arg-list (but only two args allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-numberp)
+     ;; do not push SRP, apply already did that
+  
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+
+     (jsr l-numberp)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+ 
+     ;; --- eql -----------------------------------
+     ;; If both params are number then compare thie
+     ;; values, else compare the cons's.
+     ;;
+     ;; input: P0=arg-list (but only two args allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-eql)
+     ;; do not push SRP, apply already did that
+
+     (jsr l-get-two-args) ; P2=first, P3=second
+
+     ;; first param a number?
+     (A=Rx P2)(Rx=A P0)
+     (jsr l-numberp)
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-cmp-eq) ; not a number
+    
+     ;; second param a number?
+     (A=Rx P3)(Rx=A P0)
+     (jsr l-numberp)
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-cmp-eq)
+
+     ;; both are numbers , get their values for compare
+     (A=Rx P2)(Rx=A P0)
+     (jsr l-getcons) ; get the num value
+     (A=Rx P0)(Rx=A P2)
+     
+     (A=Rx P3)(Rx=A P0)
+     (jsr l-getcons) ; get the num value
+     (A=Rx P0)(Rx=A P3)
+    
+     (label l-cmp-eq)
+     (A=Rx P2)
+     (A-=Rx P3)
+     (jz l-is-eql)
+
+     ;; not eq, return nil
+     (A= 0)
+     (j l-eql-ret)
+
+     ;; eq, return t
+     (label l-is-eql)
+     (A= 1)
+    
+     (label l-eql-ret)
+     (Rx=A P0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
      ))
+
+(defparameter func-primitives4
+  '( 
+     ;; --- setq -----------------------------------
+     ;; input: P0=arg-list
+     ;;        P1=env
+     ;; output: P2= first argument after evaluation
+     (label l-prim-setq)
+     (push-r R2)
+    
+     (A=Rx P0)(Rx=A R0) ; R0=arg-list
+     (A=Rx P1)(Rx=A R1) ; R1=env
+     (jsr l-car) ; first arg is symbol
+     (jsr l-assoc) ; get symbol cons
+     (A=Rx P0)(Rx=A R2) ; R2 = symbol cons
+ 
+     ;; get second arg and eval
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cadr)
+     (A=Rx R1)(Rx=A P1) ; env
+     (jsr l-eval)
+    
+     (A=Rx P0)(Rx=A P1) ; value
+     (A=Rx R2)(Rx=A P0) ; symbol cons
+     (jsr l-rplca) ; set symbol value to the evaluation result
+
+     (A=Rx P1)(Rx=A P0) ; return value
+    
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     
+     ;; --- print -----------------------------------
+     ;; input: P0=arg-list
+     ;;        P1=env
+     (label l-prim-print)
+     (push-r R0)
+     
+     (jsr l-car)
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A R0)
+     
+     ;(Rx= (char-code #\Return) P0)
+     ;(jsr l-putchar) 
+     (Rx= (char-code #\Linefeed) P0)
+     (jsr l-putchar) 
+   
+     (label l-prt-part)
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-print)
+     (A=Rx R0)(Rx=A P0)
+  
+     (pop-r R0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     ;; --- prin1 -----------------------------------
+     ;; input: P0=arg-list
+     ;;        P1=env
+     (label l-prim-prin1)
+     (push-r R0)
+     
+     (jsr l-car)
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A R0)
+   
+     (j l-prt-part) ; shared code with print
+
+     ))
+(defparameter func-tagbody
+  '( 
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;;
+     ;; (tagbody
+     ;;   (...)
+     ;;   label1
+     ;;   (...)
+     ;;   (... (go label1))
+     ;;   (...))
+     ;; - there is no requirement on the order between go and label
+     ;; - nested functions and tagbody can go to an outer label
+     ;;
+     ;; iterate through body
+     ;;   when reaching a symbol, add symbol to env
+     ;; env now contains all labels
+     ;; iterate again with the new env
+     ;;   when reaching a label, save state in the symbol value.
+     ;;   state is next tagbody statement/cons in the tagbody body list, save the env, save SP
+     ;;     state: (list next-body env SP) where next-body/env are cons pointers and SP is a number
+     ;; iterate through body, eval each statement,
+     ;; when a statement calls "go" get the state from symbol and restore SP, env and statement ptr in regs
+     ;;   jump to the tagbody code that evaluates next statement
+     (label l-prim-tagbody)
+     ;; do not push SRP, apply already did that
+     (push-r R3)
+
+     (A=Rx P0)(Rx=A R0)  ; R0 = arg-list
+     (A=Rx P1)(Rx=A R1)  ; R1 = env
+
+     ;; walk through tagbody and declare all label symbols
+     (jsr l-decl-labels) ; -> P0 = new env
+     (A=Rx P0)(Rx=A R2) ; R2 = new env with labels
+
+     ;; walk through tagbody and save state in all label symbols
+     (A=Rx R0)(Rx=A P0)  ; arg-list
+     (A=Rx R2)(Rx=A P1)  ; new env
+     (A=Rx SP)(Rx=A P2)  ; SP
+     (jsr l-save-state)
+   
+     (A=Rx R0)(Rx=A P0)  ; arg-list
+     (A=Rx R2)(Rx=A P1)  ; new env
+     (j l-eval-tagbody)  ; jump so that SP is the same as when we saved it in labels
+
+
+     ;;----------------------------
+     ;; input P0: arg-list
+     ;;       P1: env
+     (label l-decl-labels)
+     (push-srp)
+     (push-r R2)
+     
+     (A=Rx P0)(Rx=A R0) ; R0 = arg-list
+     (A=Rx P1)(Rx=A R1) ; R1 = env
+
+     (label l-decl-lp)
+     (A= 0)
+     (A-=Rx R0)
+     (jz l-end-decl)
+
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R2) ; R2=car
+    
+     (jsr l-symbolp)
+
+     (A= 0)
+     (A-=Rx P0) ; nil?
+     (jz l-next-decl)
+     
+     ;; it is a symbol, bind to env
+     (A=Rx R2)(Rx=A P0) ; symbol
+     (A= 0)(Rx=A P1) ; value=nil
+     (A=Rx R1)(Rx=A P2) ; env
+     (jsr l-pair)
+     (A=Rx P0)(Rx=A R1) ; new env
+    
+     (label l-next-decl)
+     (A=Rx R0)(Rx=A P0) ; arg-list
+     (jsr l-cdr) ; next arg
+     (A=Rx P0)(Rx=A R0)
+     (j l-decl-lp)
+    
+     (label l-end-decl)
+     (A=Rx R1)(Rx=A P0)
+
+     (pop-r R2)
+     (pop-a)
+     (j-a)
+     
+     ;; --- symbolp -----------------------------------
+     ;; input: P0 - cons
+     ;; output: P0 - t/nil
+     (label l-symbolp)
+     (push-r R0)
+     
+     (Rx= n-cons-type R0)
+     (A=Rx R0)
+     (A+=Rx P0) ; index in cons-type
+     (Rx=M[A].b R0) ; R0=type of cons
+
+     (A= c-cons-symbol)
+     (A-=Rx R0)
+     (jz l-symp-t)
+     (A= 0) ; nil
+     (j l-symp-ret)
+     
+     (label l-symp-t)
+     (A= 1) ; t
+
+     (label l-symp-ret)
+     (Rx=A P0)
+     
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
+
+     ;; --- save label state ----------
+     ;; input:
+     ;;   P0 = arg-list
+     ;;   P1 = new env
+     ;;   P2 = SP
+     (label l-save-state)
+     (push-srp) 
+     (push-r R3)
+     
+     (A=Rx P0)(Rx=A R0) ; R0 = arg-list
+     (A=Rx P1)(Rx=A R1) ; R1 = env
+     (A=Rx P2)(Rx=A R2) ; R2 = SP
+
+     (label l-save-lp)
+     (A= 0)
+     (A-=Rx R0)
+     (jz l-end-save)
+
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R3) ; R3=car = symbol
+    
+     (jsr l-symbolp)
+
+     (A= 0)
+     (A-=Rx P0) ; nil?
+     (jz l-next-save)
+     
+     ;; it is a symbol, create (list next env sp) and set symbol value to this
+     ;; (cons next (cons env (cons sp nil)))
+
+     (label l-save-label)
+     ;; get next arg
+     (A=Rx R0)(Rx=A P0) ; arg-list
+     (jsr l-cdr) ; next arg
+     (A=Rx P0)(Rx=A R0)
+
+     (A=Rx R2)(Rx=A P0) ; car=sp
+     (jsr l-box-int)    ; P0 = boxed(sp)
+     (A= 0)(Rx=A P1) ; cdr=nil
+     (jsr l-cons) ; -> P0
+    
+     (A=Rx P0)(Rx=A P1) ; cdr=cons
+     (A=Rx R1)(Rx=A P0) ; car=env
+     (jsr l-cons) ; -> P0
+     
+     (A=Rx P0)(Rx=A P1) ; cdr=cons
+     (A=Rx R0)(Rx=A P0) ; car=next
+     (jsr l-cons) ; -> P0
+
+     (A=Rx P0)(Rx=A P1) ; the list
+     (A=Rx R3)(Rx=A P0) ; symbol cons
+     (jsr l-rplca)  ; set symbol value to list
+    
+     (j l-save-lp)
+     
+     (label l-next-save)
+     (A=Rx R0)(Rx=A P0) ; arg-list
+     (jsr l-cdr) ; next arg
+     (A=Rx P0)(Rx=A R0)
+     (j l-save-lp)
+    
+     (label l-end-save)
+     
+     (pop-r R3)
+     (pop-a)
+     (j-a)
+
+     
+     ;; --- eval tagbody ----------
+     ;; input:
+     ;;   P0 = arg-list
+     ;;   P1 = new env
+     (label l-eval-tagbody)
+     (push-srp) 
+     (push-r R3)
+
+     (label l-eval-next) ;; also target for 'go', must have P0=next-arg and P1=env
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-end-eval-tb)
+
+     (A=Rx P0)(Rx=A R0) ; R0=save curr arg
+     (jsr l-car)
+     (A=Rx P0)(Rx=A R1) ; R1=car
+    
+     (jsr l-symbolp)
+
+     (A= 1)
+     (A-=Rx P0) ; t -> a symbol, don't eval, skip to next arg
+     (jz l-next-arg)
+    
+     ;; eval 
+     (A=Rx P1)(Rx=A R2) ; save env
+     (A=Rx R1)(Rx=A P0) ; arg to eval
+     (jsr l-eval) ; if eval calls 'go' it will restore P0,P1 and SP and jump to l-eval-next
+     (A=Rx R2)(Rx=A P1) ; restore env
+
+     ;; next arg
+     (label l-next-arg)
+     (A=Rx R0)(Rx=A P0)
+     (jsr l-cdr)
+     (j l-eval-next)
+
+     (label l-end-eval-tb)
+     (Rx= 0 P0) ; nil
+     ;; restore and return must match the l-prim-tagbody save
+     (pop-r R3)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     ;;----- go -------------------
+     ;; input: P0 arg-list
+     ;;        P1 env
+     (label l-prim-go)
+     ;; no need to save return or regs on stack. we'll never return from this stack point
+     
+     (jsr l-car) ; one arg and it must be a symbol (label)
+     (jsr l-assoc) ; find the symbol
+     (jsr l-car) ; symbol value
+     (A=Rx P0)(Rx=A R0) ; R0=symbol value = list of state
+     (jsr l-car) ; next
+     (A=Rx P0)(Rx=A R1) ; R1=next
+
+     (A=Rx R0)(Rx=A P0) ; R0=list of state
+     (jsr l-cadr) ; env
+     (A=Rx P0)(Rx=A R2) ; R2=env
+
+     (A=Rx R0)(Rx=A P0) ; R0=list of state
+     (jsr l-caddr) ; sp cons
+     (jsr l-getcons) ;  sp
+    
+     (A=Rx P0)(Rx=A SP) ; restore SP
+     (A=Rx R1)(Rx=A P0) ; restore next in P0
+     (A=Rx R2)(Rx=A P1) ; restore env in P1
+     (j l-eval-next) ; back to tagbody eval loop. abandon this stack
+     
+     ))
+
 ;;; expected: "ssymb"
 (defvar test-read-c nil)
 (setq test-read-c 
@@ -2810,6 +3294,7 @@
      (Rx=M[A].w P1)
 
      (jsr l-assoc)
+     (jsr l-car)
      (label end-fa) (j end-fa)))
 
 (defparameter test-func-eval
@@ -3203,7 +3688,27 @@
      (lsl-a)
      (ld.w-a-rel->r (+ 2 n-cons) P0) ; P0 = highest word of cons-cell (cons.f1/cdr)
      (r->a SRP)
-     (j-a)))
+     (j-a)
+
+     ;; input: P0 - cons ptr 
+     ;; output    - returns (car (cdr P0))
+     (label l-cadr)
+     (push-srp)
+     (jsr l-cdr)
+     (jsr l-car)
+     (pop-a)
+     (j-a)
+     
+     ;; input: P0 - cons ptr 
+     ;; output    - returns (car (cdr (cdr P0)))
+     (label l-caddr)
+     (push-srp)
+     (jsr l-cdr)
+     (jsr l-cdr)
+     (jsr l-car)
+     (pop-a)
+     (j-a)
+     ))
 
 (defvar func-print-symbol nil)
 (setq func-print-symbol
@@ -3405,7 +3910,8 @@
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
-              func-primitives func-primitives2 func-primitives3))
+              func-primitives func-primitives2 func-primitives3
+              func-primitives4 func-tagbody ))
   (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
@@ -3907,6 +4413,14 @@
       (setf env (push-env dmem (add-symbol dmem "cond" (add-prim dmem "l-prim-cond")) env))
       (setf env (push-env dmem (add-symbol dmem "let" (add-prim dmem "l-prim-let")) env))
       (setf env (push-env dmem (add-symbol dmem "<" (add-prim dmem "l-prim-less")) env))
+      (setf env (push-env dmem (add-symbol dmem "eq" (add-prim dmem "l-prim-eq")) env))
+      (setf env (push-env dmem (add-symbol dmem "eql" (add-prim dmem "l-prim-eql")) env))
+      (setf env (push-env dmem (add-symbol dmem "numberp" (add-prim dmem "l-prim-numberp")) env))
+      (setf env (push-env dmem (add-symbol dmem "tagbody" (add-prim dmem "l-prim-tagbody")) env))
+      (setf env (push-env dmem (add-symbol dmem "go" (add-prim dmem "l-prim-go")) env))
+      (setf env (push-env dmem (add-symbol dmem "setq" (add-prim dmem "l-prim-setq")) env))
+      (setf env (push-env dmem (add-symbol dmem "print" (add-prim dmem "l-prim-print")) env))
+      (setf env (push-env dmem (add-symbol dmem "prin1" (add-prim dmem "l-prim-prin1")) env))
       (mem-write-word dmem n-global-env env)
     env))
 
@@ -4459,6 +4973,42 @@ nil
 (deftest run-gr-eq  () (run-test #'test-source 
                               ">=niltt"
                               "(defun >= (a b) (not (< a b))) (>= 3 4) (>= 4 3) (>= 7 7)"))
+
+;;; ------------------------------------------------------------------------
+(deftest run-eq  () (run-test #'test-source 
+                              "tnilnilniltniltnil"
+                              "(eq  t t) (eq  t nil) (eq  2 2) (eq  2 3)
+                               (eql t t) (eql t nil) (eql 2 2) (eql 2 3)"))
+;;; ------------------------------------------------------------------------
+(deftest run-nump  () (run-test #'test-source 
+                              "tnilnil"
+                              "(numberp 12)
+                               (numberp nil)
+                               (numberp (cons 1 2))"))
+;;; ------------------------------------------------------------------------
+(deftest run-setq  () (run-test #'test-source 
+                              "xx315"
+                              "(defvar xx nil)(setq xx 3)(+ xx 12)"))
+;;; ------------------------------------------------------------------------
+(deftest run-tagb-loop  () (run-test #'test-source 
+                                     "i01234nil5"
+"(defvar i 0)
+ (tagbody
+  loop
+  (prin1 i) 
+  (setq i (+ i 1))
+  (if (< i 5)
+    (go loop)))
+ i"))
+
+;;(test-source "(defvar i 0)
+;;              (tagbody
+;;                (print i)
+;;                (go skip)
+;;                (print 99)
+;;                skip
+;;                (print 111))" t)
+                      
 ;;; ------------------------------------------------------------------------
 
 (deftest test-lisp ()
@@ -4500,7 +5050,10 @@ nil
     (run-let)
     (run-less)
     (run-gr-eq)
+    (run-eq)
+    (run-nump)
+    (run-setq)
+    (run-tagb-loop)
     ))
 
 ;(run-emul e 200 nil)
-
