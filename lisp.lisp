@@ -97,7 +97,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 4000))
+(setq dmem (make-dmem 8000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -116,16 +116,6 @@
      (setq dmem-allocated (+ dmem-allocated ,len))
      (assert (< dmem-allocated (length dmem)))
      ,sym))
-
-(defun word-align (addr)
-  (if (equal (logand 1 addr) 0)
-      addr
-      (1+ addr)))
-             
-(defun dword-align (addr)
-  (if (equal (logand #b11 addr) 0)
-      addr
-      (+ addr (- 4 (logand #b11 addr)))))
 
 ;;; allocate 16-bit words, word aligned
 (defmacro alloc-words (sym words)
@@ -198,7 +188,7 @@
       (set-program dmem str (+ n-string-space string-space-free))
       (setf str-ptr string-space-free)
       (setq string-space-free (+ string-space-free (list-length str)))
-      (mem-write-word dmem n-string-space-free string-space-free))
+      (mem-write-word-l dmem n-string-space-free string-space-free))
 
     (if verbose (format t "add-symbol str at:~x~%" (+ n-string-space string-space-free)))
     (if verbose (format t "str-ptr ~x~%" str-ptr))
@@ -234,14 +224,14 @@
   (let ((cons-ptr cons-free)) ; cons index, not address
     (if verbose (format t "add-num ~d at:~d~%" number cons-free))
 
-    (mem-write-byte dmem (+ n-cons-type cons-ptr) c-cons-number) ; one byte per cons-type item 
+    (mem-write-byte-l dmem (+ n-cons-type cons-ptr) c-cons-number) ; one byte per cons-type item 
 
     (if verbose (format t "cons-type ~d at ~x~%"  c-cons-number (+ n-cons-type cons-ptr)))
 
-    (mem-write-dword dmem (+ n-cons (* cons-size cons-ptr)) number)
+    (mem-write-dword-l dmem (+ n-cons (* cons-size cons-ptr)) number)
 
     (setf cons-free (1+ cons-free))
-    (mem-write-word dmem n-cons-free cons-free)
+    (mem-write-word-l dmem n-cons-free cons-free)
     cons-ptr))
 
 (defun add-prim (dmem asm-label &optional (verbose nil))
@@ -249,32 +239,32 @@
         (cons-ptr cons-free)) ; cons index, not address
     (if verbose (format t "add-prim ~a ~d at:~d~%" asm-label code-ptr cons-free))
 
-    (mem-write-byte dmem (+ n-cons-type cons-ptr) c-cons-primitive) ; one byte per cons-type item 
+    (mem-write-byte-l dmem (+ n-cons-type cons-ptr) c-cons-primitive) ; one byte per cons-type item 
 
     (if verbose (format t "cons-type ~d at ~x~%"  c-cons-primitive (+ n-cons-type cons-ptr)))
 
-    (mem-write-dword dmem (+ n-cons (* cons-size cons-ptr)) code-ptr)
+    (mem-write-dword-l dmem (+ n-cons (* cons-size cons-ptr)) code-ptr)
 
     (setf cons-free (1+ cons-free))
-    (mem-write-word dmem n-cons-free cons-free)
+    (mem-write-word-l dmem n-cons-free cons-free)
     cons-ptr))
 
 (defun set-sym-val (dmem symb val)
-  (mem-write-word dmem (+ n-cons (* cons-size symb)) val))
+  (mem-write-word-l dmem (+ n-cons (* cons-size symb)) val))
 
-(defun mem-write-dword ( dmem addr word32b )
+(defun mem-write-dword-l ( dmem addr word32b )
   (assert (equal (logand addr 3) 0))
   (setf (aref dmem addr) (logand #xff word32b))
   (setf (aref dmem (1+ addr)) (ash word32b -8))
   (setf (aref dmem (+ 2 addr)) (ash word32b -16))
   (setf (aref dmem (+ 3 addr)) (ash word32b -24)))
 
-(defun mem-write-word ( dmem addr word16b )
+(defun mem-write-word-l ( dmem addr word16b )
   (assert (equal (logand addr 1) 0))
   (setf (aref dmem addr) (logand #xff word16b))
   (setf (aref dmem (1+ addr)) (ash word16b -8)))
 
-(defun mem-write-byte ( dmem addr word8b )
+(defun mem-write-byte-l ( dmem addr word8b )
   (setf (aref dmem addr) (logand #xff word8b)))
 
 (defun make-cons (dmem the-car the-cdr)
@@ -282,9 +272,9 @@
     (set-program dmem
                  (cons-bytes (cons-cell the-cdr the-car))
                  (+ n-cons (* cons-size cons-ptr)))
-    (mem-write-byte dmem (+ n-cons-type cons-ptr) c-cons-cons)
+    (mem-write-byte-l dmem (+ n-cons-type cons-ptr) c-cons-cons)
     (setf cons-free (1+ cons-free))
-    (mem-write-word dmem n-cons-free cons-free)
+    (mem-write-word-l dmem n-cons-free cons-free)
     cons-ptr))
 
 ;;; prepends a sym/val to the environment and returns the new env
@@ -328,12 +318,278 @@
                    (t (setf i (next-string dmem i)))))))
 
 (defun print-string-space (dmem)
-  (loop with i = n-string-space
-        until (>= i (+ n-string-space string-space-free))
-        do (format t "~d ~d: " (- i n-string-space) i)
-        do (setf i (print-string dmem i))
-        do (format t "~%")))
+  (let ((string-space-free (lr-emulator::mem-read-word dmem n-string-space-free)))
+    (loop with i = n-string-space
+          until (>= i (+ n-string-space string-space-free))
+          do (format t "~d ~d: " (- i n-string-space) i)
+          do (setf i (print-string dmem i))
+          do (format t "~%"))))
 
+;; ----------------------------------------------------------------------------
+(defparameter nr-cons 200)
+(defparameter cons-size 4) ; bytes
+;; indexes relative reader-state
+(defparameter rs-use-unread 0)
+(defparameter rs-last-read 4)
+(defparameter rs-read-ptr 8)
+(defparameter rs-eof 12)
+
+(defparameter asm-init-lisp
+  '(
+    (j l-boot) ; reset starts here
+    
+    (label n-source-start)
+    (lalloc-bytes source-region-size)
+
+    (label n-sym-string-start)
+    (lalloc-bytes 32)
+
+    (label n-print-sep)
+    (lstring (format nil "~C~C> " #\Return #\Linefeed))
+
+    (label n-read-sym-str)
+    (lalloc-bytes 24)
+
+    ;; a primitive needs:
+    ;; string
+    ;; cons holding a code-ptr
+    ;; cons-type is primitive
+    ;; cons holding a name-ptr and value-ptr
+    ;; cons-type is symbol
+    
+    (label n-string-space)
+
+    (label str-nil    )(lstring "nil")
+    (label str-t      )(lstring "t")
+    (label str-error  )(lstring "error")
+    (label str-quote  )(lstring "quote")
+    (label str-not    )(lstring "not")
+    (label str-+      )(lstring "+")
+    (label str-defvar )(lstring "defvar")
+    (label str-lambda )(lstring "lambda")
+    (label str-defun  )(lstring "defun")
+    (label str-car    )(lstring "car")
+    (label str-cdr    )(lstring "cdr")
+    (label str-cons   )(lstring "cons")
+    (label str-list   )(lstring "list")
+    (label str-if     )(lstring "if")
+    (label str-cond   )(lstring "cond")
+    (label str-let    )(lstring "let")
+    (label str-<      )(lstring "<")
+    (label str-eq     )(lstring "eq")
+    (label str-eql    )(lstring "eql")
+    (label str-numberp)(lstring "numberp")
+    (label str-tagbody)(lstring "tagbody")
+    (label str-go     )(lstring "go")
+    (label str-setq   )(lstring "setq")
+    (label str-print  )(lstring "print")
+    (label str-prin1  )(lstring "prin1")
+    (label str-progn  )(lstring "progn")
+   
+    (label str-free)
+    (lalloc-bytes 128)
+
+    (lalign-dword)
+    (label n-cons)
+
+    ;; cons cell area. symbols must start at cons 0, at least nil,t,error and quote
+    ;; byte/word order of cons cell:
+    ;;   lsw msw
+    ;;   car cdr
+    ;; --- symbols  ---
+    (aword 0)  (aword (- str-nil     n-string-space) )
+    (aword 1)  (aword (- str-t       n-string-space) )
+    (aword 2)  (aword (- str-error   n-string-space) )
+    (aword (/ (- prim-quote   n-cons) 4)) (aword (- str-quote   n-string-space) ); quote
+    (aword (/ (- prim-not     n-cons) 4)) (aword (- str-not     n-string-space) ); not
+    (aword (/ (- prim-+       n-cons) 4)) (aword (- str-+       n-string-space) ); +
+    (aword (/ (- prim-defvar  n-cons) 4)) (aword (- str-defvar  n-string-space) ); defvar
+    (aword (/ (- prim-lambda  n-cons) 4)) (aword (- str-lambda  n-string-space) ); lambda
+    (aword (/ (- prim-defun   n-cons) 4)) (aword (- str-defun   n-string-space) ); defun
+    (aword (/ (- prim-car     n-cons) 4)) (aword (- str-car     n-string-space) ); car
+    (aword (/ (- prim-cdr     n-cons) 4)) (aword (- str-cdr     n-string-space) ); cdr
+    (aword (/ (- prim-cons    n-cons) 4)) (aword (- str-cons    n-string-space) ); cons
+    (aword (/ (- prim-list    n-cons) 4)) (aword (- str-list    n-string-space) ); list
+    (aword (/ (- prim-if      n-cons) 4)) (aword (- str-if      n-string-space) ); if
+    (aword (/ (- prim-cond    n-cons) 4)) (aword (- str-cond    n-string-space) ); cond
+    (aword (/ (- prim-let     n-cons) 4)) (aword (- str-let     n-string-space) ); let
+    (aword (/ (- prim-<       n-cons) 4)) (aword (- str-<       n-string-space) ); <
+    (aword (/ (- prim-eq      n-cons) 4)) (aword (- str-eq      n-string-space) ); eq
+    (aword (/ (- prim-eql     n-cons) 4)) (aword (- str-eql     n-string-space) ); eql
+    (aword (/ (- prim-numberp n-cons) 4)) (aword (- str-numberp n-string-space) ); numberp
+    (aword (/ (- prim-tagbody n-cons) 4)) (aword (- str-tagbody n-string-space) ); tagbody
+    (aword (/ (- prim-go      n-cons) 4)) (aword (- str-go      n-string-space) ); go
+    (aword (/ (- prim-setq    n-cons) 4)) (aword (- str-setq    n-string-space) ); setq
+    (aword (/ (- prim-print   n-cons) 4)) (aword (- str-print   n-string-space) ); print
+    (aword (/ (- prim-prin1   n-cons) 4)) (aword (- str-prin1   n-string-space) ); prin1
+    (aword (/ (- prim-progn   n-cons) 4)) (aword (- str-progn   n-string-space) ); progn
+ 
+    ;; --- primitives  ---
+    (label prim-quote  ) (adword  l-quote)          ; quote   
+    (label prim-not    ) (adword  l-not)            ; not
+    (label prim-+      ) (adword  l-add)            ; +
+    (label prim-defvar ) (adword  l-defvar)         ; defvar
+    (label prim-lambda ) (adword  l-lambda)         ; lambda
+    (label prim-defun  ) (adword  l-defun)          ; defun
+    (label prim-car    ) (adword  l-prim-car)       ; car
+    (label prim-cdr    ) (adword  l-prim-cdr)       ; cdr
+    (label prim-cons   ) (adword  l-prim-cons)      ; cons
+    (label prim-list   ) (adword  l-prim-list)      ; list
+    (label prim-if     ) (adword  l-prim-if)        ; if
+    (label prim-cond   ) (adword  l-prim-cond)      ; cond
+    (label prim-let    ) (adword  l-prim-let)       ; let
+    (label prim-<      ) (adword  l-prim-less)      ; <
+    (label prim-eq     ) (adword  l-prim-eq)        ; eq
+    (label prim-eql    ) (adword  l-prim-eql)       ; eql
+    (label prim-numberp) (adword  l-prim-numberp)   ; numberp
+    (label prim-tagbody) (adword  l-prim-tagbody)   ; tagbody
+    (label prim-go     ) (adword  l-prim-go)        ; go
+    (label prim-setq   ) (adword  l-prim-setq)      ; setq
+    (label prim-print  ) (adword  l-prim-print)     ; print
+    (label prim-prin1  ) (adword  l-prim-prin1)     ; prin1
+    (label prim-progn  ) (adword  l-prim-progn)     ; progn
+
+    ;; ---- global env ----------
+    (label l-env)
+    (aword 0)  (aword 0)                              ; nil
+    (aword 1)  (aword (+ 0 (/ (- l-env n-cons) 4)) )  ; t
+    (aword 2)  (aword (+ 1 (/ (- l-env n-cons) 4)) )  ; error
+    (aword 3)  (aword (+ 2 (/ (- l-env n-cons) 4)) )  ; quote
+    (aword 4)  (aword (+ 3 (/ (- l-env n-cons) 4)) )  ; not
+    (aword 5)  (aword (+ 4 (/ (- l-env n-cons) 4)) )  ; +
+    (aword 6)  (aword (+ 5 (/ (- l-env n-cons) 4)) )  ; defvar
+    (aword 7)  (aword (+ 6 (/ (- l-env n-cons) 4)) )  ; lambda
+    (aword 8)  (aword (+ 7 (/ (- l-env n-cons) 4)) )  ; defun
+    (aword 9)  (aword (+ 8 (/ (- l-env n-cons) 4)) )  ; car
+    (aword 10) (aword (+ 9 (/ (- l-env n-cons) 4)) )  ; cdr
+    (aword 11) (aword (+ 10 (/ (- l-env n-cons) 4)) )  ; cons
+    (aword 12) (aword (+ 11 (/ (- l-env n-cons) 4)) )  ; list
+    (aword 13) (aword (+ 12 (/ (- l-env n-cons) 4)) )  ; if
+    (aword 14) (aword (+ 13 (/ (- l-env n-cons) 4)) )  ; cond
+    (aword 15) (aword (+ 14 (/ (- l-env n-cons) 4)) )  ; let
+    (aword 16) (aword (+ 15 (/ (- l-env n-cons) 4)) )  ; <
+    (aword 17) (aword (+ 16 (/ (- l-env n-cons) 4)) )  ; eq
+    (aword 18) (aword (+ 17 (/ (- l-env n-cons) 4)) )  ; eql
+    (aword 19) (aword (+ 18 (/ (- l-env n-cons) 4)) )  ; numberp
+    (aword 20) (aword (+ 19 (/ (- l-env n-cons) 4)) )  ; tagbody
+    (aword 21) (aword (+ 20 (/ (- l-env n-cons) 4)) )  ; go
+    (aword 22) (aword (+ 21 (/ (- l-env n-cons) 4)) )  ; setq
+    (aword 23) (aword (+ 22 (/ (- l-env n-cons) 4)) )  ; print
+    (aword 24) (aword (+ 23 (/ (- l-env n-cons) 4)) )  ; prin1
+    (label l-env-start)
+    (aword 25) (aword (+ 24 (/ (- l-env n-cons) 4)) )  ; progn
+   
+    (label l-cons-free)
+    (lalloc-dwords nr-cons)
+    
+    (label n-cons-end)
+    (lalloc-words 1) ; points to entry nr in n-cons table
+
+    (label n-cons-type)
+    (abyte c-cons-symbol) ; nil
+    (abyte c-cons-symbol) ; t
+    (abyte c-cons-symbol) ; error
+    (abyte c-cons-symbol) ; quote
+    (abyte c-cons-symbol) ; not
+    (abyte c-cons-symbol) ; +
+    (abyte c-cons-symbol) ; defvar
+    (abyte c-cons-symbol) ; lambda
+    (abyte c-cons-symbol) ; defun
+    (abyte c-cons-symbol) ; car
+    (abyte c-cons-symbol) ; cdr
+    (abyte c-cons-symbol) ; cons
+    (abyte c-cons-symbol) ; list
+    (abyte c-cons-symbol) ; if
+    (abyte c-cons-symbol) ; cond
+    (abyte c-cons-symbol) ; let
+    (abyte c-cons-symbol) ; <
+    (abyte c-cons-symbol) ; eq
+    (abyte c-cons-symbol) ; eql
+    (abyte c-cons-symbol) ; numberp
+    (abyte c-cons-symbol) ; tagbody
+    (abyte c-cons-symbol) ; go
+    (abyte c-cons-symbol) ; setq
+    (abyte c-cons-symbol) ; print
+    (abyte c-cons-symbol) ; prin1
+    (abyte c-cons-symbol) ; progn
+
+    (abyte c-cons-primitive) ; quote
+    (abyte c-cons-primitive) ; not
+    (abyte c-cons-primitive) ; +
+    (abyte c-cons-primitive) ; defvar
+    (abyte c-cons-primitive) ; lambda
+    (abyte c-cons-primitive) ; defun
+    (abyte c-cons-primitive) ; car
+    (abyte c-cons-primitive) ; cdr
+    (abyte c-cons-primitive) ; cons
+    (abyte c-cons-primitive) ; list
+    (abyte c-cons-primitive) ; if
+    (abyte c-cons-primitive) ; cond
+    (abyte c-cons-primitive) ; let
+    (abyte c-cons-primitive) ; <
+    (abyte c-cons-primitive) ; eq
+    (abyte c-cons-primitive) ; eql
+    (abyte c-cons-primitive) ; numberp
+    (abyte c-cons-primitive) ; tagbody
+    (abyte c-cons-primitive) ; go
+    (abyte c-cons-primitive) ; setq
+    (abyte c-cons-primitive) ; print
+    (abyte c-cons-primitive) ; prin1
+    (abyte c-cons-primitive) ; progn
+
+    (abyte c-cons-cons) ; nil
+    (abyte c-cons-cons) ; t
+    (abyte c-cons-cons) ; error
+    (abyte c-cons-cons) ; quote
+    (abyte c-cons-cons) ; not
+    (abyte c-cons-cons) ; +
+    (abyte c-cons-cons) ; defvar
+    (abyte c-cons-cons) ; lambda
+    (abyte c-cons-cons) ; defun
+    (abyte c-cons-cons) ; car
+    (abyte c-cons-cons) ; cdr
+    (abyte c-cons-cons) ; cons
+    (abyte c-cons-cons) ; list
+    (abyte c-cons-cons) ; if
+    (abyte c-cons-cons) ; cond
+    (abyte c-cons-cons) ; let
+    (abyte c-cons-cons) ; <
+    (abyte c-cons-cons) ; eq
+    (abyte c-cons-cons) ; eql
+    (abyte c-cons-cons) ; numberp
+    (abyte c-cons-cons) ; tagbody
+    (abyte c-cons-cons) ; go
+    (abyte c-cons-cons) ; setq
+    (abyte c-cons-cons) ; print
+    (abyte c-cons-cons) ; prin1
+    (abyte c-cons-cons) ; progn
+
+    (lalloc-bytes nr-cons)
+   
+    (lalign-dword)
+    (label reader-state)
+    (lalloc-dwords 4)
+   
+    (lalign-word)
+    (label n-cons-free)
+    (aword (/ (- l-cons-free n-cons) 4)) ; cons index to next free cons cell
+
+    (label n-string-space-free)
+    (aword (- str-free n-string-space)) ; index to next free byte in string space
+
+    (label n-global-env)
+    (aword (/ (- l-env-start n-cons) 4))
+    (lalloc-words 1)
+    
+    (lalign-dword)
+    (label n-stack)
+    (lalloc-dwords 300)
+    (label n-stack-highest)
+    (lalloc-dwords 1)
+
+    (label l-boot)
+    ;; append program after this point
+    ))
 ;; ----------------------------------------------------------------------------
 (defun init-lisp ()
   (setq dmem-allocated 0)
@@ -357,7 +613,7 @@
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
-  (mem-write-word dmem n-cons-free 0)
+  (mem-write-word-l dmem n-cons-free 0)
 
   (format t "n-cons: ~a~%" (alloc-dwords n-cons nr-cons))
   (setq n-cons-end dmem-allocated)
@@ -481,66 +737,66 @@
      ;; P1 - returns cons-ptr to symbol
      (label l-find-symbol)
      (push-srp)
-     (push-r R5)
+     (push-r R3)
 
      ;; R0 = string-ptr to searched symbol
-     ;; R1 = cons-rel-ptr - relative offset
-     ;; R2 = cons-table-ptr - absolute address
-     ;; R3 = string-space
-     ;; R4 = tmp
-     ;; R5 = cons-end
-     (r->a P0) (a->r R0)
-     (mvi->r 0 R1)
-     (mvi->r n-cons R2)
-     (mvi->r n-string-space R3) ; strings
-     (mvi->r n-cons-end R5)
+     ;; R1 = current string-space ptr
+     ;; R2 = string space end
+     (A=Rx P0)(Rx=A R0)
+     (Rx= n-string-space R1)
+     (Rx= n-string-space-free R2)
+     (A=M[Rx].w R2) ; free index, relative start of string space
+     (A+=Rx R1)
+     (Rx=A R2) ; absolute pointer to end of string space
 
-     (label l-next-cons)
-     ;; R4 = n-cons + 2
-     (r->a R2)
-     (a->r R4)
-     (mvi->a 2) ; high word (cons-f1)
-     (add-r R4)
-     (a->r R4)
-     ;; read cdr
-     (ld.w-r->a R4) ; cdr -> sym-name-ptr
-     (add-r R3) ; string-space + sym-name-ptr
-     (a->r P1) ; P1 = string-ptr in sym-table
-     (r->a R0) (a->r P0)
-     ;; P0 = string-ptr searched symbol
+     (label l-next-str)
+     (A=Rx R0)(Rx=A P0)
+     (A=Rx R1)(Rx=A P1)
      (jsr l-str-equal)
 
-     (mvi->a 0)
-     (sub-r P0)
+     (A= 0)
+     (A-=Rx P0)
      (jnz l-found-sym)
 
-     ;; cons-rel-ptr += 1
-     (mvi->a 1)
-     (add-r R1)
-     (a->r R1)
+     ;; loop past curr string
+     (label l-skip-str)
+     (A=M[Rx].b R1) ; read char
+     (Rx= 0 R3)
+     (A-=Rx R3)
+     (jz l-str-end) ; 0?
+     (A= 1)
+     (A+=Rx R1)
+     (Rx=A R1)
+     (j l-skip-str)
 
-     ;; cons-ptr += 4
-     (mvi->a 4)
-     (add-r R2)
-     (a->r R2)
-
-     (sub-r R5) ; equal end of cons table
-     (jlo l-next-cons) ; A < cons-end
-     ;; end
-     (mvi->a 0)
-     (a->r P0)
-     (j l-ret-find-sym)
-
-     (label l-found-sym) 
-     (mvi->a 1)
-     (a->r P0) ; P0 = 1, return flag
-     (r->a R1)
-     (a->r P1) ; P1 = cons-ptr, return sym-cons
+     (label l-str-end) ; end of curr str, incr str pointer past 0
+     (A= 1)
+     (A+=Rx R1)
+     (Rx=A R1)
     
-     (label l-ret-find-sym)
-     (pop-r R5)
+     (A-=Rx R2) ; end of string space
+     (jnz l-next-str)
+     
+     (label l-not-fnd)
+     (A= 0)
+     (Rx=A P0)
+    
+     (label l-fs-ret)
+     (pop-r R3)
      (pop-a)
      (j-a)
+
+     (label l-found-sym)
+     ;; convert to index relative string space start
+     (Rx= n-string-space R2)
+     (A=Rx R1)
+     (A-=Rx R2)
+     (Rx=A P0)
+     (jsr l-box-sym)
+     (A=Rx P0)(Rx=A P1)
+     (A= 1)(Rx=A P0)
+     (j l-fs-ret)
+     
      ))
 
 (defconstant reader-lpar 1)
@@ -2197,11 +2453,11 @@
      (j-a)
 
      ;; --- defun ---------------------------------- 
-     ;; input: P0=arg-list
+     ;; input: P0=arg-list consists of: (cons symbol (cons (list args...) (cons body nil)))
      ;;        P1=env
      ;; output: P0=result
      ;; (defun f (plist) body) -> add symbol (car args) to global env
-     ;;   symbol value: (lambda (plist) body)
+     ;;   symbol value: (lambda (plist) (progn body))
      (label l-defun)
      ;; do not push SRP, apply already did that
      (push-r R3)
@@ -2238,6 +2494,43 @@
      (pop-r R3)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     
+     ;; --- progn ----------
+     ;; input: P0 = arg-list, a list of expressions to be evaluated
+     ;;        P1 = env
+     ;; output: P0 = last expressions return value
+     (label l-prim-progn)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     (A=Rx P1)(Rx=A R0) ; R0 = env
+
+     (label l-progn-next)
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-end-eval-pn)
+
+     (A=Rx P0)(Rx=A R1) ; R1=save curr arg
+     (jsr l-car) ; current body expression to be evaluated
+    
+     ;; eval 
+     (A=Rx R0)(Rx=A P1) ; env
+     (jsr l-eval)
+     (A=Rx P0)(Rx=A R2) ; save return value
+
+     ;; next arg
+     (A=Rx R1)(Rx=A P0)
+     (jsr l-cdr)
+     (j l-progn-next)
+
+     (label l-end-eval-pn)
+     (A=Rx R2)(Rx=A P0) ; return last eval return value
+
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
      ))
 
 (defparameter func-primitives2
@@ -3894,7 +4187,8 @@
                         (debug nil)
                         (no-curses nil)
                         (nr-instr 1000)
-                        (pty nil))
+                        (pty nil)
+                        (lisp-init nil))
   ;(setq *symtab* 
   ;      (if no-curses
   ;          nil
@@ -3902,6 +4196,7 @@
   (setq *symtab* (make-hash-table))
   (setq *hello-world*
         (masm *symtab*
+              lisp-init
               main func-prtstr read-c scan func-str-equal
               func-putchar func-getchar
               func-find-symbol func-cdr
@@ -3912,7 +4207,9 @@
               func-apply func-evlis func-bind func-reduce
               func-primitives func-primitives2 func-primitives3
               func-primitives4 func-tagbody ))
-  (setf e (make-emulator *hello-world* dmem :shared-mem nil :debug debug))
+  (setf e (make-emulator *hello-world* dmem
+                         :shared-mem lisp-init
+                         :debug debug))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
   (if no-curses (run-emul e nr-instr)
       (if pty
@@ -3926,7 +4223,7 @@
 
 (defun run-test (test &optional (expected-print nil) (source nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 4000))
+    (setq dmem (make-dmem 8000))
     (init-lisp))
   (check
     (let ((printed 
@@ -4202,7 +4499,7 @@
     (asm-n-run test-trace-env
                #'(lambda (dmem proc)
                    (default-env dmem)
-                   (mem-write-word dmem n-cons-free 0))
+                   (mem-write-word-l dmem n-cons-free 0))
                nil regression 10000)))
     ;(print-conses dmem n-cons n-cons-type)
     ;(format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
@@ -4305,7 +4602,7 @@
     (setf env (push-env dmem (add-symbol dmem "not-this" 0) env))
     (setf env (push-env dmem (add-symbol dmem "symbol2" numval) env))
     (setf env (push-env dmem (add-symbol dmem "symbol" 0) env))
-    (mem-write-word dmem n-global-env env)))
+    (mem-write-word-l dmem n-global-env env)))
 
 (defun print-stack (dmem stack-top stack-bottom)
   (loop for ptr from stack-top downto stack-bottom by 4
@@ -4325,7 +4622,7 @@
                      (setf env (push-env dmem (add-symbol dmem "not-this" 0) env))
                      (setf env (push-env dmem to-find env))
                      (setf env (push-env dmem (add-symbol dmem "symbol" 0) env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) to-find)))
                nil regression 10000)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
@@ -4349,7 +4646,7 @@
                      (setf env (push-env dmem (add-symbol dmem "not-this" 0) env))
                      (setf env (push-env dmem (add-symbol dmem "not" to-find) env))
                      (setf env (push-env dmem (add-symbol dmem "symbol" 0) env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) find-sym)))
                nil regression 10000)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
@@ -4372,7 +4669,7 @@
                      (setf env (push-env dmem (add-symbol dmem "t" 1) env))
                      (setf env (push-env dmem (add-symbol dmem "not-this" 0) env))
                      (setf env (push-env dmem (add-symbol dmem "symbol" 0) env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) to-find)))
                nil regression 10000)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
@@ -4421,7 +4718,8 @@
       (setf env (push-env dmem (add-symbol dmem "setq" (add-prim dmem "l-prim-setq")) env))
       (setf env (push-env dmem (add-symbol dmem "print" (add-prim dmem "l-prim-print")) env))
       (setf env (push-env dmem (add-symbol dmem "prin1" (add-prim dmem "l-prim-prin1")) env))
-      (mem-write-word dmem n-global-env env)
+      (setf env (push-env dmem (add-symbol dmem "progn" (add-prim dmem "l-prim-progn")) env))
+      (mem-write-word-l dmem n-global-env env)
     env))
 
 ;; call eval with a num cons
@@ -4451,7 +4749,7 @@
                           (numval (add-num dmem 1234))
                           (sym (add-symbol dmem "symbol" numval)))
                      (setf env (push-env dmem sym env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) sym)))
@@ -4473,7 +4771,7 @@
                           (numval (add-num dmem 1234))
                           (sym (add-symbol dmem "symbol" numval)))
                      (setf env (push-env dmem sym env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      ;(format t "env: ~d~%" env)
                      ;(format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) 0))) ; nil
@@ -4494,7 +4792,7 @@
                           (sym 7)) ; the not symbol in default-env
                           ;(sym (add-prim dmem "not" "l-not")))
                      (setf env (push-env dmem sym env))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "sym ~d~%" sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) sym)))
@@ -4522,7 +4820,7 @@
                    (init-lisp)
                    (let* ((env (default-env dmem))
                           (fcall (make-not-fcall dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "fcall ~d~%" fcall)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) fcall)))
@@ -4547,7 +4845,7 @@
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem))
                           (fcall (make-not-fcall-nil dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "fcall ~d~%" fcall)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) fcall)))
@@ -4576,7 +4874,7 @@
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem))
                           (fcall (make-add-fcall dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "fcall ~d~%" fcall)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) fcall)))
@@ -4594,7 +4892,7 @@
     (asm-n-run test-re
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
                nil regression 10000)
@@ -4611,7 +4909,7 @@
     (asm-n-run test-rep
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-program dmem (string-to-mem "(+ 10 11)") n-source-start)))
                nil regression 10000)
@@ -4631,7 +4929,7 @@
     (asm-n-run test-repl
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "(not t)(not (not (not nil)))(+ 10 11)
@@ -4666,7 +4964,7 @@ nil
                #'(lambda (dmem proc)
                    (init-lisp)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (set-program dmem '(0 0) n-source-start)))
                nil regression 10000 pty)
@@ -4701,7 +4999,7 @@ nil
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem))
                           (lst (make-num-list dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "lst ~d~%" lst)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) lst)))
@@ -4731,7 +5029,7 @@ nil
                    (let* ((env (default-env dmem))
                           (sym (add-symbol dmem "the-sym" 0))
                           (val (add-num dmem 1234)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (setf (aref (lr-emulator::processor-state-r proc) P0) sym)
                      (setf (aref (lr-emulator::processor-state-r proc) P1) val)))
@@ -4754,7 +5052,7 @@ nil
                           (cs1 (make-cons dmem sym1 cs2))
                           (cv2 (make-cons dmem val2 0))
                           (cv1 (make-cons dmem val1 cv2)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "cs1 ~d~%" cs1)
                      (format t "cv1 ~d~%" cv1)
@@ -4791,7 +5089,7 @@ nil
                    (let* ((env (default-env dmem))
                           (param (add-symbol dmem "nil" 0))
                           (the-lambda (create-lambda dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (format t "env: ~d~%" env)
                      (format t "param ~d~%" param)
                      (format t "lambda ~d~%" the-lambda)
@@ -4833,7 +5131,7 @@ nil
                           (pcons1 (make-cons dmem param2 0))
                           (pcons2 (make-cons dmem param1 pcons1))
                           (the-lambda (create-lambda-plus dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression)
                        (format t "env: ~d~%" env)
                        (format t "params ~d~%" pcons2)
@@ -4853,7 +5151,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "(defvar kalle 3)(+ 1 kalle)")))
@@ -4870,7 +5168,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "((lambda (x) (+ x x)) 3)")))
@@ -4886,7 +5184,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "(defvar z 3)(defun f (x) (+ x z))(f 12)")))
@@ -4902,7 +5200,7 @@ nil
     (asm-n-run test-parse-3
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "(123 'sym0 '(sym2 sym1))")))
@@ -4918,7 +5216,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem 
                                     "(defvar kalle '(1 2 3)) kalle")))
@@ -4934,7 +5232,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                    (let* ((env (default-env dmem)))
-                     (mem-write-word dmem n-global-env env)
+                     (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem source-string)))
                nil regression 200000)
@@ -4942,6 +5240,18 @@ nil
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
 
+;;; ------------------------------------------------------------------------
+(defun test-source-new( source-string &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl-noecho
+               #'(lambda (dmem proc)
+                     (set-source dmem source-string))
+               nil regression 200000 nil
+               asm-init-lisp)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+;;; ------------------------------------------------------------------------
 (deftest run-car-cdr  () (run-test #'test-source 
                                    "1(2 3)"
                                    "(car (quote (1 2 3))) (cdr (quote (1 2 3)))"))
@@ -5010,6 +5320,91 @@ nil
 ;;                (print 111))" t)
                       
 ;;; ------------------------------------------------------------------------
+(deftest run-progn  () (run-test #'test-source 
+                                     "97"
+                                     "(progn (+ 1 2)(prin1 9) 7)"))
+;;; ------------------------------------------------------------------------
+
+
+
+
+
+
+
+;;; ------------------------------------------------------------------------
+(deftest run2-car-cdr  () (run-test #'test-source-new 
+                                   "1(2 3)"
+                                   "(car (quote (1 2 3))) (cdr (quote (1 2 3)))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-cons  () (run-test #'test-source-new 
+                                   "(1 . 2)"
+                                   "(cons 1 2)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-list  () (run-test #'test-source-new 
+                                   "(1 2 t)"
+                                   "(list 1 2 t)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-if  () (run-test #'test-source-new 
+                              "(1 2)30"
+                              "(if t (list 1 2) 33) (if nil (list 1 2) (+ 10 20))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-cond  () (run-test #'test-source-new 
+                              "2330"
+                              "(cond (t 2)(t 3)) (cond (nil 2)(t 3)) (cond (nil 2)(nil 3)(t (+ 10 20)))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-let  () (run-test #'test-source-new 
+                              "3"
+                              "(let ((a 1)(b 2)) (+ a b))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-less  () (run-test #'test-source-new 
+                              "tnilnil"
+                              "(< 3 4) (< 4 3) (< 7 7)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-gr-eq  () (run-test #'test-source-new 
+                              ">=niltt"
+                              "(defun >= (a b) (not (< a b))) (>= 3 4) (>= 4 3) (>= 7 7)"))
+
+;;; ------------------------------------------------------------------------
+(deftest run2-eq  () (run-test #'test-source-new 
+                              "tnilnilniltniltnil"
+                              "(eq  t t) (eq  t nil) (eq  2 2) (eq  2 3)
+                               (eql t t) (eql t nil) (eql 2 2) (eql 2 3)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-nump  () (run-test #'test-source-new 
+                              "tnilnil"
+                              "(numberp 12)
+                               (numberp nil)
+                               (numberp (cons 1 2))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-setq  () (run-test #'test-source-new 
+                              "xx315"
+                              "(defvar xx nil)(setq xx 3)(+ xx 12)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-tagb-loop  () (run-test #'test-source-new 
+                                     "i01234nil5"
+"(defvar i 0)
+ (tagbody
+  loop
+  (prin1 i) 
+  (setq i (+ i 1))
+  (if (< i 5)
+    (go loop)))
+ i"))
+
+;;(test-source-new "(defvar i 0)
+;;              (tagbody
+;;                (print i)
+;;                (go skip)
+;;                (print 99)
+;;                skip
+;;                (print 111))" t)
+                      
+;;; ------------------------------------------------------------------------
+(deftest run2-progn  () (run-test #'test-source-new 
+                                     "97"
+                                     "(progn (+ 1 2)(prin1 9) 7)"))
+;;; ------------------------------------------------------------------------
+
 
 (deftest test-lisp ()
   (combine-results
@@ -5054,6 +5449,21 @@ nil
     (run-nump)
     (run-setq)
     (run-tagb-loop)
+
+    (run2-car-cdr)
+    (run2-cons)
+    (run2-list)
+    (run2-if)
+    (run2-cond)
+    (run2-let)
+    (run2-less)
+    (run2-gr-eq)
+    (run2-eq)
+    (run2-nump)
+    (run2-setq)
+    (run2-tagb-loop)
+    (run2-progn)
+    
     ))
 
 ;(run-emul e 200 nil)

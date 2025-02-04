@@ -114,6 +114,19 @@
            :Rx=M[A].b
            :Rx=M[A]
            :A=M[Rx]
+
+           :lcons
+           :lstring
+           :lalloc-bytes
+           :lalloc-words
+           :lalloc-dwords
+           :abyte
+           :aword
+           :adword
+           :lalign-dword 
+           :lalign-word 
+           :word-align
+           :dword-align
            ))
 
 (in-package :lr-asm)
@@ -398,9 +411,50 @@
 
 (defmacro label (lbl)
   `(progn
-     (defvar ,lbl #xffffffff)
+     (defvar ,lbl #xfffffff0) ; dword aligned so that we don't get alignment error first iteration with forward rerences
      nil))
 
+;; ----------------------------------------------------------------------------
+(defun abyte (b) (list (logand #xff b)))
+(defun aword (w) (list (logand #xff w)
+                       (logand #xff (ash w -8))))
+(defun adword (w) (list (logand #xff w)
+                        (logand #xff (ash w -8))
+                        (logand #xff (ash w -16))
+                        (logand #xff (ash w -24))))
+(defun word-align (addr)
+  (if (equal (logand 1 addr) 0)
+      addr
+      (1+ addr)))
+             
+(defun dword-align (addr)
+  (if (equal (logand #b11 addr) 0)
+      addr
+      (+ addr (- 4 (logand #b11 addr)))))
+
+(defun lcons (acar acdr)
+  (concatenate 'list (aword acar) (aword acdr)))
+(defun lstring (s)
+  (string-to-mem s))
+(defun lalloc-bytes (nr-bytes)
+  (make-list nr-bytes :initial-element 0))
+(defun lalloc-words (nr-words pc)
+  (let* ((align-bytes (- (word-align pc) pc))
+         (aligned-len (+ (* nr-words 2) align-bytes)))
+    (lalloc-bytes aligned-len)))
+(defun lalloc-dwords (nr-dwords pc)
+  (let* ((align-bytes (- (dword-align pc) pc))
+         (aligned-len (+ (* nr-dwords 4) align-bytes)))
+    (lalloc-bytes aligned-len)))
+
+(defun lalign-dword (dummy pc)
+  (let* ((align-bytes (- (dword-align pc) pc)))
+    (lalloc-bytes align-bytes)))
+
+(defun lalign-word (dummy pc)
+  (let* ((align-bytes (- (word-align pc) pc)))
+    (lalloc-bytes align-bytes)))
+;; ----------------------------------------------------------------------------
 ;;; Find all label and create global variables for all
 ;;; This avoids encountering forward declared labels as undefined symbols.
 (defun define-labels (aprog verbose)
@@ -415,12 +469,18 @@
 ;;; then calculate the relative offset from the absoluate curr-pc.
 ;;; The curr-pc is pointing to the first byte/opcode of the instruction.
 (defun eval-asm (instr curr-pc debug)
-  (if (member (car instr)
-              '(j jlt  jge  jlo  jhs  
-                  jz jnz  jlo-b jhs-b jz-b 
-                  jnz-b jlo-w jhs-w jz-w 
-                  jnz-w jsr  ))
-      (let* ((dest-pc (eval (cadr instr)))
+  (when debug (format t "instr ~a~%" (car instr)))
+  (cond ((member (car instr) '(j jlt  jge  jlo  jhs  
+                                  jz jnz  jlo-b jhs-b jz-b 
+                                  jnz-b jlo-w jhs-w jz-w 
+                                  jnz-w jsr  ))
+         (eval-asm-jump instr curr-pc debug))
+        ((member (car instr) '(lalloc-words lalloc-dwords lalign-dword lalign-word))
+         (funcall (car instr) (eval (cadr instr)) curr-pc))
+      (t (eval instr))))
+
+(defun eval-asm-jump (instr curr-pc debug)
+  (let* ((dest-pc (eval (cadr instr)))
              (imm-offs nil)
              (instr-len 2) ; initial size, at least opcode plus one offset byte
              (prev-len 2)
@@ -444,8 +504,7 @@
                     (if debug (format t "C: imm-offs:~a ilen:~a plen:~a~%" imm-offs instr-len prev-len))))))
         (if debug (format t "dpc:~a offs:~a~%" dest-pc imm-offs))
         (if debug (print (list (car instr) imm-offs)))
-        (funcall (car instr) imm-offs))
-      (eval instr)))
+        (funcall (car instr) imm-offs)))
 
 ;;; Iterate through the program and calculate each instructions size to
 ;;; determine position of each label. Labels are updated when encountered.
