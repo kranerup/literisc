@@ -2420,9 +2420,12 @@
      ;; output: P0=result
      ;;
      ;; lambda definition: ( (formal-params . body) . env )
+     ;; (lambda param-list expr1 expr2 ...)
+     ;; (lambda (x)        (+ 1 x))
+     ;; (lambda (x)        (+ 1 x) 123)
      ;; (lambda (x) (body x)) -> (cons (cons '(x) '(body x)) env)
-     ;; (car args) - formal-params
-     ;; (car (cdr args) - body
+     ;; (car args) - param-list = formal-params
+     ;; (cdr args) - list of body expressions
 
      (label l-lambda)
      ;; do not push SRP, apply already did that
@@ -2435,8 +2438,15 @@
      (A=Rx P0)(Rx=A R2) ; R2=formal-params
 
      (A=Rx R0)(Rx=A P0)
-     (jsr l-cdr)
-     (jsr l-car) ; P0 = body
+     (jsr l-cdr) ; P0 = body list = (cdr args)
+     (A=Rx P0)(Rx=A R0) ; R0 = body -list
+
+     ;; wrap body list in a progn
+     ;; (cons prim-progn body-list) 
+     (Rx= (/ (- prim-progn   n-cons) 4) P0)
+     (A=Rx R0)(Rx=A P1) ;  body-list
+     (jsr l-cons) ; P0 = progn wrapped body
+    
      (A=Rx P0)(Rx=A P1) ; P1 = body
      (A=Rx R2)(Rx=A P0) ; P0 = formal-params
      (jsr l-cons) ; P0 = inner cons
@@ -2728,7 +2738,7 @@
      (label l-let-loop)
      (A= 0)
      (A-=Rx R2)
-     (jz l-let-eol)
+     (jz l-let-eol) ; end of bind list
 
      (A=Rx R2)(Rx=A P0) ; bind list
      (jsr l-car)
@@ -2751,17 +2761,28 @@
      (A=Rx R2)(Rx=A P0) ; bind list
      (jsr l-cdr)
      (A=Rx P0)(Rx=A R2)
-     
+ 
      (j l-let-loop)
      
      (label l-let-eol)
-     (A=Rx R0)(Rx=A P0) ; R0 = arg list
-     (jsr l-cdr)
-     (jsr l-car) ; body to be evaluated with the new env
+     (A=Rx R0)(Rx=A P0) ; R0 = arg list first item, the bind list
+     (jsr l-cdr) ; let body list
+    
+     (A= 0)
+     (A-=Rx P0) ; arg list == nil?
+     (jz l-let-done)
+
+     (A=Rx P0)(Rx=A R0) ; R0 = next arg / body expr
+     (jsr l-car) ; P0 = body expr to be evaluated with the new env
     
      (A=Rx R1)(Rx=A P1) ; new env
-     (jsr l-eval) ; eval body
-     
+     (jsr l-eval) ; eval body -> P0 eval result
+     (A=Rx P0)(Rx=A R2) ; R2 = eval result
+     (j l-let-eol)
+
+     (label l-let-done)
+     (A=Rx R2)(Rx=A P0)
+
      (pop-r R2)
      (pop-a) ;; apply did push SRP
      (j-a)
@@ -2914,6 +2935,33 @@
      (pop-a) ;; apply did push SRP
      (j-a)
  
+     ;; --- consp -----------------------------------
+     ;; input: P0 - cons
+     ;; output: P0 - t/nil
+     (label l-consp)
+     (push-r R0)
+     
+     (Rx= n-cons-type R0)
+     (A=Rx R0)
+     (A+=Rx P0) ; index in cons-type
+     (Rx=M[A].b R0) ; R0=type of cons
+
+     (A= c-cons-cons)
+     (A-=Rx R0)
+     (jz l-consp-t)
+     (A= 0) ; nil
+     (j l-consp-ret)
+     
+     (label l-consp-t)
+     (A= 1) ; t
+
+     (label l-consp-ret)
+     (Rx=A P0)
+     
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
+
      ;; --- eql -----------------------------------
      ;; If both params are number then compare thie
      ;; values, else compare the cons's.
@@ -4687,6 +4735,8 @@
 (defconstant fixed-cons-err   2)
 (defconstant fixed-cons-quote 3)
 
+(defparameter prim-progn 0)
+
 (defun default-env (dmem)
   (let* ((sym-0-nil (add-symbol dmem "nil" 0)) ; fixed positioned symbol
          (sym-1-t   (add-symbol dmem "t" 1)); fixed positioned symbol
@@ -4718,7 +4768,10 @@
       (setf env (push-env dmem (add-symbol dmem "setq" (add-prim dmem "l-prim-setq")) env))
       (setf env (push-env dmem (add-symbol dmem "print" (add-prim dmem "l-prim-print")) env))
       (setf env (push-env dmem (add-symbol dmem "prin1" (add-prim dmem "l-prim-prin1")) env))
-      (setf env (push-env dmem (add-symbol dmem "progn" (add-prim dmem "l-prim-progn")) env))
+      (let ((cons-progn (add-prim dmem "l-prim-progn")))
+        (setf prim-progn (+ n-cons (* 4 cons-progn)))
+        ;(format t "PROGN cons-progn:~a prim-progn:~a~%" cons-progn prim-progn)
+        (setf env (push-env dmem (add-symbol dmem "progn" cons-progn) env)))
       (mem-write-word-l dmem n-global-env env)
     env))
 
@@ -5356,6 +5409,18 @@ nil
                               "3"
                               "(let ((a 1)(b 2)) (+ a b))"))
 ;;; ------------------------------------------------------------------------
+(deftest run2-let-b  () (run-test #'test-source-new 
+                              "999222222"
+                              "(let ((a 123)) (prin1 999) (prin1 222))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-let-c  () (run-test #'test-source-new 
+                              "111"
+                              "(let ((a 123)) 111)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-let-d  () (run-test #'test-source-new 
+                              "111"
+                              "(let (()) 111)"))
+;;; ------------------------------------------------------------------------
 (deftest run2-less  () (run-test #'test-source-new 
                               "tnilnil"
                               "(< 3 4) (< 4 3) (< 7 7)"))
@@ -5403,6 +5468,10 @@ nil
 (deftest run2-progn  () (run-test #'test-source-new 
                                      "97"
                                      "(progn (+ 1 2)(prin1 9) 7)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-defun  () (run-test #'test-source-new 
+                                     "f222"
+                                     "(defun f (x) (+ x 1) 111 222) (f 10)"))
 ;;; ------------------------------------------------------------------------
 
 
@@ -5456,6 +5525,9 @@ nil
     (run2-if)
     (run2-cond)
     (run2-let)
+    (run2-let-b)
+    (run2-let-c)
+    (run2-let-d)
     (run2-less)
     (run2-gr-eq)
     (run2-eq)
@@ -5463,6 +5535,7 @@ nil
     (run2-setq)
     (run2-tagb-loop)
     (run2-progn)
+    (run2-defun)
     
     ))
 
