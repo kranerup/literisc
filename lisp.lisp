@@ -71,7 +71,10 @@
 ;;; 1: sym ["t", 0]
 ;;; 2: sym ["error", 0]
 
-;;; An environment is a list of symbol-conses.
+;;; An environment is a list of symbol-conses: (cons `sym-a (cons `sym-b nil))
+;;; a symbols value is embedded in the symbol cons cell
+;;;
+;;; In tiny lisp an environment is instead a list of symbol-conses.
 ;;;
 ;;;  env->[*|*]--->NIL
 ;;;        |
@@ -385,6 +388,7 @@
     (label str-print  )(lstring "print")
     (label str-prin1  )(lstring "prin1")
     (label str-progn  )(lstring "progn")
+    (label str-defmac )(lstring "defmacro")
    
     (label str-free)
     (lalloc-bytes 128)
@@ -423,6 +427,7 @@
     (aword (/ (- prim-print   n-cons) 4)) (aword (- str-print   n-string-space) ); print
     (aword (/ (- prim-prin1   n-cons) 4)) (aword (- str-prin1   n-string-space) ); prin1
     (aword (/ (- prim-progn   n-cons) 4)) (aword (- str-progn   n-string-space) ); progn
+    (aword (/ (- prim-defmac  n-cons) 4)) (aword (- str-defmac  n-string-space) ); defmacro
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -448,6 +453,7 @@
     (label prim-print  ) (adword  l-prim-print)     ; print
     (label prim-prin1  ) (adword  l-prim-prin1)     ; prin1
     (label prim-progn  ) (adword  l-prim-progn)     ; progn
+    (label prim-defmac ) (adword  l-defmacro  )     ; defmacro
 
     ;; ---- global env ----------
     (label l-env)
@@ -476,8 +482,9 @@
     (aword 22) (aword (+ 21 (/ (- l-env n-cons) 4)) )  ; setq
     (aword 23) (aword (+ 22 (/ (- l-env n-cons) 4)) )  ; print
     (aword 24) (aword (+ 23 (/ (- l-env n-cons) 4)) )  ; prin1
-    (label l-env-start)
     (aword 25) (aword (+ 24 (/ (- l-env n-cons) 4)) )  ; progn
+    (label l-env-start)
+    (aword 26) (aword (+ 25 (/ (- l-env n-cons) 4)) )  ; defmacro
    
     (label l-cons-free)
     (lalloc-dwords nr-cons)
@@ -512,6 +519,7 @@
     (abyte c-cons-symbol) ; print
     (abyte c-cons-symbol) ; prin1
     (abyte c-cons-symbol) ; progn
+    (abyte c-cons-symbol) ; defmacro
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -536,6 +544,7 @@
     (abyte c-cons-primitive) ; print
     (abyte c-cons-primitive) ; prin1
     (abyte c-cons-primitive) ; progn
+    (abyte c-cons-primitive) ; defmacro
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -563,6 +572,7 @@
     (abyte c-cons-cons) ; print
     (abyte c-cons-cons) ; prin1
     (abyte c-cons-cons) ; progn
+    (abyte c-cons-cons) ; defmacro
 
     (lalloc-bytes nr-cons)
    
@@ -1924,7 +1934,7 @@
      (jz l-ret-err)
      (jsr l-car) ; get symbol value
      (j l-eval-ret) ; return value from assoc in P0
-   
+ 
      ;; apply function
      ;; function call is a list: ( func arg1 arg2 ... )
      (label l-eval-cons)
@@ -1967,6 +1977,10 @@
      (jz l-apply-prim)
 
      (A= c-cons-func)
+     (A-=Rx R0)
+     (jz l-apply-func)
+
+     (A= c-cons-macro)
      (A-=Rx R0)
      (jz l-apply-func)
 
@@ -2086,7 +2100,7 @@
     ;; input: P0 = cons index to a list. The car of each list item is a symbol.
     ;;        P1 = cons index to a list. The car of each list item is a value.
     ;;        P2 = an env/association list, cons index
-    ;; output: P0 = cons index to a new environment list: ( ( syma . vala ) (symb . valb) ... )
+    ;; output: P0 = cons index to a new environment list
     (push-srp)
     (push-r R4)
 
@@ -2175,6 +2189,15 @@
     
     ))
 
+;; Macros call uses expand() instead of reduce().
+;; L expand(L f,L t,L e) {
+;;   return eval(
+;;                 eval( cdr(f),
+;;                       bind( car(f),
+;;                             t,
+;;                             env)),
+;;                 e); }
+
 (defparameter func-reduce
   '(
     ;; L reduce(L f,L t,L e) {
@@ -2194,30 +2217,48 @@
     ;;                (bind (car (car f)) ; symbol list of formal params
     ;;                      (evlis p env) ; actual params
     ;;                      (cdr f))) ; env from lambda
+    ;;
     ;; In a function call then apply has already evaluated "f" which then must be
     ;; a lambda. Reduce is then called.
+    ;;
+    ;; Note that in tinylisp the body is a single expression but we've implemented
+    ;; a implicit progn around the body so body is expected to be a list.
+    ;;
     (label l-reduce)
     ;; input: P0 - f, the lambda with structure: ( (formal-params . body) . env )
     ;;        P1 - t, a list with the actual params
     ;;        P2 - the env
+    ;;        P3 - cons type, c-cons-func or c-cons-macro
     (push-srp)
-    (push-r R6)
+    (push-r R7)
  
     (A=Rx P0)(Rx=A R0) ; R0=f
     (A=Rx P1)(Rx=A R1) ; R1=t
     (A=Rx P2)(Rx=A R2) ; R2=env
+    (A=Rx P3)(Rx=A R7) ; R7=type, func/macro
 
     ;; prepare bind params
     (jsr l-car)
     (A=Rx P0)(Rx=A R3) ; R3 = (car f) = lambda outer cons
     (jsr l-car)
     (A=Rx P0)(Rx=A R4) ; -> R4(car(car f)) = lambda formal params
- 
+
+    (A= c-cons-func)
+    (A-=Rx R7)
+    (jz l-red-func)
+    ;; a macro, skip eval
+    (A=Rx R1)(Rx=A R5) ; R5 = the non-evaluated params
+    (j l-red-common)
+
+    (label l-red-func)
+    ;; a function, eval actual params
     (A=Rx R1)(Rx=A P0) ; t - actual params
     (A=Rx R2)(Rx=A P1) ; env
+
     (jsr l-evlis)
     (A=Rx P0)(Rx=A R5) ; R5 = evlis result, the evaluated params
-   
+  
+    (label l-red-common)
     (A=Rx R0)(Rx=A P0)
     (jsr l-cdr) ; P0 = (cdr f) = the lambda env
    
@@ -2245,7 +2286,17 @@
     (A=Rx R6)(Rx=A P1) ; P1 = env from bind
     (jsr l-eval) ; P0 = evaluated body, to be the reduce return value
     
-    (pop-r R6)
+    (A= c-cons-func)
+    (A-=Rx R7)
+    (jz l-red-skip)
+    ;; it's a macro so eval the result
+    
+    (A=Rx R6)(Rx=A P1) ; P1 = env from bind
+    (jsr l-eval)
+    
+    (label l-red-skip)
+    
+    (pop-r R7)
     (pop-a)
     (j-a)
 
@@ -2505,6 +2556,54 @@
      (pop-a) ;; apply did push SRP
      (j-a)
 
+     ;; --- defmacro ---------------------------------- 
+     ;; input: P0=arg-list consists of: (cons symbol (cons (list args...) (cons body nil)))
+     ;;        P1=env
+     ;; output: P0=result
+     ;; (defmacro f (plist) body) -> add symbol (car args) to global env
+     ;;   symbol value: (lambda (plist) (progn body))
+     (label l-defmacro)
+     ;; do not push SRP, apply already did that
+     (push-r R3)
+
+     (A=Rx P0)(Rx=A R1) ; R1=arg-list
+     (A=Rx P1)(Rx=A R2) ; R2=env
+
+     (jsr l-car) ; -> P0 = symbol = (car args)
+     (A=Rx P0)(Rx=A R3) ; R3=symbol
+
+     (A=Rx R1)(Rx=A P0)
+     (jsr l-cdr) ; -> P0 = (cdr arg-list)
+     ;; P1 = env
+     ;; use l-lambda to create a lambda since the arg-list after symbol is the same as for lambda
+     (Rx= l-defmac-l-ret R0)
+     (push-r R0)
+     (j l-lambda)
+     (label l-defmac-l-ret) ; we need a return point to push so that primtive can pop-a/j-a here
+
+     (A=Rx P0)(Rx=A R0) ; lambda / symbol value
+
+     ;; lambda creates a function so change it to a macro
+     (A= c-cons-macro)
+     (Rx=A P1)
+     (jsr l-set-type)
+     
+     (A=Rx R3)(Rx=A P0) ; symbol
+     (A=Rx R2)(Rx=A P2) ; env
+     (A=Rx R0)(Rx=A P1) ; sym-val
+     (jsr l-bind) ; P0=symb P1=val P2=env
+     ;; P0 = new env
+
+     ;; write new env to the global env
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (M[A].w=Rx P0)
+
+     (A=Rx R3)(Rx=A P0) ; return symbol
+
+     (pop-r R3)
+     (pop-a) ;; apply did push SRP
+     (j-a)
      
      ;; --- progn ----------
      ;; input: P0 = arg-list, a list of expressions to be evaluated
@@ -4626,6 +4725,7 @@
           ((equal c-cons-number cons-type) (print-number dmem cons-index nil))
           ((equal c-cons-primitive cons-type) (print-number dmem cons-index t))
           ((equal c-cons-func cons-type) (print-cons dmem cons-index))
+          ((equal c-cons-macro cons-type) (print-cons dmem cons-index))
           ((equal c-cons-cons cons-type) (print-cons dmem cons-index)))
     (format t "~%")))
 
@@ -5119,7 +5219,8 @@ nil
 ;;; ------------------------------------------------------------------------
 (defparameter test-func-reduce
   '((Rx= n-stack-highest SP)
-    
+   
+    (Rx= c-cons-func P3)
     (jsr l-reduce)
     (jsr l-print)
 
@@ -5377,14 +5478,6 @@ nil
                                      "97"
                                      "(progn (+ 1 2)(prin1 9) 7)"))
 ;;; ------------------------------------------------------------------------
-
-
-
-
-
-
-
-;;; ------------------------------------------------------------------------
 (deftest run2-car-cdr  () (run-test #'test-source-new 
                                    "1(2 3)"
                                    "(car (quote (1 2 3))) (cdr (quote (1 2 3)))"))
@@ -5473,8 +5566,24 @@ nil
                                      "f222"
                                      "(defun f (x) (+ x 1) 111 222) (f 10)"))
 ;;; ------------------------------------------------------------------------
-
-
+(deftest run2-macro-a  () (run-test #'test-source-new 
+                                     "f111"
+                                     "(defmacro f () 111) (f)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-macro-b  () (run-test #'test-source-new 
+                                     "f24"
+                                     "(defmacro f (x) (+ x x)) (f 12)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-macro-c  () (run-test #'test-source-new 
+                                     "f25"
+                                     "(defmacro f (op) (list op 12 13)) (f +)" ))
+;;; ------------------------------------------------------------------------
+(deftest run2-macro-d  () (run-test #'test-source-new 
+                                     "gf124"
+                                     "(defvar g 111)
+                                      (defmacro f (op) (list op g 13))
+                                      (f +)"))
+;;; ------------------------------------------------------------------------
 (deftest test-lisp ()
   (combine-results
     (run-t1)
@@ -5536,7 +5645,10 @@ nil
     (run2-tagb-loop)
     (run2-progn)
     (run2-defun)
-    
+    (run2-macro-a)
+    (run2-macro-b)
+    (run2-macro-c)
+    (run2-macro-d)
     ))
 
 ;(run-emul e 200 nil)
