@@ -35,15 +35,17 @@
 ;;;
 ;;;             msb    ...    lsb
 ;;;          [   f1     |       f2 ]
-;;; byte        3  2          1  0
+;;;   byte      3  2          1  0
 ;;;
-;;;   type   | f1 (cdr) | f2 (car)  |
+;;; symbol:  | f1 (cdr) | f2 (car)  |
 ;;;   -------+----------+-----------+
-;;;   symbol | name-ptr | value-ptr |
-;;;     name-ptr:string space ptr
-;;;     value-ptr:cons cell ptr
+;;;          | name-ptr | value-ptr |
+;;;              |           |
+;;;              |           +--- value-ptr:cons cell ptr
+;;;              |
+;;;              +-- name-ptr:string space ptr
 ;;;
-;;;   cons   | cdr-ptr  | car-ptr   |
+;;; cons:    | cdr-ptr  | car-ptr   |
 ;;;     car/cdr-ptr: cons cell ptr
 
 ;;;          |          f           |
@@ -2144,7 +2146,7 @@
 
     (A=Rx R3) (Rx=A P0)
     (A=Rx R4) (Rx=A P1) ; P2 is already env
-    (jsr l-pair) ; -> P0
+    (jsr l-unique-pair) ; -> P0
     (A=Rx P0) (Rx=A P2) ; P2 = new env
 
     (A=Rx R0) (Rx=A P0) ; v-list
@@ -2163,7 +2165,7 @@
     ;; -----
     (label l-bind-no-cons)
     ;; it's not a list so must be a single symbol, add it to env
-    (jsr l-pair) ; pair has same params and return val as bind
+    (jsr l-unique-pair) ; pair has same params and return val as bind
     (j l-bind-ret)
     
     ;; -----
@@ -2181,7 +2183,10 @@
     ;; from lisp in 99 lines:
     ;;   pair(L v,L x,L e) { return cons( cons(v,x), e ); }
     ;; but we store symbol value in symbol cons
-    (label l-pair)
+    ;; Need to copy the symbol cons so that the value pointer
+    ;; is unique. Otherwise recursive functions will not work since the
+    ;; formal parameter list of symbols is used to bind symbols to values.
+    (label l-unique-pair)
     ;; input: P0 = symbol
     ;;        P1 = value
     ;;        P2 = env, a list, cons index
@@ -2189,11 +2194,39 @@
     ;;         (P1 = env)
     ;;         (P2 = env)
     (push-srp)
+    (push-r R1)
+    (A=Rx P1)(Rx=A R0)
+    (A=Rx P2)(Rx=A R1)
+
+    (jsr l-cdr) ; -> P0 = name-ptr of symbol
+    (jsr l-box-sym) ; -> P0 = create a new symbol-cons with the same name-ptr
+
+    ;; set symbol value
+    (A=Rx R0)(Rx=A P1)
+    (jsr l-rplca) ; P0=symbol P1=value -> P0=symbol
+
+    (A=Rx R1)(Rx=A P1) ; P1=env
+    (jsr l-cons) ; P0 = outer-cons = (cons P0=inner-cons P1=env)
+    
+    (pop-r R1)
+    (pop-a)
+    (j-a)
+    
+    (label l-pair)
+    ;; input: P0 = symbol
+    ;;        P1 = value
+    ;;        P2 = env, a list, cons index
+    ;; output: P0 = head of new env cons
+    ;;         (P1 = env)
+    ;;         (P2 = env)
+    ;; This version of pair reuses the symbol cons.
+    (label l-pair)
+    (push-srp)
 
     ;; set symbol value
     (jsr l-rplca) ; P0=symbol P1=value -> P0=symbol
 
-    (A=Rx P2) (Rx=A P1) ; P1=env
+    (A=Rx P2)(Rx=A P1)
     (jsr l-cons) ; P0 = outer-cons = (cons P0=inner-cons P1=env)
     
     (pop-a)
@@ -5675,10 +5708,17 @@ nil
          (if (atom x)
              (cons x y)
              (cons (car x) (append (cdr x) y)) )))
-  (defun reverse (r) (if (consp r)
+   (append '(1 2) '(3 4))
+   (append '(1 2) '(3))
+   (append '(1 2) 3)
+   (append '(1) '(2))
+   (append '(1) 2)
+   (defun reverse (r) (if (consp r)
                        (append (reverse (cdr r)) (cons (car r) nil ))
-                       (prin1 r)))
-  (reverse '(1 2 3))
+                       r))
+   (reverse '(1 2 3))
+   (reverse '(1 2))
+   (reverse '(1))
   ")
 #|
 
@@ -5689,11 +5729,6 @@ nil
          (if (atom x)
              (cons x y)
              (cons (car x) (append (cdr x) y)) )))
-   (append '(1 2) '(3 4))
-   (append '(1 2) '(3))
-   (append '(1 2) 3)
-   (append '(1) '(2))
-   (append '(1) 2)
   (defun reverse (r) (if (consp r)
                        (append (reverse (cdr r)) (cons (car r) nil ))
                        r))
