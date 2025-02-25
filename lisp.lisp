@@ -18,16 +18,17 @@
 ;;; Strings used in symbols are kept in a separate string space so that
 ;;; their memory can be packed efficiently.
 ;;;
-;;; cons-type: [ t:8 ]  (msb..lsb)
-;;;   [ 0:4 | gc:1 | type:3 ]
-;;;   type: 0 - free
-;;;         1 - number
-;;;         2 - symbol
-;;;         3 - char
-;;;         4 - cons
-;;;         5 - macro
-;;;         6 - function
-;;;         7 - primitive
+;;; cons-type:
+;;;   [        t:8          ]
+;;;   [ 0:4 | gc:1 | type:3 ]  (msb..lsb)
+;;;     type: 0 - free
+;;;           1 - number
+;;;           2 - symbol
+;;;           3 - char ( currently characters are numbers so this is unused )
+;;;           4 - cons
+;;;           5 - macro
+;;;           6 - function
+;;;           7 - primitive
 ;;;
 ;;; cons:    [ f1:16    |    f2:16 ]
 ;;;          [         f:32        ]
@@ -100,7 +101,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 8000))
+(setq dmem (make-dmem 10000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -139,7 +140,7 @@
      (assert (< dmem-allocated (length dmem)))))
 
 (defvar string-space-free 0) ; relative n-string-space
-(defparameter source-region-size 256) ; allocated bytes to source buffer
+(defparameter source-region-size 1024) ; allocated bytes to source buffer
 (defvar cons-free nil)
 (defvar n-cons-end nil)
 
@@ -329,7 +330,7 @@
           do (format t "~%"))))
 
 ;; ----------------------------------------------------------------------------
-(defparameter nr-cons 200)
+(defparameter nr-cons 600)
 (defparameter cons-size 4) ; bytes
 ;; indexes relative reader-state
 (defparameter rs-use-unread 0)
@@ -389,10 +390,12 @@
     (label str-prin1  )(lstring "prin1")
     (label str-progn  )(lstring "progn")
     (label str-defmac )(lstring "defmacro")
+    (label str-consp  )(lstring "consp")
    
     (label str-free)
     (lalloc-bytes 128)
 
+    ;; ---------------- start of cons space ----------------------------------------
     (lalign-dword)
     (label n-cons)
 
@@ -428,6 +431,7 @@
     (aword (/ (- prim-prin1   n-cons) 4)) (aword (- str-prin1   n-string-space) ); prin1
     (aword (/ (- prim-progn   n-cons) 4)) (aword (- str-progn   n-string-space) ); progn
     (aword (/ (- prim-defmac  n-cons) 4)) (aword (- str-defmac  n-string-space) ); defmacro
+    (aword (/ (- prim-consp   n-cons) 4)) (aword (- str-consp   n-string-space) ); consp
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -454,6 +458,7 @@
     (label prim-prin1  ) (adword  l-prim-prin1)     ; prin1
     (label prim-progn  ) (adword  l-prim-progn)     ; progn
     (label prim-defmac ) (adword  l-defmacro  )     ; defmacro
+    (label prim-consp  ) (adword  l-prim-consp)     ; consp
 
     ;; ---- global env ----------
     (label l-env)
@@ -483,15 +488,18 @@
     (aword 23) (aword (+ 22 (/ (- l-env n-cons) 4)) )  ; print
     (aword 24) (aword (+ 23 (/ (- l-env n-cons) 4)) )  ; prin1
     (aword 25) (aword (+ 24 (/ (- l-env n-cons) 4)) )  ; progn
-    (label l-env-start)
     (aword 26) (aword (+ 25 (/ (- l-env n-cons) 4)) )  ; defmacro
+    (label l-env-start)
+    (aword 27) (aword (+ 26 (/ (- l-env n-cons) 4)) )  ; consp
    
-    (label l-cons-free)
+    (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
+    ;; ----------------- end of cons space ----------------------
     
     (label n-cons-end)
     (lalloc-words 1) ; points to entry nr in n-cons table
 
+    ;; ----------------- cons type space ------------------------
     (label n-cons-type)
     (abyte c-cons-symbol) ; nil
     (abyte c-cons-symbol) ; t
@@ -520,6 +528,7 @@
     (abyte c-cons-symbol) ; prin1
     (abyte c-cons-symbol) ; progn
     (abyte c-cons-symbol) ; defmacro
+    (abyte c-cons-symbol) ; consp
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -545,6 +554,7 @@
     (abyte c-cons-primitive) ; prin1
     (abyte c-cons-primitive) ; progn
     (abyte c-cons-primitive) ; defmacro
+    (abyte c-cons-primitive) ; consp
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -573,16 +583,22 @@
     (abyte c-cons-cons) ; prin1
     (abyte c-cons-cons) ; progn
     (abyte c-cons-cons) ; defmacro
+    (abyte c-cons-cons) ; consp
 
     (lalloc-bytes nr-cons)
-   
+    ;; ----------------- end of cons type space ------------------------
+
     (lalign-dword)
     (label reader-state)
     (lalloc-dwords 4)
-   
+  
+    ;; cons index to next free cons cell. This is used as starting
+    ;; point to search for a free cons cell. After GC the free
+    ;; cells are spread out over the whole cons space so there is no
+    ;; contiguous free area.
     (lalign-word)
     (label n-cons-free)
-    (aword (/ (- l-cons-free n-cons) 4)) ; cons index to next free cons cell
+    (aword (/ (- l-cons-free n-cons) 4)) 
 
     (label n-string-space-free)
     (aword (- str-free n-string-space)) ; index to next free byte in string space
@@ -593,13 +609,17 @@
     
     (lalign-dword)
     (label n-stack)
-    (lalloc-dwords 300)
+    (lalloc-dwords 400)
     (label n-stack-highest)
     (lalloc-dwords 1)
 
     (label l-boot)
     ;; append program after this point
     ))
+
+;; cons area in nr of cons cells
+(defun size-cons-area ()
+  (/ (- n-cons-end n-cons) 4))
 ;; ----------------------------------------------------------------------------
 (defun init-lisp ()
   (setq dmem-allocated 0)
@@ -619,7 +639,7 @@
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 200)
+  (defparameter nr-cons 400)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -1291,7 +1311,7 @@
      (A+=Rx P0) ; cons-free += 1
      (Rx=A R2) ; R2= next cons-free
 
-     (Rx= nr-cons R1)
+     (Rx= (size-cons-area) R1)
      (A-=Rx R1)
      (jnz l-no-wrap)
 
@@ -1478,30 +1498,12 @@
      (push-srp)
      (push-r R3)
 
-     (Rx= (1- nr-cons) R0) ; R0 = last index in cons space (first index is 0)
+     (Rx= (1- (size-cons-area)) R0) ; R0 = last index in cons space (first index is 0)
 
      ;; last cons index < cons index to trace -> outside of cons space, do not follow
      (A=Rx R0)
      (A-=Rx P0)
      (jlo l-trace-no-more)
-
-     ;(Rx= n-cons-type R0)
-     ;(A=Rx P0) ; cons-idx
-     ;(A+=Rx R0) ; A = type-ptr = n-cons-type + cons-idx
-     ;(Rx=A R3) ; R3 = type-ptr
-     ;(Rx=M[A].b R2) ; R2 = type = n-cons-type[cons-idx]
-
-     ;(Rx= c-cons-gc-mask R1) ; gc-bit
-     ;(A=Rx R2) ; type
-     ;(A&=Rx R1) ; type & gc-bit
-     ;(A-=Rx R1)
-     ;(jz l-already-done)
-
-     ;;; mark gc:ed before recursing to avoid endless loops
-     ;(Rx= c-cons-gc-mask R1) ; gc-bit
-     ;(A=Rx R1) ; gc-bit
-     ;(A\|=Rx R2) ; set gc-bit
-     ;(M[Rx].b=A R3) ; write back to n-cons-type[idx]
 
      (jsr l-mark) ; P0,P1 -> P0,P1,P2(type),P3(marked)
      (A= 0)
@@ -1523,6 +1525,14 @@
      (A-=Rx R0)
      (jz l-trace-symbol)
 
+     (A= c-cons-func)
+     (A-=Rx R0)
+     (jz l-trace-cons)
+
+     (A= c-cons-macro)
+     (A-=Rx R0)
+     (jz l-trace-cons)
+
      ;; no cons pointers in this type
      (label l-trace-no-more)
 
@@ -1541,7 +1551,7 @@
      (jsr l-mark-trace)
      (j l-trace-no-more)
 
-     ;; --- symbol cell: trace car then cdr
+     ;; --- symbol cell: trace only car
      (label l-trace-symbol)
      (jsr l-car)
      (jsr l-mark-trace)
@@ -1645,15 +1655,15 @@
      
      (Rx= n-stack-highest R1) ; R1 = sp-idx starting at stack bottom
      (A=Rx SP) (Rx=A R0) ; R0 = current stack top
-     (Rx= (1- nr-cons) R2) ; R2 = last index in cons space (first index is 0)
+     (Rx= (1- (size-cons-area)) R2) ; R2 = last index in cons space (first index is 0)
 
      (label l-stack-loop)
      (A=Rx R1) ; sp-idx
      (Rx=M[A] R3) ; stack word
 
-     ;; last cons index < stack word
-     (A=Rx R2)
-     (A-=Rx R3)
+     ;; last cons index < stack word, i.e. word>highest-cons
+     (A=Rx R2)  ; highest cons
+     (A-=Rx R3) ; stack word
      (jlo l-next-item)
 
      (label l-possible-cons)
@@ -1683,7 +1693,7 @@
      (push-r R6)
 
      (Rx= 0 R0) ; cons idx 
-     (Rx= (1- (+ n-cons-type nr-cons)) R1) ; address of last type
+     (Rx= (1- (+ n-cons-type (size-cons-area))) R1) ; address of last type
      (Rx= n-cons-type R2) ; type ptr
      (Rx= c-cons-marked-mask R3) ; the pin/gc bits
      (Rx= c-cons-pin-mask R4) ; pin bit
@@ -1709,7 +1719,7 @@
     
      (label l-can-free)
      (A= c-cons-free)
-     (M[Rx].b=A R2) ; write back type with cleared gc state
+     (M[Rx].b=A R2) ; write back type with free state
 
      (A=Rx R0) (Rx=A P0)
      (jsr l-setcons)
@@ -1977,10 +1987,12 @@
      (jz l-apply-prim)
 
      (A= c-cons-func)
+     (Rx=A P3) ; param to l-reduce
      (A-=Rx R0)
      (jz l-apply-func)
 
      (A= c-cons-macro)
+     (Rx=A P3) ; param to l-reduce
      (A-=Rx R0)
      (jz l-apply-func)
 
@@ -2693,9 +2705,10 @@
      ;; output: P0=result
      (label l-prim-cons)
      ;; do not push SRP, apply already did that
-     (push-r R1)
+     (push-r R2)
     
      (A=Rx P0)(Rx=A R0) ; R0 = arg list
+     (A=Rx P1)(Rx=A R2) ; R2 = env
 
      ;; get the first argument and evaluate it
      (jsr l-car) ; P0=car(arg-list)
@@ -2705,12 +2718,13 @@
      (A=Rx R0)(Rx=A P0) ; arg list
      (jsr l-cdr) 
      (jsr l-car) ; second argument = (car (cdr arg-list))
+     (A=Rx R2)(Rx=A P1) ; env
      (jsr l-eval)
      (A=Rx P0)(Rx=A P1) ; P1 = second cons arg after eval
      (A=Rx R1)(Rx=A P0) ; P0 = first arg
      (jsr l-cons) ; (cons P0 P1) -> P0
 
-     (pop-r R1)
+     (pop-r R2)
      (pop-a) ;; apply did push SRP
      (j-a)
 
@@ -3061,6 +3075,20 @@
      (A=Rx SRP)
      (j-a)
 
+     ;; --- consp -----------------------------------
+     ;; input: P0=arg-list (but only two args allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-consp)
+     ;; do not push SRP, apply already did that
+  
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+
+     (jsr l-consp)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
      ;; --- eql -----------------------------------
      ;; If both params are number then compare thie
      ;; values, else compare the cons's.
@@ -3180,7 +3208,6 @@
      (jsr l-car)
      (jsr l-eval)
      (A=Rx P0)(Rx=A R0)
-   
      (j l-prt-part) ; shared code with print
 
      ))
@@ -3859,6 +3886,8 @@
 
      (jsr l-print)
 
+     ;(jsr l-garbage-collect)
+
      (j l-repl)
      ))
 
@@ -4064,6 +4093,41 @@
             (j-a)
             ))))
 
+(defparameter func-prim-char
+  '(
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;; Characters are just integers.
+     ;;
+     (label l-prim-getchar)
+     ;; do not push SRP, apply already did that
+     (jsr l-getchar) ; -> P0 = char
+     (jsr l-box-int) ; -> P0 = cons
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;; Characters are just integers.
+     ;;
+     (label l-prim-putchar)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (jsr l-getcons) ; get number value, assume eval:ed arg is a number
+
+     (jsr l-putchar)
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+    ))
 
 (defvar func-str-equal nil)
 (setq func-str-equal
@@ -4345,7 +4409,7 @@
         (masm *symtab*
               lisp-init
               main func-prtstr read-c scan func-str-equal
-              func-putchar func-getchar
+              func-putchar func-getchar func-prim-char
               func-find-symbol func-cdr
               func-car func-parse func-rplca func-rplcd
               func-cons func-gc func-print-symbol func-print
@@ -4370,7 +4434,7 @@
 
 (defun run-test (test &optional (expected-print nil) (source nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 8000))
+    (setq dmem (make-dmem 10000))
     (init-lisp))
   (check
     (let ((printed 
@@ -4693,7 +4757,7 @@
         (val-ptr (get-car dmem cons-index)))
     (print-string dmem (+ n-string-space name-ptr))
     (format t " str:~d val:~d" name-ptr val-ptr)))
-
+;
 (defun print-number (dmem cons-index is-prim)
   (let* ((addr (+ n-cons (* cons-index 4)))
          (res (aref dmem addr)))
@@ -4715,8 +4779,8 @@
       ((equal 0 (logand c-cons-pin-mask gcbits)) "gc")
       (t "p "))))
 
-(defun print-cons-cell (dmem cons-index cons-addr t-addr)
-  (let ((cons-type (logand 7 (aref dmem t-addr))))
+(defun print-cons-cell (dmem cons-index)
+  (let ((cons-type (logand 7 (aref dmem (+ n-cons-type cons-index)))))
     (format t "~4a: ~a ~a " cons-index 
             (print-gc-state dmem cons-index)
             (gethash cons-type cons-type-names))
@@ -4731,16 +4795,34 @@
 
 (defun rest-free-p (dmem index)
   (every #'(lambda (item) (equal c-cons-free item))
-         (subseq dmem index (+ n-cons-type nr-cons))))
+         (subseq dmem index (+ n-cons-type (size-cons-area)))))
   
 (defun print-conses (dmem n-cons n-cons-type)
   (let ((incr 4))
     (loop with addr := n-cons and taddr := n-cons-type and index := 0
-          do (print-cons-cell dmem index addr taddr)
+          do (print-cons-cell dmem index)
           until (rest-free-p dmem taddr)
           do (setf addr (+ addr incr))
           do (setf index (1+ index))
           do (setf taddr (1+ taddr)))))
+
+(defun get-cons-type (ptr)
+  (let* ((adr (+ n-cons-type ptr))
+         (tp (aref dmem adr)))
+    (logand tp n-cons-type-mask)))
+
+(defun print-cons-type (tp)
+  (format t "~a" (gethash tp cons-type-names)))
+
+
+(defun print-env ( &optional (env nil))
+  (let ((global-env (lr-emulator::mem-read-word dmem n-global-env)))
+    (loop with next := (if env env global-env)
+      ;do (print-cons-cell dmem next)
+      do (format t "  ")
+      do (print-cons-cell dmem (get-car dmem next))
+      do (setf next (get-cdr dmem next))
+      until (eql next 0))))
 
 (defun test-print (dmem)
   (setq string-space-free 0)
@@ -5400,7 +5482,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                      (set-source dmem source-string))
-               nil regression 200000 nil
+               nil regression 1000000 nil
                asm-init-lisp)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
@@ -5583,6 +5665,106 @@ nil
                                      "(defvar g 111)
                                       (defmacro f (op) (list op g 13))
                                       (f +)"))
+;;; ------------------------------------------------------------------------
+(defparameter predef-lisp
+  "
+   (defun atom (x) (not (consp x)))
+   (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+  (defun reverse (r) (if (consp r)
+                       (append (reverse (cdr r)) (cons (car r) nil ))
+                       (prin1 r)))
+  (reverse '(1 2 3))
+  ")
+#|
+
+   (defun atom (x) (not (consp x)))
+   (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+   (append '(1 2) '(3 4))
+   (append '(1 2) '(3))
+   (append '(1 2) 3)
+   (append '(1) '(2))
+   (append '(1) 2)
+  (defun reverse (r) (if (consp r)
+                       (append (reverse (cdr r)) (cons (car r) nil ))
+                       r))
+  (reverse (cons 1 nil))
+
+
+
+  (defun reverse (r) (if (consp r)
+                       (cons (reverse (cdr r)) (cons (car r) 22 ))
+                       r))
+  (reverse '(1 2 3))
+  (reverse '(1))
+  (defun reverse (r) (cons (inner (cdr r)) 2))
+  (defun inn (x) x)
+  (defun rev (r) (+ (inn (car (cdr r))) 2))
+  (rev '(1 3))
+                       (cons (reverse (cdr r)) 2)
+                       (cons (reverse (cdr r)) (cons (car r) nil ))
+  (defun atom (x) (not (consp x)))
+   (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+  (defun reverse (r) (if (consp r)
+                       (append (reverse (cdr r)) (cons (car r) nil ))
+                       r))
+  (append '(1) '(2))
+   (append nil 3)
+   (append '(1 2) '(3 4))
+   (append '(1 2) '(3 4))
+   (append '(1 2) 3)
+   (append 1 2)
+   (append '(1 2 ) '(3 4 5 6 7 8))
+  (defun ccc (x y) (+ x y))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+   (ccc 1 (ccc 2 (ccc 9 3)))
+  (+ 1 2 (+ 3 4))
+  (+ 1 2 (+ 3 4))
+  (+ 1 2 (+ 3 4))
+  (+ 1 2 (ccc 3 4))
+  (defun ccc (x y)
+    (cons x (cons x y)))
+   (cdr (append '(1 2 3) 2))
+  (consp 12)
+  (consp (cons 2 3))
+  (atom 12)
+  (atom (cons 1 2))
+   (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+   (append '(1 2) '(3 4))
+  (defun reverse (x) (if (atom x) x
+                         (append (reverse (cdr x)) (cons (car x) nil ))))
+  (reverse '(1 2 3))
+
+  (defun f (x y) (if (eq x nil) y t))
+  (f nil 2)
+  (f 3 2)
+|#
+
 ;;; ------------------------------------------------------------------------
 (deftest test-lisp ()
   (combine-results
