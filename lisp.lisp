@@ -103,7 +103,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 10000))
+(setq dmem (make-dmem 20000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -323,8 +323,12 @@
                     (return-from find-in-string-space i))
                    (t (setf i (next-string dmem i)))))))
 
-(defun print-string-space (dmem)
-  (let ((string-space-free (lr-emulator::mem-read-word dmem n-string-space-free)))
+;;; end is relative start of string space
+(defun print-string-space (dmem &optional (end nil))
+  (let ((string-space-free 
+          (if (not end)
+              (lr-emulator::mem-read-word dmem n-string-space-free)
+              end)))
     (loop with i = n-string-space
           until (>= i (+ n-string-space string-space-free))
           do (format t "~d ~d: " (- i n-string-space) i)
@@ -332,7 +336,7 @@
           do (format t "~%"))))
 
 ;; ----------------------------------------------------------------------------
-(defparameter nr-cons 600)
+(defparameter nr-cons 1200)
 (defparameter cons-size 4) ; bytes
 ;; indexes relative reader-state
 (defparameter rs-use-unread 0)
@@ -393,9 +397,12 @@
     (label str-progn  )(lstring "progn")
     (label str-defmac )(lstring "defmacro")
     (label str-consp  )(lstring "consp")
+    (label str-getc   )(lstring "getc")
+    (label str-putc   )(lstring "putc")
    
     (label str-free)
     (lalloc-bytes 128)
+    (label n-string-space-end)
 
     ;; ---------------- start of cons space ----------------------------------------
     (lalign-dword)
@@ -434,6 +441,8 @@
     (aword (/ (- prim-progn   n-cons) 4)) (aword (- str-progn   n-string-space) ); progn
     (aword (/ (- prim-defmac  n-cons) 4)) (aword (- str-defmac  n-string-space) ); defmacro
     (aword (/ (- prim-consp   n-cons) 4)) (aword (- str-consp   n-string-space) ); consp
+    (aword (/ (- prim-getc    n-cons) 4)) (aword (- str-getc    n-string-space) ); getc 
+    (aword (/ (- prim-putc    n-cons) 4)) (aword (- str-putc    n-string-space) ); putc 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -461,6 +470,8 @@
     (label prim-progn  ) (adword  l-prim-progn)     ; progn
     (label prim-defmac ) (adword  l-defmacro  )     ; defmacro
     (label prim-consp  ) (adword  l-prim-consp)     ; consp
+    (label prim-getc   ) (adword  l-prim-getc )     ; getc 
+    (label prim-putc   ) (adword  l-prim-putc )     ; putc 
 
     ;; ---- global env ----------
     (label l-env)
@@ -491,8 +502,10 @@
     (aword 24) (aword (+ 23 (/ (- l-env n-cons) 4)) )  ; prin1
     (aword 25) (aword (+ 24 (/ (- l-env n-cons) 4)) )  ; progn
     (aword 26) (aword (+ 25 (/ (- l-env n-cons) 4)) )  ; defmacro
-    (label l-env-start)
     (aword 27) (aword (+ 26 (/ (- l-env n-cons) 4)) )  ; consp
+    (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
+    (label l-env-start)
+    (aword 29) (aword (+ 28 (/ (- l-env n-cons) 4)) )  ; putc
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -531,6 +544,8 @@
     (abyte c-cons-symbol) ; progn
     (abyte c-cons-symbol) ; defmacro
     (abyte c-cons-symbol) ; consp
+    (abyte c-cons-symbol) ; getc
+    (abyte c-cons-symbol) ; putc
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -557,6 +572,8 @@
     (abyte c-cons-primitive) ; progn
     (abyte c-cons-primitive) ; defmacro
     (abyte c-cons-primitive) ; consp
+    (abyte c-cons-primitive) ; getc
+    (abyte c-cons-primitive) ; putc
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -586,9 +603,16 @@
     (abyte c-cons-cons) ; progn
     (abyte c-cons-cons) ; defmacro
     (abyte c-cons-cons) ; consp
+    (abyte c-cons-cons) ; getc
+    (abyte c-cons-cons) ; putc
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
+    ;; ----------------- guard------------------------
+    ;(label guard-start)
+    ;(lalloc-dwords 2)
+    ;(label guard-end)
+    ;; ----------------- guard------------------------
 
     (lalign-dword)
     (label reader-state)
@@ -609,9 +633,15 @@
     (aword (/ (- l-env-start n-cons) 4))
     (lalloc-words 1)
     
+    ;; ----------------- guard------------------------
+    (label guard-start)
+    (lalloc-dwords 2)
+    (label guard-end)
+    ;; ----------------- guard------------------------
+
     (lalign-dword)
     (label n-stack)
-    (lalloc-dwords 400)
+    (lalloc-dwords 1600)
     (label n-stack-highest)
     (lalloc-dwords 1)
 
@@ -638,10 +668,11 @@
   (format t "n-read-sym-str: ~a~%" (alloc n-read-sym-str 24))
 
   (format t "n-string-space: ~a~%" (alloc n-string-space 248))
+  (setq n-string-space-end dmem-allocated)
   (alloc-words n-string-space-free 1) ; index to next free byte in string space
   (setq string-space-free 0)
 
-  (defparameter nr-cons 400)
+  (defparameter nr-cons 1200)
   (defparameter cons-size 4) ; bytes
 
   (alloc-words n-cons-free 1) ; cons index to next free cons cell
@@ -778,12 +809,13 @@
      (Rx= n-string-space R1)
      (Rx= n-string-space-free R2)
      (A=M[Rx].w R2) ; free index, relative start of string space
-     (A+=Rx R1)
+     (A+=Rx R1) ; + n-string-space
      (Rx=A R2) ; absolute pointer to end of string space
 
      (label l-next-str)
      (A=Rx R0)(Rx=A P0)
      (A=Rx R1)(Rx=A P1)
+     (m chk-str P1)
      (jsr l-str-equal)
 
      (A= 0)
@@ -1238,6 +1270,35 @@
      
 ))
 
+(defparameter enabled-checkers t)
+
+(defun chk-cons (p)
+  (when enabled-checkers
+    (concatenate 'list
+      (push-r R1)
+      (A=Rx p)(Rx=A R0)
+      (Rx= (size-cons-area) R1)
+      (A-=Rx R1)
+      (jhs '(126))
+      (A=Rx R0)(Rx=A p)
+      (pop-r R1))))
+ 
+(defun chk-str (p)
+  (when enabled-checkers
+    (concatenate 'list
+      (push-r R1)
+      (A=Rx p)(Rx=A R0)
+      (Rx= n-string-space-end R1)
+      (A-=Rx R1)
+      (jhs '(126)) ; p >= n-string-space-end
+      (Rx= n-string-space R1)
+      (A=Rx R0)
+      (A-=Rx R1)
+      (jlo '(126)) ; p < n-string-space
+      (A=Rx R0)(Rx=A p)
+      (pop-r R1))))
+
+
 (defvar func-read nil)
 (setq func-read
   '( ;; read
@@ -1256,6 +1317,7 @@
      ;; P1 - value to replace car of cons cell (reg unmodified)
      (label l-rplca)
      (push-r R0)
+     (m chk-cons P0)
      (mvi->r n-cons R0)
      (r->a P0)
      (lsl-a)
@@ -1273,6 +1335,7 @@
      ;; P1 - value to replace cdr of cons cell (reg unmodified)
      (label l-rplcd)
      (push-r R0)
+     (m chk-cons P0)
      (mvi->r n-cons R0)
      (r->a P0)
      (lsl-a)
@@ -1497,6 +1560,7 @@
      ;; stack than all the cons:es if all conses are in a long chain.
      ;; This algorithm should be rewritten to use pointer reversal.
      (label l-mark-trace)
+     (m chk-cons P0)
      (push-srp)
      (push-r R3)
 
@@ -1671,7 +1735,7 @@
      (label l-possible-cons)
      ;; TODO: here we should sanity check that cons type isn't free
      (A=Rx R3) (Rx=A P0)
-     
+ 
      ;; --- cons cell: trace car then cdr
      (A= 1) ; pin mark
      (Rx=A P1)
@@ -1823,6 +1887,9 @@
      (push-srp)
      (push-r R2)
 
+     (m chk-cons P0)
+     (m chk-cons P1)
+
      (A=Rx P0) (Rx=A R0)  ; R0 = symb cons
      (A=Rx P1) (Rx=A R1)  ; R1 = env
 
@@ -1877,6 +1944,9 @@
      (push-srp)
      (push-r R0)
 
+     (m chk-cons P0)
+     (m chk-cons P1)
+     
      (jsr l-cdr) ; cdr(sym-cons 0) = name-ptr
      (A=Rx P0) (Rx=A R0) ; -> R0
      
@@ -1909,6 +1979,8 @@
      (push-srp)
      (push-r R2)
 
+     (m chk-cons P0)
+     (m chk-cons P1)
      (Rx= n-cons-type R0)
      (A=Rx R0)
      (A+=Rx P0) ; index in cons-type
@@ -2053,6 +2125,9 @@
      (push-srp)
      (push-r R4)
 
+     (m chk-cons P0)
+     (m chk-cons P1)
+
      (Rx= n-cons-type R0)
      (A=Rx R0)
      (A+=Rx P0) ; index in cons-type
@@ -2100,7 +2175,7 @@
   '(
     ;;
     ;; bind creates an environment from a list of symbols and a list of values.
-    ;; This binds the formal parameter names to the evaluated actual parameters in a function call.
+    ;; This binds the formal par0meter names to the evaluated actual parameters in a function call.
     ;;
     ;; This is the C code from Lisp in 99 lines but we don't use the same env data structure.
     ;; L bind(L v,L t,L e) {
@@ -2117,6 +2192,10 @@
     ;; output: P0 = cons index to a new environment list
     (push-srp)
     (push-r R4)
+
+    (m chk-cons P0)
+    (m chk-cons P1)
+    (m chk-cons P2)
 
     (A= 0)
     (A-=Rx P0)
@@ -2212,7 +2291,6 @@
     (pop-a)
     (j-a)
     
-    (label l-pair)
     ;; input: P0 = symbol
     ;;        P1 = value
     ;;        P2 = env, a list, cons index
@@ -3196,12 +3274,12 @@
      (jsr l-cadr)
      (A=Rx R1)(Rx=A P1) ; env
      (jsr l-eval)
-    
-     (A=Rx P0)(Rx=A P1) ; value
+ 
+     (A=Rx P0)(Rx=A P1)(Rx=A R0) ; value
      (A=Rx R2)(Rx=A P0) ; symbol cons
      (jsr l-rplca) ; set symbol value to the evaluation result
 
-     (A=Rx P1)(Rx=A P0) ; return value
+     (A=Rx R0)(Rx=A P0) ; return value
     
      (pop-r R2)
      (pop-a) ;; apply did push SRP
@@ -3243,6 +3321,22 @@
      (A=Rx P0)(Rx=A R0)
      (j l-prt-part) ; shared code with print
 
+     ;; --- -----------------------------------
+     ;; debug version that prints cons ptr as integer
+     ;; input: P0=arg-list
+     ;;        P1=env
+     (label no-l-prim-prin1)
+     (push-r R0)
+
+     (jsr l-car)
+     (jsr l-eval)
+     (jsr l-prtdec)
+     (Rx= (char-code #\Linefeed) P0)
+     (jsr l-putchar) 
+
+     (pop-r R0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
      ))
 (defparameter func-tagbody
   '( 
@@ -3890,7 +3984,7 @@
 
      (jsr l-print)
 
-     ;(jsr l-garbage-collect)
+     (jsr l-garbage-collect)
      (j l-repl)
      ))
 
@@ -4051,10 +4145,10 @@
      (j-a)))
 
 
-;;;(defparameter char-output :uart-io) ; :uart-io / :emul-io
-;;;(defparameter char-input :uart-io) ; :uart-io / :emul-io
-(defparameter char-output :emul-io) ; :uart-io / :emul-io
-(defparameter char-input :emul-io) ; :uart-io / :emul-io
+(defparameter char-output :uart-io) ; :uart-io / :emul-io
+(defparameter char-input :uart-io) ; :uart-io / :emul-io
+;;;(defparameter char-output :emul-io) ; :uart-io / :emul-io
+;;;(defparameter char-input :emul-io) ; :uart-io / :emul-io
 
 (defparameter func-putchar
   (cond ((equal char-output :emul-io)
@@ -4134,7 +4228,7 @@
      ;; output: P0=result
      ;; Characters are just integers.
      ;;
-     (label l-prim-getchar)
+     (label l-prim-getc)
      ;; do not push SRP, apply already did that
      (jsr l-getchar) ; -> P0 = char
      (jsr l-box-int) ; -> P0 = cons
@@ -4148,15 +4242,17 @@
      ;; output: P0=result
      ;; Characters are just integers.
      ;;
-     (label l-prim-putchar)
+     (label l-prim-putc)
      ;; do not push SRP, apply already did that
 
      ;; get the first argument and evaluate it
      (jsr l-car) ; P0=car(arg-list)
      (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R0)
      (jsr l-getcons) ; get number value, assume eval:ed arg is a number
 
      (jsr l-putchar)
+     (A=Rx R0)(Rx=A P0) ; return arg
 
      (pop-a) ;; apply did push SRP
      (j-a)
@@ -4207,6 +4303,7 @@
      ;; P0 - cons ptr 
      ;;    - returns car ptr from the cons cell
      (label l-car)
+     (m chk-cons P0)
      (r->a P0) ; cons-ptr = cons-index << 2 + n-cons
      (lsl-a)
      (lsl-a)
@@ -4220,6 +4317,7 @@
      ;; P0 - cons ptr 
      ;;    - returns cdr ptr from the cons cell
      (label l-cdr)
+     (m chk-cons P0)
      (r->a P0) ; cons-ptr = cons-index << 2 + n-cons + 2
      (lsl-a)
      (lsl-a)
@@ -4230,6 +4328,7 @@
      ;; input: P0 - cons ptr 
      ;; output    - returns (car (cdr P0))
      (label l-cadr)
+     (m chk-cons P0)
      (push-srp)
      (jsr l-cdr)
      (jsr l-car)
@@ -4239,6 +4338,7 @@
      ;; input: P0 - cons ptr 
      ;; output    - returns (car (cdr (cdr P0)))
      (label l-caddr)
+     (m chk-cons P0)
      (push-srp)
      (jsr l-cdr)
      (jsr l-cdr)
@@ -4425,6 +4525,8 @@
 
 (defvar e nil)
 (defvar *symtab* nil)
+(defparameter guard-start nil)
+(defparameter guard-end nil)
 
 (defun asm-n-run ( main &optional
                         (setup nil)
@@ -4454,8 +4556,19 @@
   (setf e (make-emulator *hello-world* dmem
                          :shared-mem lisp-init
                          :debug debug))
+  (when guard-start
+    (processor-add-wr-callback 
+      (emulated-system-processor e)
+      (lambda (addr data)
+        (when (and (>= addr guard-start) (< addr guard-end))
+          (format t "write to guard ~a~%" addr)
+          (setf (processor-state-break (emulated-system-processor e)) t))
+        t)))
   (if setup (funcall setup dmem (lr-emulator::emulated-system-processor e)))
-  (if no-curses (run-emul e nr-instr)
+  (if no-curses 
+      (if pty
+          (run-emul-io e pty nr-instr)
+          (run-emul e nr-instr))
       (if pty
           (run-with-curses-io e pty *symtab*)
           (run-with-curses e *symtab*)))
@@ -4467,7 +4580,7 @@
 
 (defun run-test (test &optional (expected-print nil) (source nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 10000))
+    (setq dmem (make-dmem 20000))
     (init-lisp))
   (check
     (let ((printed 
@@ -4744,7 +4857,7 @@
                #'(lambda (dmem proc)
                    (default-env dmem)
                    (mem-write-word-l dmem n-cons-free 0))
-               nil regression 10000)))
+               nil regression 100000)))
     ;(print-conses dmem n-cons n-cons-type)
     ;(format t "SP:~a~%" (aref (lr-emulator::processor-state-r proc) SP))
     ;(print-stack dmem 
@@ -5203,7 +5316,7 @@
                                     "(not t)(not (not (not nil)))(+ 10 11)
                                      (+ 6 5 4 3 2 1) (+ 1 1 1 1 1 1 1 1 1 1)
                                      (+ 1 2 3 4 5 6) (not (+ 1 2 3))")))
-               nil regression 200000)
+               nil regression 400000)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
@@ -5515,11 +5628,22 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                      (set-source dmem source-string))
-               nil regression 1000000 nil
+               nil regression 20000000 nil
                asm-init-lisp)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
+;;; ------------------------------------------------------------------------
+(defun run-repl ( source-string &optional (no-curses t) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run test-repl
+               #'(lambda (dmem proc) (set-source dmem source-string)) ; setup
+               nil  ; debug
+               no-curses  ; no-curses
+               100000000000 ; nr-instr
+               pty ; pty
+               asm-init-lisp ; lisp-init
+               )))
 ;;; ------------------------------------------------------------------------
 (deftest run-car-cdr  () (run-test #'test-source 
                                    "1(2 3)"
@@ -5699,9 +5823,9 @@ nil
                                       (defmacro f (op) (list op g 13))
                                       (f +)"))
 ;;; ------------------------------------------------------------------------
-(defparameter predef-lisp
-  "
-   (defun atom (x) (not (consp x)))
+(deftest run2-app-rev  () (run-test #'test-source-new 
+  "atomappend(1 2 3 4)(1 2 3)(1 2 . 3)(1 2)(1 . 2)reverse(3 2 1)(2 1)(1)1nil"
+  "(defun atom (x) (not (consp x)))
    (defun append (x y)
      (if (eq x nil)
          y
@@ -5719,85 +5843,157 @@ nil
    (reverse '(1 2 3))
    (reverse '(1 2))
    (reverse '(1))
-  ")
-#|
-
-   (defun atom (x) (not (consp x)))
-   (defun append (x y)
+   (reverse 1)
+   (reverse nil)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-letrec  () (run-test #'test-source-new 
+  "rec55"
+  "(defun rec (n)
+    (let ((a (+ n 1))
+          (b (+ a 2)))
+      (if (< b 20)
+        (rec b)
+        (+ a (+ b n)))))
+  (rec 2)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-stack-gc  () (run-test #'test-source-new 
+  "atomappendstr(1 2 3 4 5 6 7 8 9 10 11 12 13 . 14)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 . 100)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 . 101)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 . 102)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 . 103)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 . 104)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 . 105)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 105 . 106)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 105 106 . 107)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 105 106 107 . 108)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 105 106 107 108 . 109)(1 2 3 4 5 6 7 8 9 10 11 12 13 14 100 101 102 103 104 105 106 107 108 109 . 110)"
+  "(defun atom (x) (not (consp x)))
+  (defun append (x y)
      (if (eq x nil)
          y
          (if (atom x)
              (cons x y)
              (cons (car x) (append (cdr x) y)) )))
-  (defun reverse (r) (if (consp r)
-                       (append (reverse (cdr r)) (cons (car r) nil ))
-                       r))
-  (reverse (cons 1 nil))
-
-
-
-  (defun reverse (r) (if (consp r)
-                       (cons (reverse (cdr r)) (cons (car r) 22 ))
-                       r))
-  (reverse '(1 2 3))
-  (reverse '(1))
-  (defun reverse (r) (cons (inner (cdr r)) 2))
-  (defun inn (x) x)
-  (defun rev (r) (+ (inn (car (cdr r))) 2))
-  (rev '(1 3))
-                       (cons (reverse (cdr r)) 2)
-                       (cons (reverse (cdr r)) (cons (car r) nil ))
+  (defvar str '())
+  (setq str (append (append (append (append (append (append (append (append '(1 2 3 4 5 6) 7) 8) 9) 10) 11) 12) 13) 14))
+  (setq str (append str 100))
+  (setq str (append str 101))
+  (setq str (append str 102))
+  (setq str (append str 103))
+  (setq str (append str 104))
+  (setq str (append str 105))
+  (setq str (append str 106))
+  (setq str (append str 107))
+  (setq str (append str 108))
+  (setq str (append str 109))
+  (setq str (append str 110))"))
+;;; ------------------------------------------------------------------------
+(defparameter predef-lisp
+  "
+  (defun length (l)
+    (if (eq l nil)
+      0
+      (+ (length (cdr l)) 1)))
   (defun atom (x) (not (consp x)))
-   (defun append (x y)
+  (defun append (x y)
      (if (eq x nil)
          y
          (if (atom x)
              (cons x y)
              (cons (car x) (append (cdr x) y)) )))
-  (defun reverse (r) (if (consp r)
+   (defun reverse (r) (if (consp r)
                        (append (reverse (cdr r)) (cons (car r) nil ))
                        r))
-  (append '(1) '(2))
-   (append nil 3)
-   (append '(1 2) '(3 4))
-   (append '(1 2) '(3 4))
-   (append '(1 2) 3)
-   (append 1 2)
-   (append '(1 2 ) '(3 4 5 6 7 8))
-  (defun ccc (x y) (+ x y))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-   (ccc 1 (ccc 2 (ccc 9 3)))
-  (+ 1 2 (+ 3 4))
-  (+ 1 2 (+ 3 4))
-  (+ 1 2 (+ 3 4))
-  (+ 1 2 (ccc 3 4))
-  (defun ccc (x y)
-    (cons x (cons x y)))
-   (cdr (append '(1 2 3) 2))
+  (defun erase-char ()
+    (putc 8)
+    (putc 32)
+    (putc 8))
+  (defun delete-last (str)
+    (reverse (cdr (reverse str))))
+  (defun readline ()
+    (let ((str '()))
+      (tagbody
+        next-char
+        (let ((c (getc)))
+          (if (not (eql c 13))
+            (if (eql c 127)
+              (progn
+                (erase-char)
+                (setq str (delete-last str))
+                (go next-char))
+              (progn
+                (putc c)
+                (setq str (append str (cons c nil)))
+                (go next-char))))))
+      str
+      ))
+  "
+  )
+#|
+  (defun length (l)
+    (if (eq l nil)
+      0
+      (+ (length (cdr l)) 1)))
+  (defun atom (x) (not (consp x)))
+  (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+   (defun reverse (r) (if (consp r)
+                       (append (reverse (cdr r)) (cons (car r) nil ))
+                       r))
+  (defun erase-char ()
+    (putc 8)
+    (putc 32)
+    (putc 8))
+  (defun delete-last (str)
+    (reverse (cdr (reverse str))))
+  (defun readline ()
+    (let ((str '()))
+      (tagbody
+        next-char
+        (let ((c (getc)))
+          (if (not (eql c 13))
+            (if (eql c 127)
+              (progn
+                (erase-char)
+                (setq str (delete-last str))
+                (go next-char))
+              (progn
+                (putc c)
+                (setq str (append str c))
+                (go next-char))))))
+      str
+      ))
+
+  (defun readline ()
+    (let ((str '()))
+      (tagbody
+        next-char
+        (let ((c (getc)))
+          (if (eql c 13)
+            str
+            (if (eql c 127)
+              (progn
+                (erase-char)
+                (setq str (delete-last str))
+                (go next-char))
+              (progn
+                (putc c)
+                (setq str (append str c))
+                (go next-char))))))))
+
+(defvar i 0)
+(defun f (n)
+ (tagbody
+  loop
+  (let ((tmp (+ i 1)))
+    (prin1 tmp) 
+    (setq i tmp)
+    (if (< i n)
+      (go loop))
+    i
+    )
+  ))
+
+
   (consp 12)
   (consp (cons 2 3))
   (atom 12)
   (atom (cons 1 2))
-   (defun append (x y)
-     (if (eq x nil)
-         y
-         (if (atom x)
-             (cons x y)
-             (cons (car x) (append (cdr x) y)) )))
-   (append '(1 2) '(3 4))
-  (defun reverse (x) (if (atom x) x
-                         (append (reverse (cdr x)) (cons (car x) nil ))))
-  (reverse '(1 2 3))
-
-  (defun f (x y) (if (eq x nil) y t))
-  (f nil 2)
-  (f 3 2)
 |#
 
 ;;; ------------------------------------------------------------------------
@@ -5866,6 +6062,8 @@ nil
     (run2-macro-b)
     (run2-macro-c)
     (run2-macro-d)
+    (run2-app-rev)
+    (run2-stack-gc)
     ))
 
 ;(run-emul e 200 nil)
