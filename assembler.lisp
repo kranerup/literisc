@@ -31,6 +31,7 @@
            :r13 :p3
 
            :label
+           :m
 
            :mvi->r 
            :mvi->a 
@@ -468,6 +469,7 @@
 ;;; Evaluate assembler instruction and if it is a jump
 ;;; then calculate the relative offset from the absoluate curr-pc.
 ;;; The curr-pc is pointing to the first byte/opcode of the instruction.
+(defvar m) ; just used to indicate a macro in the assembler code
 (defun eval-asm (instr curr-pc debug)
   (when debug (format t "instr ~a~%" (car instr)))
   (cond ((member (car instr) '(j jlt  jge  jlo  jhs  
@@ -477,7 +479,9 @@
          (eval-asm-jump instr curr-pc debug))
         ((member (car instr) '(lalloc-words lalloc-dwords lalign-dword lalign-word))
          (funcall (car instr) (eval (cadr instr)) curr-pc))
-      (t (eval instr))))
+        ((eq (car instr) 'm)
+         (apply (cadr instr) (mapcar 'eval (cddr instr)) ))
+        (t (eval instr))))
 
 (defun eval-asm-jump (instr curr-pc debug)
   (let* ((dest-pc (eval (cadr instr)))
@@ -546,6 +550,11 @@
                (when (equal label lbl) 
                  (return-from get-label addr)))
              symtab)))
+
+(defun print-labels (symtab)
+    (maphash (lambda (addr label) 
+               (format t "~5d: ~a~%" addr label))
+             symtab))
 
 ;;; Calculate label positions until there are no more changes.
 (defun minimize-labels (aprog verbose)
