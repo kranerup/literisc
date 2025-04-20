@@ -873,18 +873,19 @@
 ;;;   P0 - returns read object type
 ;;;   P1 - number if type is reader-num
 ;;;   if type is reader-sym then symbol string is in n-read-sym-str
-(defvar scan nil)
-(setq scan
+(defparameter scan 
   '(
     (label f-scan)
     (push-srp)
-    (push-r R4)
+    (push-r R5)
     ;; R1 - read-sym-ptr
     (mvi->r n-read-sym-str R1)
     ;; R3 - io-ptr
     (mvi->r -1 R3) ; ptr to I/O reg
     ;; R4 - reading-symbol
     (mvi->r 0 R4)
+    ;; R5 - reading comment
+    (Rx= 0 R5)
 
     (label l-rd-more)
     (jsr l-read-c)
@@ -898,7 +899,7 @@
 
     ;; ----------- reading-symbol --------------
     ;; end of symbol?
-    ;; if c in ['(', ')', ' ', ''', 0]:  
+    ;; if c in ['(', ')', ' ', ''', ';', 0]:  
     (mvi->r (char-code #\( ) R2)
     (r->a R2)
     (sub-r R0)
@@ -928,7 +929,7 @@
     (A=Rx R2)
     (A-=Rx R0)
     (jz l-end-of-sym)
-
+    
     (mvi->a 0)
     (sub-r R0)
     (jnz l-read-sym-char)
@@ -962,6 +963,31 @@
    
     ;; else ------- not reading-symbol ---------
     (label l-not-rd-sym)
+    (A= 0)
+    (A-=Rx R5)
+    (jz l-not-rd-com)
+
+    (label l-read-com)
+
+    (Rx= 10 R2) ; LF
+    (A=Rx R2)
+    (A-=Rx R0)
+    (jnz l-not-lf)
+    (Rx= 0 R5) ; end of comment
+    (j l-rd-more) ; loop back and read next char
+
+    (label l-not-lf)
+    (Rx= 13 R2) ; CR
+    (A=Rx R2)
+    (A-=Rx R0)
+    (jnz l-not-cr)
+    (Rx= 0 R5) ; end of comment
+    (j l-rd-more) ; loop back and read next char
+
+    (label l-not-cr)
+    (j l-rd-more) ; still in comment, loop back and read next char
+    
+    (label l-not-rd-com)
     ;;  if char == '('
     (mvi->r (char-code #\( ) R2)
     (r->a R2)
@@ -992,6 +1018,16 @@
     (j l-reader-ret)
 
     (label l-not-quote)
+    (Rx= (char-code (char ";" 0)) R2)
+    (A=Rx R2)
+    (A-=Rx R0)
+    (jnz l-not-comment)
+
+    (A= 1)
+    (Rx=A R5) ; set read-comment state
+    (jz l-rd-more) ; loop back and read next char
+
+    (label l-not-comment)
     ;; is it space, CR or LF then just read next char
     (mvi->r (char-code #\ ) R2)
     (r->a R2)
@@ -1026,7 +1062,7 @@
 
     ;; return
     (label l-reader-ret)
-    (pop-r R4)
+    (pop-r R5)
     (pop-a)
     (j-a)
     
@@ -4144,11 +4180,18 @@
      (pop-a)
      (j-a)))
 
+(defparameter use-uart nil)
 
-(defparameter char-output :uart-io) ; :uart-io / :emul-io
-(defparameter char-input :uart-io) ; :uart-io / :emul-io
-;;;(defparameter char-output :emul-io) ; :uart-io / :emul-io
-;;;(defparameter char-input :emul-io) ; :uart-io / :emul-io
+(defparameter char-output nil) ; :uart-io / :emul-io
+(defparameter char-input nil) ; :uart-io / :emul-io
+
+(if (or (boundp 'regression) (not use-uart))
+    (progn
+      (setq char-output :emul-io)
+      (setq char-input :emul-io))
+    (progn
+      (setq char-output :uart-io)
+      (setq char-input :uart-io)))
 
 (defparameter func-putchar
   (cond ((equal char-output :emul-io)
@@ -5892,6 +5935,7 @@ nil
          (if (atom x)
              (cons x y)
              (cons (car x) (append (cdr x) y)) )))
+  ; recursive reverse list
    (defun reverse (r) (if (consp r)
                        (append (reverse (cdr r)) (cons (car r) nil ))
                        r))
