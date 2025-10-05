@@ -617,6 +617,8 @@
     (lalign-dword)
     (label reader-state)
     (lalloc-dwords 4)
+    (label scan-in-string)
+    (lalloc-dwords 1)
   
     ;; cons index to next free cons cell. This is used as starting
     ;; point to search for a free cons cell. After GC the free
@@ -689,7 +691,7 @@
   (defparameter rs-last-read 4)
   (defparameter rs-read-ptr 8)
   (defparameter rs-eof 12)
-
+  (alloc-dwords scan-in-string 1)
   (alloc-words n-global-env 1)
   
   (alloc-dwords n-stack 300)
@@ -868,6 +870,7 @@
 (defconstant reader-sym 3)
 (defconstant reader-num 4)
 (defconstant reader-quote 5)
+(defconstant reader-string 6)
 
 ;;; output:
 ;;;   P0 - returns read object type
@@ -877,8 +880,8 @@
   '(
     (label f-scan)
     (push-srp)
-    (push-r R5)
-    ;; R1 - read-sym-ptr
+    (push-r R7)
+    ;; R1 - read-sym-ptr / string list ptr
     (mvi->r n-read-sym-str R1)
     ;; R3 - io-ptr
     (mvi->r -1 R3) ; ptr to I/O reg
@@ -886,6 +889,12 @@
     (mvi->r 0 R4)
     ;; R5 - reading comment
     (Rx= 0 R5)
+    ;; R6 - reading string
+    ;;(Rx= scan-in-string R6)
+    ;;(A=M[Rx] R6)(Rx=A R6)
+    (Rx= 0 R6)
+    ;; R7 = current char pointer
+    (Rx= 0 R7)
 
     (label l-rd-more)
     (jsr l-read-c)
@@ -986,8 +995,70 @@
 
     (label l-not-cr)
     (j l-rd-more) ; still in comment, loop back and read next char
-    
+   
+    ;; ------------ not reading comment ---------
     (label l-not-rd-com)
+
+    (A= 1)
+    (A-=Rx R6) ; are we reading string?
+    (jz l-in-str)
+
+    ;; not in string, do we see a quote?
+    (Rx= (char-code #\" ) R2)
+    (A=Rx R2)
+    (A-=Rx R0)
+    (jnz l-not-str) ; continue next scan
+   
+    ;; got first quote
+    (A= 1)(Rx=A R6) ; enter reading string
+
+    (j l-rd-more) ; loop back to read string content
+    
+    (label l-in-str) ; we're in a quoted string
+
+    ;; in a string, do we see an end-quote?
+    (Rx= (char-code #\" ) R2)
+    (A=Rx R2)
+    (A-=Rx R0)
+    (jz l-end-str) ; end-quote
+
+    ;; append char to string list
+    ;; (let ((char (box R0))
+    ;;       (new  (cons char nil)))
+    ;;   (rplacd prev new))
+    ;; 
+    (A=Rx R0) ; the char
+    (Rx=A P0)
+    (jsr l-box-int) ; boxed char -> P0
+    (A= 0) (Rx=A P1) ; P1 = nil
+    (jsr l-cons)    ; (cons P0 P1) -> P0
+    (A=Rx P0)(Rx=A P1) ; P1 = new cons
+   
+    (A= 0)
+    (A-=Rx R7) ; prev-ptr = nil ?
+    (jnz l-cont-str)
+    (A=Rx P1)(Rx=A R1) ; R1 = ptr to start of string list
+    (j l-char-done)
+   
+    (label l-cont-str)
+    ;; set cdr in previous cons to the new cons
+    (A=Rx R7)(Rx=A P0) ; prev-ptr
+    (jsr l-rplcd) ; (rplacd P0 P1)
+  
+    (label l-char-done)
+    (A=Rx P1)(Rx=A R7) ; prev-ptr = new cons
+    (j l-rd-more) ; continue with next char
+   
+    (label l-end-str)
+
+    (Rx= reader-string P0)
+    (A=Rx R1)(Rx=A P1)
+
+    (A= 0)(Rx=A R6) ; exit reading string  
+    (j l-reader-ret)
+
+    ;; ------------ not string -----------------
+    (label l-not-str)
     ;;  if char == '('
     (mvi->r (char-code #\( ) R2)
     (r->a R2)
@@ -1062,7 +1133,10 @@
 
     ;; return
     (label l-reader-ret)
-    (pop-r R5)
+    ;;(Rx= scan-in-string R0)
+    ;;(A=Rx R0)
+    ;;(M[A]=Rx R6)
+    (pop-r R7)
     (pop-a)
     (j-a)
     
@@ -1186,12 +1260,22 @@
      ;; number
      (A= reader-num)
      (A-=Rx P0)
-     (jnz l-parse-sym)
+     (jnz l-parse-not-num)
+
 
      (r->a P1) (a->r P0)
      (jsr l-box-int); P0=number -> P0=cons
      (j l-parse-ret)
 
+     (label l-parse-not-num)
+     (A= reader-string)
+     (A-=Rx P0)
+     (jnz l-parse-sym)
+     
+     ;; double qoute
+     (label l-dquote)
+     
+     
      ;; symbol
      (label l-parse-sym)
      (mvi->r n-read-sym-str P0)
@@ -3668,7 +3752,7 @@
      (label end)
      (j end)))
 
-;;; expected: symbol 123 123 symbol2 inner (but no spaces)
+;;; expected: 104 symbol 123 123 symbol2 inner (but no spaces)
 (defvar test-reader nil)
 (setq test-reader
  '(
@@ -3682,11 +3766,17 @@
      (mvi->r 0 R1) ; use-unread
      (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
 
+     ;; string "hej"
+     (jsr f-scan)
+     (A=Rx P1)(Rx=A P0)
+     (jsr l-car)
+     (jsr l-print-number) ; print 'h' in decimal
+
      ;; sym  "symbol"
      (jsr f-scan)
      (mvi->r n-read-sym-str P0)
      (jsr prtstr)
-    
+   
      ;; num "123"
      (jsr f-scan)
      (r->a P1) (a->r P0)
@@ -4648,16 +4738,16 @@
 
 (deftest run-t1 () (run-test #'t1 "ssymb"))
 
-;;; expected: "symbol 123 123 symbol2 inner"
+;;; expected: "104 symbol 123 123 symbol2 inner"
 (defun t2 ( &optional (regression nil) )
   (asm-n-run test-reader
     #'(lambda (dmem proc)
         (set-program dmem 
-                     (string-to-mem "symbol 123 ' 123x symbol2 ( inner )") 
+                     (string-to-mem "\"hej\" symbol 123 ' 123x symbol2 ( inner )") 
                      n-source-start))
     nil regression 10000))
 
-(deftest run-t2 () (run-test #'t2 "symbol123123symbol2inner"))
+(deftest run-t2 () (run-test #'t2 "104symbol123123symbol2inner"))
 
 ;;; expected: "symbol"
 (defun t3 ( &optional (regression nil) )
