@@ -400,6 +400,7 @@
     (label str-getc   )(lstring "getc")
     (label str-putc   )(lstring "putc")
     (label str-and    )(lstring "and")
+    (label str-or     )(lstring "or")
    
     (label str-free)
     (lalloc-bytes 128)
@@ -445,6 +446,7 @@
     (aword (/ (- prim-getc    n-cons) 4)) (aword (- str-getc    n-string-space) ); getc 
     (aword (/ (- prim-putc    n-cons) 4)) (aword (- str-putc    n-string-space) ); putc 
     (aword (/ (- prim-and     n-cons) 4)) (aword (- str-and     n-string-space) ); and 
+    (aword (/ (- prim-or      n-cons) 4)) (aword (- str-or      n-string-space) ); or 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -475,6 +477,7 @@
     (label prim-getc   ) (adword  l-prim-getc )     ; getc 
     (label prim-putc   ) (adword  l-prim-putc )     ; putc 
     (label prim-and    ) (adword  l-prim-and )      ; and 
+    (label prim-or     ) (adword  l-prim-or )       ; or 
 
     ;; ---- global env ----------
     (label l-env)
@@ -507,10 +510,10 @@
     (aword 26) (aword (+ 25 (/ (- l-env n-cons) 4)) )  ; defmacro
     (aword 27) (aword (+ 26 (/ (- l-env n-cons) 4)) )  ; consp
     (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
-    (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
     (aword 29) (aword (+ 28 (/ (- l-env n-cons) 4)) )  ; putc
-    (label l-env-start)
     (aword 30) (aword (+ 29 (/ (- l-env n-cons) 4)) )  ; and
+    (label l-env-start)
+    (aword 31) (aword (+ 30 (/ (- l-env n-cons) 4)) )  ; or
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -552,6 +555,7 @@
     (abyte c-cons-symbol) ; getc
     (abyte c-cons-symbol) ; putc
     (abyte c-cons-symbol) ; and
+    (abyte c-cons-symbol) ; or
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -581,6 +585,7 @@
     (abyte c-cons-primitive) ; getc
     (abyte c-cons-primitive) ; putc
     (abyte c-cons-primitive) ; and
+    (abyte c-cons-primitive) ; or
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -613,6 +618,7 @@
     (abyte c-cons-cons) ; getc
     (abyte c-cons-cons) ; putc
     (abyte c-cons-cons) ; and
+    (abyte c-cons-cons) ; or
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -3558,6 +3564,7 @@
     
      (label l-and-true)
      (A=Rx R2)(Rx=A P0) ; return last eval:ed arg as a true-value
+     (label l-and-end)
      (pop-r R2)
      (pop-a) ;; apply did push SRP
      (j-a)
@@ -3565,6 +3572,52 @@
      (label l-and-false)
      (A= 0)(Rx=A P0)
      (j l-and-end)
+
+     
+     ;; --- or -----------------------------------
+     ;; input: P0=arg-list (#args >= 1)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-or)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     (A=Rx P0) (Rx=A R0) ; arg-list
+     (A=Rx P1) (Rx=A R1) ; env
+
+     (label l-or-loop) ; enter with P0=arg-list
+     (jsr l-car) ; ->P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R2) ; R2 = eval:ed arg
+
+     (A= 0)
+     (A-=Rx P0)
+     (jnz l-or-true)
+
+     ;; next arg
+     (A=Rx R0)
+     (Rx=A P0) ; arg-list
+     (jsr l-cdr) ; P0 = cdr(arg-list)
+
+     (A= 0) ; nil
+     (A-=Rx P0)
+     (jz l-or-false)
+
+     (A=Rx R1) (Rx=A P1) ; restore env to P1
+     (A=Rx P0) (Rx=A R0) ; save arg-list
+     (j l-or-loop)
+    
+     (label l-or-true)
+     (A=Rx R2)(Rx=A P0) ; return last eval:ed arg as a true-value
+     (label l-or-end)
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     (label l-or-false)
+     (A= 0)(Rx=A P0)
+     (j l-or-end)
+     
      
      ))
 (defparameter func-tagbody
@@ -6033,7 +6086,7 @@ nil
 ;;; ------------------------------------------------------------------------
 (deftest run-progn  () (run-test #'test-source 
                                      "97"
-                                 /    "(progn (+ 1 2)(prin1 9) 7)"))
+                                      "(progn (+ 1 2)(prin1 9) 7)"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-car-cdr  () (run-test #'test-source-new 
                                    "1(2 3)"
@@ -6052,8 +6105,12 @@ nil
                               "(if t (list 1 2) 33) (if nil (list 1 2) (+ 10 20))"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-and () (run-test #'test-source-new 
-                              "nilnil12"
+                               "nilnil12"
                               "(and t nil) (and nil) (and 1) (and 1 2)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-or () (run-test #'test-source-new 
+                              "ttnil11"
+                              "(or t nil) (or nil t) (or nil) (or 1) (or 1 2)"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-cond  () (run-test #'test-source-new 
                               "2330"
@@ -6091,10 +6148,10 @@ nil
 
 ;;; ------------------------------------------------------------------------
 (deftest run2-equal  () (run-test #'test-source-new 
-"ttnilniltnil"
+"equalttnilniltnil"
 "(defun equal (x y)
     (or
-      (eq x y)
+      (eql x y)
       (and
         (consp x)
         (consp y)
@@ -6229,12 +6286,12 @@ nil
   (defun atom (x) (not (consp x)))
   (defun equal (x y)
     (or
-      (eq x y)
+      (eql x y)
       (and
         (consp x)
         (consp y)
         (equal (car x) (car y))
-        (equal (cdr x) (cdr y))))))
+        (equal (cdr x) (cdr y)))))
 
   (defun append (x y)
      (if (eq x nil)
@@ -6418,6 +6475,9 @@ nil
     (run2-app-rev)
     (run2-stack-gc)
     (run2-string)
+    (run2-and)
+    (run2-or)
+    (run2-equal)
     ))
 
 ;(run-emul e 200 nil)
