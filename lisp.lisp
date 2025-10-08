@@ -24,7 +24,7 @@
 ;;;     type: 0 - free
 ;;;           1 - number
 ;;;           2 - symbol
-;;;           3 - char ( currently characters are numbers so this is unused )
+;;;           3 - char
 ;;;           4 - cons
 ;;;           5 - macro
 ;;;           6 - function
@@ -103,7 +103,7 @@
 
 (defvar dmem nil)
 (defvar dmem-allocated 0)
-(setq dmem (make-dmem 20000))
+(setq dmem (make-dmem 40000))
 
 (defmacro alloc-init ( sym data )
   `(progn
@@ -142,7 +142,7 @@
      (assert (< dmem-allocated (length dmem)))))
 
 (defvar string-space-free 0) ; relative n-string-space
-(defparameter source-region-size 1024) ; allocated bytes to source buffer
+(defparameter source-region-size 2048) ; allocated bytes to source buffer
 (defvar cons-free nil)
 (defvar n-cons-end nil)
 
@@ -399,6 +399,7 @@
     (label str-consp  )(lstring "consp")
     (label str-getc   )(lstring "getc")
     (label str-putc   )(lstring "putc")
+    (label str-and    )(lstring "and")
    
     (label str-free)
     (lalloc-bytes 128)
@@ -443,6 +444,7 @@
     (aword (/ (- prim-consp   n-cons) 4)) (aword (- str-consp   n-string-space) ); consp
     (aword (/ (- prim-getc    n-cons) 4)) (aword (- str-getc    n-string-space) ); getc 
     (aword (/ (- prim-putc    n-cons) 4)) (aword (- str-putc    n-string-space) ); putc 
+    (aword (/ (- prim-and     n-cons) 4)) (aword (- str-and     n-string-space) ); and 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -472,6 +474,7 @@
     (label prim-consp  ) (adword  l-prim-consp)     ; consp
     (label prim-getc   ) (adword  l-prim-getc )     ; getc 
     (label prim-putc   ) (adword  l-prim-putc )     ; putc 
+    (label prim-and    ) (adword  l-prim-and )      ; and 
 
     ;; ---- global env ----------
     (label l-env)
@@ -504,8 +507,10 @@
     (aword 26) (aword (+ 25 (/ (- l-env n-cons) 4)) )  ; defmacro
     (aword 27) (aword (+ 26 (/ (- l-env n-cons) 4)) )  ; consp
     (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
-    (label l-env-start)
+    (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
     (aword 29) (aword (+ 28 (/ (- l-env n-cons) 4)) )  ; putc
+    (label l-env-start)
+    (aword 30) (aword (+ 29 (/ (- l-env n-cons) 4)) )  ; and
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -546,6 +551,7 @@
     (abyte c-cons-symbol) ; consp
     (abyte c-cons-symbol) ; getc
     (abyte c-cons-symbol) ; putc
+    (abyte c-cons-symbol) ; and
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -574,6 +580,7 @@
     (abyte c-cons-primitive) ; consp
     (abyte c-cons-primitive) ; getc
     (abyte c-cons-primitive) ; putc
+    (abyte c-cons-primitive) ; and
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -605,6 +612,7 @@
     (abyte c-cons-cons) ; consp
     (abyte c-cons-cons) ; getc
     (abyte c-cons-cons) ; putc
+    (abyte c-cons-cons) ; and
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -874,7 +882,7 @@
 
 ;;; output:
 ;;;   P0 - returns read object type
-;;;   P1 - number if type is reader-num
+;;;   P1 - number if type is reader-num / cons ptr if type is string
 ;;;   if type is reader-sym then symbol string is in n-read-sym-str
 (defparameter scan 
   '(
@@ -1029,7 +1037,7 @@
     ;; 
     (A=Rx R0) ; the char
     (Rx=A P0)
-    (jsr l-box-int) ; boxed char -> P0
+    (jsr l-box-char) ; boxed char -> P0
     (A= 0) (Rx=A P1) ; P1 = nil
     (jsr l-cons)    ; (cons P0 P1) -> P0
     (A=Rx P0)(Rx=A P1) ; P1 = new cons
@@ -1247,9 +1255,10 @@
      (A-=Rx P0)
      (jnz l-parse-nxt)
 
-     (jsr l-read) ; -> P0
-     (A= 0) (Rx=A P1) 
-     (jsr l-cons) ; (cons P0=read P1) -> P0 = new cons
+     (jsr l-read) ; -> P0 = read
+     (label l-wrap-quote)
+     (A= 0) (Rx=A P1) ; P1 = nil
+     (jsr l-cons) ; (cons P0=read P1=nil) -> P0 = new cons
      (A=Rx P0)(Rx=A P1)
      (Rx= fixed-cons-quote P0)
      (jsr l-cons) ; (cons P0=quote P1=(cons (read) nil)) -> P0 = new cons
@@ -1272,9 +1281,10 @@
      (A-=Rx P0)
      (jnz l-parse-sym)
      
-     ;; double qoute
-     (label l-dquote)
-     
+     ;; string
+     (label l-string)
+     (A=Rx P1)(Rx=A P0)
+     (j l-wrap-quote)
      
      ;; symbol
      (label l-parse-sym)
@@ -1546,8 +1556,8 @@
 
      
      ;; --- set box type -------------------------------
-     ;; input: P0 - cons index
-     ;;        P1 - type
+     ;; input: P0 - cons index (preserved)
+     ;;        P1 - type  (preserved)
      ;; output: --
      (label l-set-type)
      (push-r R0)
@@ -1613,31 +1623,45 @@
      (label l-box-int)
 
      (push-srp)
-     (push-r R1)
+     (push-r R0)
 
      (A=Rx P0) (Rx=A R0) ; R0 = save integer
      (jsr l-box) ; -> P0=box
-     (A=Rx P0) (Rx=A R1) ; R1 = new box
 
      ;; set type
      (Rx= c-cons-number P1)
-     (jsr l-set-type)
+     (label l-box-common)
+     (jsr l-set-type) ; P0=cons, P1=type
 
      ;; set value
-     (A=Rx R1) (Rx=A P0) ; P0 - cons
      (A=Rx R0) (Rx=A P1) ; P1 - val (integer)
      (jsr l-setcons)
      
-     (A=Rx R1) (Rx=A P0) ; return new cons
-     
-     (pop-r R1)
+     (pop-r R0)
      (pop-a)
      (j-a)
+     
+     ;; --- box char -------------------------------
+     ;; input: P0 - char value
+     ;; output: P0 - char cons cell
+     (label l-box-char)
+
+     (push-srp)
+     (push-r R0)
+
+     (A=Rx P0) (Rx=A R0) ; R0 = save integer
+     (jsr l-box) ; -> P0=box
+
+     ;; set type
+     (Rx= c-cons-char P1)
+     (j l-box-common)
+     
      
      ;; --- box symbol string -------------------------------
      ;; input: P0 - string
      ;; output: P0 - integer cons cell
      (label l-box-sym)
+
      (push-srp)
      (push-r R1)
 
@@ -2652,8 +2676,8 @@
      (j-a)
 
      ;; --- setcons -----------------------------------
-     ;; input: P0=cons-index
-     ;;        P1=cons content as a 32-bit value
+     ;; input: P0=cons-index (preserved)
+     ;;        P1=cons content as a 32-bit value (preserved)
      ;; output: -
      (label l-setcons)
      (push-r R0)
@@ -3279,6 +3303,33 @@
      (pop-a) ;; apply did push SRP
      (j-a)
  
+     ;; --- charp -----------------------------------
+     ;; input: P0 - cons
+     ;; output: P0 - t/nil
+     (label l-charp)
+     (push-r R0)
+     
+     (Rx= n-cons-type R0)
+     (A=Rx R0)
+     (A+=Rx P0) ; index in cons-type
+     (Rx=M[A].b R0) ; R0=type of cons
+
+     (A= c-cons-char)
+     (A-=Rx R0)
+     (jz l-chp-t)
+     (A= 0) ; nil
+     (j l-chp-ret)
+     
+     (label l-chp-t)
+     (A= 1) ; t
+
+     (label l-chp-ret)
+     (Rx=A P0)
+     
+     (pop-r R0)
+     (A=Rx SRP)
+     (j-a)
+
      ;; --- consp -----------------------------------
      ;; input: P0 - cons
      ;; output: P0 - t/nil
@@ -3321,7 +3372,7 @@
      (j-a)
 
      ;; --- eql -----------------------------------
-     ;; If both params are number then compare thie
+     ;; If both params are numbers or characters then compare the
      ;; values, else compare the cons's.
      ;;
      ;; input: P0=arg-list (but only two args allowed)
@@ -3335,17 +3386,31 @@
      ;; first param a number?
      (A=Rx P2)(Rx=A P0)
      (jsr l-numberp)
+     (A= 1)
+     (A-=Rx P0)
+     (jz l-is-num1)
+
+     (A=Rx P2)(Rx=A P0)
+     (jsr l-charp)
      (A= 0)
      (A-=Rx P0)
-     (jz l-cmp-eq) ; not a number
-    
+     (jz l-cmp-eq)
+   
+     (label l-is-num1)
      ;; second param a number?
      (A=Rx P3)(Rx=A P0)
      (jsr l-numberp)
+     (A= 1)
+     (A-=Rx P0)
+     (jz l-is-num2)
+
+     (A=Rx P3)(Rx=A P0)
+     (jsr l-charp)
      (A= 0)
      (A-=Rx P0)
      (jz l-cmp-eq)
 
+     (label l-is-num2)
      ;; both are numbers , get their values for compare
      (A=Rx P2)(Rx=A P0)
      (jsr l-getcons) ; get the num value
@@ -3457,6 +3522,50 @@
      (pop-r R0)
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- and -----------------------------------
+     ;; input: P0=arg-list (#args >= 1)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-and)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     (A=Rx P0) (Rx=A R0) ; arg-list
+     (A=Rx P1) (Rx=A R1) ; env
+
+     (label l-and-loop) ; enter with P0=arg-list
+     (jsr l-car) ; ->P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R2) ; R2 = eval:ed arg
+
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-and-false)
+
+     ;; next arg
+     (A=Rx R0)
+     (Rx=A P0) ; arg-list
+     (jsr l-cdr) ; P0 = cdr(arg-list)
+
+     (A= 0) ; nil
+     (A-=Rx P0)
+     (jz l-and-true)
+
+     (A=Rx R1) (Rx=A P1) ; restore env to P1
+     (A=Rx P0) (Rx=A R0) ; save arg-list
+     (j l-and-loop)
+    
+     (label l-and-true)
+     (A=Rx R2)(Rx=A P0) ; return last eval:ed arg as a true-value
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     (label l-and-false)
+     (A= 0)(Rx=A P0)
+     (j l-and-end)
+     
      ))
 (defparameter func-tagbody
   '( 
@@ -4359,12 +4468,11 @@
      ;; input: P0=arg-list (but no arg allowed)
      ;;        P1=env
      ;; output: P0=result
-     ;; Characters are just integers.
      ;;
      (label l-prim-getc)
      ;; do not push SRP, apply already did that
      (jsr l-getchar) ; -> P0 = char
-     (jsr l-box-int) ; -> P0 = cons
+     (jsr l-box-char) ; -> P0 = cons
 
      (pop-a) ;; apply did push SRP
      (j-a)
@@ -4382,7 +4490,8 @@
      (jsr l-car) ; P0=car(arg-list)
      (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
      (A=Rx P0)(Rx=A R0)
-     (jsr l-getcons) ; get number value, assume eval:ed arg is a number
+     ;; get number value, assume eval:ed arg is a number or character type
+     (jsr l-getcons) 
 
      (jsr l-putchar)
      (A=Rx R0)(Rx=A P0) ; return arg
@@ -4544,6 +4653,22 @@
      (j l-prt-single)
      ))
 
+(defparameter func-print-char
+  '( ;; print-char
+     ;; P0 = cons ptr to a char cons-cell (P0 destroyed)
+     (label l-print-char)
+     (push-srp)
+     (push-r R0)
+     (Rx= n-cons R0)
+     (A=Rx P0)
+     (lsl-a)
+     (lsl-a)
+     (A+=Rx R0) ; cons-addr = n-cons + cons-idx * 4
+     (ld-a->r P0) ; the char
+     (jsr l-putchar)
+     (pop-r R0)
+     (pop-a)
+     (j-a)))
 
 (defvar func-print nil)
 (setq func-print
@@ -4581,8 +4706,14 @@
      (j l-print-ret)
    
      (label l-not-num)
-     ;; other type TBD
-     
+     (A= c-cons-char)
+     (A-=Rx R1)
+     (jnz l-print-ret)
+
+     ;; char
+     (jsr l-print-char)
+     ;(j l-print-ret)
+    
      (label l-print-ret)
      (pop-r R1)
      (pop-a)
@@ -4598,6 +4729,14 @@
      (Rx= n-cons-type R1)
 
      (r->a P0) (a->r R0)
+
+     ;; is it a list of characters, then print as a string
+     (jsr l-car) ; car -> P0
+     (jsr l-charp) ; -> is char? -> P0
+     (A= 1)
+     (A-=Rx P0)
+     (jz l-print-string)
+
      (mvi->r (char-code #\() P0)
      (jsr l-putchar)
 
@@ -4645,6 +4784,31 @@
      (jsr l-putchar)
      (pop-r R1)
      (pop-a)
+     (j-a)
+
+     ;; ---print-string ----
+     ;; We assume that if the first list item is a char then
+     ;; the rest of the list is a proper list with only chars.
+     (label l-print-string)
+
+     (r->a R0) (a->r P0)
+     (jsr l-car)
+     (jsr l-getcons) ; assume that all list items are char
+     (jsr l-putchar)
+
+     (r->a R0) (a->r P0)
+     (jsr l-cdr)
+     (r->a P0) (a->r R0) ; R0 = cdr
+
+     (mvi->a 0) ;; nil?
+     (sub-r R0)
+     (jz l-eols) ; proper end of list
+     ;; ignoring the case that list might have inproper end
+     (j l-print-string)
+
+     (label l-eols)
+     (pop-r R1)
+     (pop-a)
      (j-a)))
 
 (defvar *hello-world* nil)
@@ -4680,7 +4844,7 @@
               func-putchar func-getchar func-prim-char
               func-find-symbol func-cdr
               func-car func-parse func-rplca func-rplcd
-              func-cons func-gc func-print-symbol func-print
+              func-cons func-gc func-print-symbol func-print func-print-char
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
@@ -4713,7 +4877,7 @@
 
 (defun run-test (test &optional (expected-print nil) (source nil))
   (with-output-to-string (*standard-output*)
-    (setq dmem (make-dmem 20000))
+    (setq dmem (make-dmem 40000))
     (init-lisp))
   (check
     (let ((printed 
@@ -4779,7 +4943,7 @@
 
 
 ;;; will read from pty, should input " symbol " to pty
-(defparameter pty "/dev/pts/6")
+(defparameter pty "/dev/pts/5")
 
 (defun t13 ( &optional (regression nil) )
   (init-lisp)
@@ -4806,6 +4970,7 @@
                      (string-to-mem "(123") 
                      n-source-start))
     nil regression 10000 pty))
+
 
 ;;; reading an empty list == nil
 ;;; expect: "nil"
@@ -4849,6 +5014,21 @@
     nil regression 10000))
 
 (deftest run-t7 () (run-test #'t7 "(123 (sym2 sym1))"))
+
+
+;;; expected: (h e j)
+(defun test-parse-string ( &optional (regression nil) )
+  (asm-n-run test-parse-3
+    #'(lambda (dmem proc)
+        (setq string-space-free 0)
+        (add-symbol dmem "nil" 0) ; nil must be symbol 0
+        (set-program dmem 
+                     (string-to-mem "\"hej\"") 
+                     n-source-start))
+    nil regression 10000))
+
+(deftest run-parse-string () (run-test #'test-parse-string "(104 101 106)"))
+
 
 ;;; expected: P0=1 P1=1234
 (defun t8 ()
@@ -5812,9 +5992,10 @@ nil
 
 ;;; ------------------------------------------------------------------------
 (deftest run-eq  () (run-test #'test-source 
-                              "tnilnilniltniltnil"
+                              "tnilnilniltniltnilt"
                               "(eq  t t) (eq  t nil) (eq  2 2) (eq  2 3)
-                               (eql t t) (eql t nil) (eql 2 2) (eql 2 3)"))
+                               (eql t t) (eql t nil) (eql 2 2) (eql 2 3)
+                               (eql 104 (car \"h\"))"))
 ;;; ------------------------------------------------------------------------
 (deftest run-nump  () (run-test #'test-source 
                               "tnilnil"
@@ -5846,9 +6027,13 @@ nil
 ;;                (print 111))" t)
                       
 ;;; ------------------------------------------------------------------------
+(deftest run2-string  () (run-test #'test-source-new 
+                                   "hej"
+                                   "\"hej\""))
+;;; ------------------------------------------------------------------------
 (deftest run-progn  () (run-test #'test-source 
                                      "97"
-                                     "(progn (+ 1 2)(prin1 9) 7)"))
+                                 /    "(progn (+ 1 2)(prin1 9) 7)"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-car-cdr  () (run-test #'test-source-new 
                                    "1(2 3)"
@@ -5865,6 +6050,10 @@ nil
 (deftest run2-if  () (run-test #'test-source-new 
                               "(1 2)30"
                               "(if t (list 1 2) 33) (if nil (list 1 2) (+ 10 20))"))
+;;; ------------------------------------------------------------------------
+(deftest run2-and () (run-test #'test-source-new 
+                              "nilnil12"
+                              "(and t nil) (and nil) (and 1) (and 1 2)"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-cond  () (run-test #'test-source-new 
                               "2330"
@@ -5899,6 +6088,25 @@ nil
                               "tnilnilniltniltnil"
                               "(eq  t t) (eq  t nil) (eq  2 2) (eq  2 3)
                                (eql t t) (eql t nil) (eql 2 2) (eql 2 3)"))
+
+;;; ------------------------------------------------------------------------
+(deftest run2-equal  () (run-test #'test-source-new 
+"ttnilniltnil"
+"(defun equal (x y)
+    (or
+      (eq x y)
+      (and
+        (consp x)
+        (consp y)
+        (equal (car x) (car y))
+        (equal (cdr x) (cdr y)))))
+(equal 1 1)
+(equal '(1) '(1))
+(equal '(1) '(2))
+(equal '(1) 1)
+(equal '(1 2) '(1 2))
+(equal '(1 2) '(1 2 3))"))
+
 ;;; ------------------------------------------------------------------------
 (deftest run2-nump  () (run-test #'test-source-new 
                               "tnilnil"
@@ -6019,6 +6227,15 @@ nil
       0
       (+ (length (cdr l)) 1)))
   (defun atom (x) (not (consp x)))
+  (defun equal (x y)
+    (or
+      (eq x y)
+      (and
+        (consp x)
+        (consp y)
+        (equal (car x) (car y))
+        (equal (cdr x) (cdr y))))))
+
   (defun append (x y)
      (if (eq x nil)
          y
@@ -6029,6 +6246,7 @@ nil
    (defun reverse (r) (if (consp r)
                        (append (reverse (cdr r)) (cons (car r) nil ))
                        r))
+  (defun char-code (c) (+ 0 c))
   (defun erase-char ()
     (putc 8)
     (putc 32)
@@ -6040,8 +6258,8 @@ nil
       (tagbody
         next-char
         (let ((c (getc)))
-          (if (not (eql c 13))
-            (if (eql c 127)
+          (if (not (eql (char-code c) 13))
+            (if (eql (char-code c) 127)
               (progn
                 (erase-char)
                 (setq str (delete-last str))
@@ -6139,6 +6357,7 @@ nil
     (run-t4)
     (run-t5)
     (run-t7)
+    (run-parse-string)
     (run-t10)
     (run-t11)
     (run-t15)
@@ -6198,6 +6417,7 @@ nil
     (run2-macro-d)
     (run2-app-rev)
     (run2-stack-gc)
+    (run2-string)
     ))
 
 ;(run-emul e 200 nil)
