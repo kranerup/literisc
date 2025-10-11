@@ -401,6 +401,11 @@
     (label str-putc   )(lstring "putc")
     (label str-and    )(lstring "and")
     (label str-or     )(lstring "or")
+    (label str-prthex-8  )(lstring "prthex-8")
+    (label str-prthex-16 )(lstring "prthex-16")
+    (label str-prthex-32 )(lstring "prthex-32")
+    (label str-peek   )(lstring "peek")
+    (label str-land   )(lstring "logand")
    
     (label str-free)
     (lalloc-bytes 128)
@@ -447,6 +452,11 @@
     (aword (/ (- prim-putc    n-cons) 4)) (aword (- str-putc    n-string-space) ); putc 
     (aword (/ (- prim-and     n-cons) 4)) (aword (- str-and     n-string-space) ); and 
     (aword (/ (- prim-or      n-cons) 4)) (aword (- str-or      n-string-space) ); or 
+    (aword (/ (- prim-prthex-8  n-cons) 4)) (aword (- str-prthex-8  n-string-space) ); prthex-8  
+    (aword (/ (- prim-prthex-16 n-cons) 4)) (aword (- str-prthex-16 n-string-space) ); prthex-16 
+    (aword (/ (- prim-prthex-32 n-cons) 4)) (aword (- str-prthex-32 n-string-space) ); prthex-32 
+    (aword (/ (- prim-peek    n-cons) 4)) (aword (- str-peek n-string-space) ); peek 
+    (aword (/ (- prim-logand  n-cons) 4)) (aword (- str-land n-string-space) ); logand 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -478,6 +488,11 @@
     (label prim-putc   ) (adword  l-prim-putc )     ; putc 
     (label prim-and    ) (adword  l-prim-and )      ; and 
     (label prim-or     ) (adword  l-prim-or )       ; or 
+    (label prim-prthex-8 ) (adword  l-prim-phex8 )  ; prthex-8 
+    (label prim-prthex-16) (adword  l-prim-phex16)  ; prthex-16
+    (label prim-prthex-32) (adword  l-prim-phex32)  ; prthex-32
+    (label prim-peek   ) (adword  l-prim-peek )     ; peek 
+    (label prim-logand ) (adword  l-prim-logand )   ; logand 
 
     ;; ---- global env ----------
     (label l-env)
@@ -512,8 +527,13 @@
     (aword 28) (aword (+ 27 (/ (- l-env n-cons) 4)) )  ; getc
     (aword 29) (aword (+ 28 (/ (- l-env n-cons) 4)) )  ; putc
     (aword 30) (aword (+ 29 (/ (- l-env n-cons) 4)) )  ; and
-    (label l-env-start)
     (aword 31) (aword (+ 30 (/ (- l-env n-cons) 4)) )  ; or
+    (aword 32) (aword (+ 31 (/ (- l-env n-cons) 4)) )  ; prthex-8
+    (aword 33) (aword (+ 32 (/ (- l-env n-cons) 4)) )  ; prthex-16
+    (aword 34) (aword (+ 33 (/ (- l-env n-cons) 4)) )  ; prthex-32
+    (aword 35) (aword (+ 34 (/ (- l-env n-cons) 4)) )  ; peek
+    (label l-env-start)
+    (aword 36) (aword (+ 35 (/ (- l-env n-cons) 4)) )  ; logand
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -556,6 +576,11 @@
     (abyte c-cons-symbol) ; putc
     (abyte c-cons-symbol) ; and
     (abyte c-cons-symbol) ; or
+    (abyte c-cons-symbol) ; prthex-8
+    (abyte c-cons-symbol) ; prthex-16
+    (abyte c-cons-symbol) ; prthex-32
+    (abyte c-cons-symbol) ; peek
+    (abyte c-cons-symbol) ; logand
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -586,6 +611,11 @@
     (abyte c-cons-primitive) ; putc
     (abyte c-cons-primitive) ; and
     (abyte c-cons-primitive) ; or
+    (abyte c-cons-primitive) ; prthex-8
+    (abyte c-cons-primitive) ; prthex-16
+    (abyte c-cons-primitive) ; prthex-32
+    (abyte c-cons-primitive) ; peek
+    (abyte c-cons-primitive) ; logand
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -619,6 +649,11 @@
     (abyte c-cons-cons) ; putc
     (abyte c-cons-cons) ; and
     (abyte c-cons-cons) ; or
+    (abyte c-cons-cons) ; prthex-8
+    (abyte c-cons-cons) ; prthex-16
+    (abyte c-cons-cons) ; prthex-32
+    (abyte c-cons-cons) ; peek
+    (abyte c-cons-cons) ; logand
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -3620,6 +3655,56 @@
      
      
      ))
+
+
+(defparameter func-bitwise
+  '( 
+     ;; --- logand -----------------------------------
+     ;; input: P0=arg-list (#args >= 1)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-logand)
+     ;; do not push SRP, apply already did that
+     (push-r R2)
+
+     ;(Rx= #xffffffff R2) ; R2 - the result
+     (A= -1) (Rx=A R2)
+     (A=Rx P0) (Rx=A R0) ; arg-list
+     (A=Rx P1) (Rx=A R1) ; env
+
+     (label l-band-loop) ; enter with P0=arg-list
+     (jsr l-car) ; ->P0=car(aggrg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (jsr l-getcons) ; P0=cons -> P0=cons-value
+
+     ;; the bitwise and operation
+     (A=Rx P0)
+     (A&=Rx R2)
+     (Rx=A R2)
+    
+     ;; next arg
+     (A=Rx R0)
+     (Rx=A P0) ; arg-list
+     (jsr l-cdr) ; P0 = cdr(arg-list)
+
+     (A= 0) ; nil
+     (A-=Rx P0)
+     (jz l-end-band)
+
+     (A=Rx R1) (Rx=A P1) ; restore env to P1
+     (A=Rx P0) (Rx=A R0) ; save arg-list
+     (j l-band-loop)
+    
+     (label l-end-band)
+     (A=Rx R2)
+     (Rx=A P0)
+     (jsr l-box-int) ; P0 -> P0
+    
+     (pop-r R2)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     ))
+
 (defparameter func-tagbody
   '( 
      ;; --- -----------------------------------
@@ -3884,13 +3969,16 @@
   '( 
      (mvi->r n-stack-highest SP)
 
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr l-read-c) ; P0 = char
      (jsr l-putchar) ; print P0
@@ -3920,13 +4008,16 @@
  '(
      (mvi->r n-stack-highest SP)
 
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      ;; string "hej"
      (jsr f-scan)
@@ -3998,14 +4089,16 @@
  '(      
      (mvi->r n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr f-scan) ; P0 = read obj type
 
@@ -4028,14 +4121,16 @@
  '(      
      (mvi->r n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr f-scan) ; P0 = read obj type
      
@@ -4052,14 +4147,16 @@
  '(      
      (mvi->r n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr f-scan) ; P0 = read obj type
      
@@ -4082,14 +4179,16 @@
  '(      
      (mvi->r n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      ;(jsr f-scan) ; -> P0 = read obj type, P1 = num (if type is num)
      ;(jsr l-parse) ; P0= obj type from scan, P1 = num -> object (cons ptr)
@@ -4109,14 +4208,16 @@
  '(      
      (mvi->r n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr l-read) ; P0 = result (cons-ptr)
 
@@ -4159,6 +4260,7 @@
          (label end-pd)
          (j end-pd)))
 
+    
 
 (defparameter test-print-nil
   '( (Rx= n-stack-highest SP)
@@ -4302,6 +4404,31 @@
      (jsr l-print)
 
      ;(jsr l-garbage-collect)
+
+     (j l-repl)
+     ))
+(defparameter run-source
+  '( ;; --- test read/eval/loop -----------------------------------
+     (Rx= n-stack-highest SP)
+
+     ;; --- init scan -----------
+     ;; setup read-ptr to point to source-start
+     (mvi->r n-source-start R1)
+     (mvi->r reader-state R0) ; base-ptr
+     (r->a R0) ; base-ptr
+     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (mvi->r 0 R1) ; use-unread
+     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+
+     (label l-repl)
+    
+     (jsr l-read) ; P0 = result (cons-ptr)
+
+     (Rx= n-global-env R0)
+     (A=Rx R0)
+     (Rx=M[A].w P1)
+
+     (jsr l-eval)
 
      (j l-repl)
      ))
@@ -4531,7 +4658,7 @@
      (j-a)
 
      ;; --- -----------------------------------
-     ;; input: P0=arg-list (but no arg allowed)
+     ;; input: P0=arg-list (one arg allowed)
      ;;        P1=env
      ;; output: P0=result
      ;; Characters are just integers.
@@ -4552,6 +4679,44 @@
      (pop-a) ;; apply did push SRP
      (j-a)
     ))
+
+(defparameter func-peek
+  '(
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     (label l-prim-poke)
+     ;; do not push SRP, apply already did that
+     ;; TBD
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;; Characters are just integers.
+     ;;
+     (label l-prim-peek)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     ;; get number value, assume eval:ed arg is a number
+     (jsr l-getcons)  ; -> P0 = the peek address
+
+     (A=M[Rx] P0) ; read dword at address
+     (Rx=A P0)
+     (jsr l-box-int) ; -> P0 - return value
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+    ))
+
+
 
 (defvar func-str-equal nil)
 (setq func-str-equal
@@ -4704,6 +4869,191 @@
      (jsr l-prtdec)
      (r->a R1) (a->r P0)
      (j l-prt-single)
+
+    
+     ;; ---- right shift 4
+     ;; in/out: R0
+     (label l-asr-4)
+     (A=Rx R0)
+     (A=A>>1)
+     (A=A>>1)
+     (A=A>>1)
+     (A=A>>1)
+     (Rx=A R0)
+     (A=Rx SRP)
+     (j-a)
+     ;; ---- right shift 8
+     ;; in/out: R0
+     (label l-asr-8)
+     (push-srp)
+     (jsr l-asr-4)
+     (jsr l-asr-4)
+     (pop-a)
+     (j-a)
+     ;; ---- right shift 16
+     ;; in/out: R0
+     (label l-asr-16)
+     (push-srp)
+     (jsr l-asr-8)
+     (jsr l-asr-8)
+     (pop-a)
+     (j-a)
+
+     ;; prthex
+     ;; in: R0
+     (label l-prthex-32)
+     (push-srp)
+     (push-r R1)
+
+     (A=RX R0)
+     (Rx=A R1)
+     (jsr l-asr-16)
+     (jsr l-prthex-16)
+     (A=Rx R1)
+     (mask-a-w)
+     (Rx=A R0)
+     (jsr l-prthex-16)
+     
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+
+     ;; ---
+     ;; in: R0
+     (label l-prthex-16)
+     (push-srp)
+     (push-r R1)
+
+     (A=Rx R0)
+     (Rx=A R1)
+     (jsr l-asr-8)
+     (jsr l-prthex-8)
+     (A=Rx R1)
+     (mask-a-b)
+     (Rx=A R0)
+     (jsr l-prthex-8)
+
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+
+     ;; ---
+     ;; in: R0
+     (label l-prthex-8)
+     (push-srp)
+     (push-r R1)
+
+     (A=Rx R0)
+     (Rx=A R1)
+     (jsr l-asr-4)
+     (jsr l-prthex-4)
+     (A=Rx R1)
+     (Rx= #b1111 R0)
+     (A=Rx R1)
+     (A&=Rx R0)
+     (Rx=A R0)
+     (jsr l-prthex-4)
+
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+
+     ;; ---
+     ;; in: R0
+     (label l-prthex-4)
+     (push-srp)
+     (push-r R1)
+
+     (Rx= 10 R1)
+     (A=Rx R0)
+     (A-=Rx R1) ; R0 >= 9
+     (jge l-alfa)
+     (Rx= (char-code #\0 ) R1)
+     (A=Rx R0)
+     (A+=Rx R1) ; R0 + '0'
+     (Rx=A P0)
+     (jsr l-putchar)
+     (j l-p4-end)
+
+     (label l-alfa)
+     (Rx= (- (char-code #\A) 10) R1)
+     (A=Rx R0)
+     (A+=Rx R1) ; R0 + 'A'
+     (Rx=A P0)
+     (jsr l-putchar)
+     
+     (label l-p4-end)
+     (pop-r R1)
+     (pop-a)
+     (j-a)
+
+     
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: -
+     ;;
+     (label l-prim-phex32)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R0)
+     ;; get number value, assume eval:ed arg is a number
+     (jsr l-getcons) 
+     (A=Rx P0)
+     (Rx=A R0)
+     (jsr l-prthex-32)
+
+     (A= 0)(Rx=A P0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: -
+     ;;
+     (label l-prim-phex16)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R0)
+     ;; get number value, assume eval:ed arg is a number
+     (jsr l-getcons) 
+     (A=Rx P0)
+     (Rx=A R0)
+     (jsr l-prthex-16)
+
+     (A= 0)(Rx=A P0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: -
+     ;;
+     (label l-prim-phex8)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R0)
+     ;; get number value, assume eval:ed arg is a number
+     (jsr l-getcons) 
+     (A=Rx P0)
+     (Rx=A R0)
+     (jsr l-prthex-8)
+
+     (A= 0)(Rx=A P0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+     
      ))
 
 (defparameter func-print-char
@@ -4875,6 +5225,8 @@
 
 (defvar e nil)
 (defvar *symtab* nil)
+(defvar *hello-world* nil)
+
 (defparameter guard-start nil)
 (defparameter guard-end nil)
 
@@ -4899,10 +5251,11 @@
               func-car func-parse func-rplca func-rplcd
               func-cons func-gc func-print-symbol func-print func-print-char
               func-print-list func-str2num func-div10
-              func-print-number func-read func-assoc func-eval
+              func-print-number func/logand-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
+              func-bitwise
               func-primitives func-primitives2 func-primitives3
-              func-primitives4 func-tagbody ))
+              func-primitives4 func-tagbody func-peek ))
   (setf e (make-emulator *hello-world* dmem
                          :shared-mem lisp-init
                          :debug debug))
@@ -4996,7 +5349,8 @@
 
 
 ;;; will read from pty, should input " symbol " to pty
-(defparameter pty "/dev/pts/5")
+;(defparameter pty "/dev/pts/5")
+(defparameter pty nil)
 
 (defun t13 ( &optional (regression nil) )
   (init-lisp)
@@ -5055,8 +5409,9 @@
 
 ;;; expected: (123 (sym2 sym1))
 (defun t7 ( &optional (regression nil) )
-  (asm-n-run test-parse-3
-    #'(lambda (dmem proc)
+  (asm-n-run
+    test-parse-3  ; main
+    #'(lambda (dmem proc) ; setup
         (setq string-space-free 0)
         (add-symbol dmem "nil" 0) ; nil must be symbol 0
         (add-symbol dmem "sym1" 0)
@@ -5064,7 +5419,10 @@
         (set-program dmem 
                      (string-to-mem "(123 (sym2 sym1))") 
                      n-source-start))
-    nil regression 10000))
+    nil          ; debug
+    regression   ; no-curses
+    10000        ; nr-instr
+    ))
 
 (deftest run-t7 () (run-test #'t7 "(123 (sym2 sym1))"))
 
@@ -5102,6 +5460,88 @@
              nil nil regression 10000))
 
 (deftest run-t10 () (run-test #'t10 "4391000010"))
+
+
+(defparameter test-prthex-4
+  '( (Rx= n-stack-highest SP)
+     (Rx= 0 R0)
+     (jsr l-prthex-4)
+     (Rx= 9 R0)
+     (jsr l-prthex-4)
+     (Rx= 10 R0)
+     (jsr l-prthex-4)
+     (Rx= 15 R0)
+     (jsr l-prthex-4)
+     (label l-end-ph)
+     (j l-end-ph)))
+     
+(defun phex4 ( &optional (regression nil) )
+  (asm-n-run test-prthex-4
+             nil nil regression 10000))
+
+(deftest run-phex4 () (run-test #'phex4 "09AF"))
+
+(defparameter test-prthex-8
+  '( (Rx= n-stack-highest SP)
+     (Rx= 0 R0)
+     (jsr l-prthex-8)
+     (Rx= #x10 R0)
+     (jsr l-prthex-8)
+     (Rx= #xf0 R0)
+     (jsr l-prthex-8)
+     (Rx= #xff R0)
+     (jsr l-prthex-8)
+     (label l-end-ph8)
+     (j l-end-ph8)))
+     
+(defun phex8 ( &optional (regression nil) )
+  (asm-n-run test-prthex-8
+             nil nil regression 10000))
+
+(deftest run-phex8 () (run-test #'phex8 "0010F0FF"))
+
+(defparameter test-prthex-16
+  '( (Rx= n-stack-highest SP)
+     (Rx= 0 R0)
+     (jsr l-prthex-16)
+     (Rx= #x0012 R0)
+     (jsr l-prthex-16)
+     (Rx= #x3400 R0)
+     (jsr l-prthex-16)
+     (Rx= #xabcd R0)
+     (jsr l-prthex-16)
+     (label l-end-ph16)
+     (j l-end-ph16)))
+     
+(defun phex16 ( &optional (regression nil) )
+  (asm-n-run test-prthex-16
+             nil nil regression 10000))
+
+(deftest run-phex16 () (run-test #'phex16 "000000123400ABCD"))
+
+(defparameter test-prthex
+  '( (Rx= n-stack-highest SP)
+     
+     (Rx= 0 P0)
+     (jsr l-box-int)
+     (jsr l-prthex)
+     (Rx= #x00001234 P0)
+     (jsr l-box-int)
+     (jsr l-prthex)
+     (Rx= #xabcd0000 P0)
+     (jsr l-box-int)
+     (jsr l-prthex)
+     (Rx= #xffffffff P0)
+     (jsr l-box-int)
+     (jsr l-prthex)
+     (label l-end-ph32)
+     (j l-end-ph32)))
+     
+(defun t20 ( &optional (regression nil) )
+  (asm-n-run test-prthex
+             nil nil regression 10000))
+
+(deftest run-t20 () (run-test #'t20 "0000000000001234ABCD0000FFFFFFFF"))
 
 ;;; expected: "123"
 (defun t11 ( &optional (regression nil) )
@@ -6000,6 +6440,18 @@ nil
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
 ;;; ------------------------------------------------------------------------
+;;; read/eval loop until source is empty. Doesn't print eval result.
+(defun test-run-source( source-string &optional (regression nil) )
+  (destructuring-bind (dmem proc)
+    (asm-n-run run-source
+               #'(lambda (dmem proc)
+                     (set-source dmem source-string))
+               nil regression 20000000 nil
+               asm-init-lisp)
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+;;; ------------------------------------------------------------------------
 (defun run-repl ( source-string &optional (no-curses t) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-repl
@@ -6084,6 +6536,15 @@ nil
                                    "hej"
                                    "\"hej\""))
 ;;; ------------------------------------------------------------------------
+(deftest run2-phex  () (run-test #'test-source-new 
+                                   "1100EEFFnilFEEDnilFFnil"
+                                   "(prthex-32 285273855)(prthex-16 65261)(prthex-8 255)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-logand  () (run-test #'test-source-new 
+                                   "1630"
+                                   "(logand 16 255)
+                                    (logand 254 127 31)"))
+;;; ------------------------------------------------------------------------
 (deftest run-progn  () (run-test #'test-source 
                                      "97"
                                       "(progn (+ 1 2)(prin1 9) 7)"))
@@ -6148,7 +6609,7 @@ nil
 
 ;;; ------------------------------------------------------------------------
 (deftest run2-equal  () (run-test #'test-source-new 
-"equalttnilniltnil"
+"equalttnilnilttnil"
 "(defun equal (x y)
     (or
       (eql x y)
@@ -6162,8 +6623,26 @@ nil
 (equal '(1) '(2))
 (equal '(1) 1)
 (equal '(1 2) '(1 2))
+(equal \"hej\" \"hej\")
 (equal '(1 2) '(1 2 3))"))
 
+;;; ------------------------------------------------------------------------
+(deftest run2-cmd  () (run-test #'test-source-new 
+"equalrun-command12"
+"(defun equal (x y)
+    (or
+      (eql x y)
+      (and
+        (consp x)
+        (consp y)
+        (equal (car x) (car y))
+        (equal (cdr x) (cdr y)))))
+(defun run-command (c)
+  (cond ((equal c \"ls\") 1)
+        (t 2)))
+(run-command \"ls\")
+(run-command \"x\")
+"))
 ;;; ------------------------------------------------------------------------
 (deftest run2-nump  () (run-test #'test-source-new 
                               "tnilnil"
@@ -6186,14 +6665,6 @@ nil
     (go loop)))
  i"))
 
-;;(test-source-new "(defvar i 0)
-;;              (tagbody
-;;                (print i)
-;;                (go skip)
-;;                (print 99)
-;;                skip
-;;                (print 111))" t)
-                      
 ;;; ------------------------------------------------------------------------
 (deftest run2-progn  () (run-test #'test-source-new 
                                      "97"
@@ -6276,6 +6747,45 @@ nil
   (setq str (append str 108))
   (setq str (append str 109))
   (setq str (append str 110))"))
+
+
+;;; ------------------------------------------------------------------------
+#|
+(test-run-source
+"
+(defun crlf () (putc 10)(putc 13))
+(defun pr16 ()
+  (let ((i 0))
+    (tagbody
+     loop
+     (if (not (eql i 0))
+       (putc 32))
+     (prthex-8 i) 
+     (setq i (+ i 1))
+     (if (< i 16)
+       (go loop))))
+  (crlf))
+(pr16)
+" t)
+(test-run-source
+  "(prthex-32 (peek 12345))" nil)
+
+(test-run-source
+"(defun crlf () (putc 10)(putc 13))
+(defun pr (adr)
+  (let ((i adr))
+    (tagbody
+     loop
+     (if (not (eql i 0))
+       (putc 32))
+     (prthex-32 (peek i)) 
+     (setq i (+ i 4))
+     (if (< i (+ adr 32))
+       (go loop))))
+  (crlf))
+(pr 0)
+" t)
+|#
 ;;; ------------------------------------------------------------------------
 (defparameter predef-lisp
   "
@@ -6292,7 +6802,6 @@ nil
         (consp y)
         (equal (car x) (car y))
         (equal (cdr x) (cdr y)))))
-
   (defun append (x y)
      (if (eq x nil)
          y
@@ -6419,6 +6928,7 @@ nil
     (run-t11)
     (run-t15)
     (run-t16)
+    (run-t20)
     (run-assoc)
     (run-assoc-prim)
     (run-assoc2)
@@ -6450,6 +6960,9 @@ nil
     (run-nump)
     (run-setq)
     (run-tagb-loop)
+    (run-phex4)
+    (run-phex8)
+    (run-phex16)
 
     (run2-car-cdr)
     (run2-cons)
@@ -6478,6 +6991,8 @@ nil
     (run2-and)
     (run2-or)
     (run2-equal)
+    (run2-phex)
+    (run2-logand)
     ))
 
 ;(run-emul e 200 nil)
