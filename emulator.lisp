@@ -1262,8 +1262,8 @@
     (dotimes (n max-instr)
       (if (processor-state-break (emulated-system-processor emul))
           (progn
-            (format t "break due to infinite loop pc:~a~%"
-                    (processor-state-pc (emulated-system-processor emul)))
+            ;(format t "break due to infinite loop pc:~a~%"
+            ;        (processor-state-pc (emulated-system-processor emul)))
             (return-from run-emul nil))
           (execute-instruction
             (emulated-system-processor emul) 
@@ -1422,128 +1422,136 @@
   (setq *print-pretty* nil)
   ;(setf (processor-state-debug 
   ;        (emulated-system-processor emul)) nil)
-  (charms:with-curses ()
-    (charms:disable-echoing)
-    (charms:enable-raw-input)
-    (charms:clear-window (charms:standard-window))
-    (let ((disasm-window (charms:make-window  45 49 36 1))
-          (output-window (charms:make-window  40 20 01 32))
-          (cpu-window (charms:make-window     30 30 01 0))
-          (command-window (charms:make-window 30  5  1 45))
-          (dump-window (charms:make-window    75 50 87 0))
-          (breakpoints (make-hash-table))
-          (output-window-need-refresh nil)
-          (mem-was-written nil))
-      (processor-add-wr-callback 
-        (emulated-system-processor emul)
-            (lambda (addr data)
-              (when (and (>= addr dump-start-address) (<= addr dump-end-address))
-                (setf mem-was-written t))
-              (when (equal (logand #xffffffff addr) #xffffffff)
-                (setf output-window-need-refresh t)
-                (write-cb-write-win addr data output-window))
-              t))
-      (charms:clear-window disasm-window)
-      (charms:clear-window output-window)
-      (charms:clear-window cpu-window)
-      (charms:clear-window command-window)
-      (charms:clear-window dump-window)
-      (draw-window-box cpu-window)
-      (draw-window-box command-window)
-      (draw-window-box dump-window)
-      (dump-mem (emulated-system-dmem emul) dump-window)
-      (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
-      (charms/ll:scrollok (charms::window-pointer output-window) 1)
-      (charms:enable-non-blocking-mode command-window)
-      (charms:refresh-window disasm-window)
-      (charms:refresh-window output-window)
-      (charms:refresh-window cpu-window)
-      (charms:refresh-window command-window)
-      (charms:refresh-window dump-window)
-      (loop named emulate
-            with single-step := nil and run := nil and update-windows := t
-                 and fcall-break := nil and need-refresh := t
-            do (progn
-                 (when update-windows
-                   (write-processor-state 
-                     cpu-window
-                     (emulated-system-processor emul)
-                     (emulated-system-imem emul))
-                   (write-disasm 
-                     disasm-window
-                     (emulated-system-processor emul)
-                     (emulated-system-imem emul)
-                     symtab)
-                   (when need-refresh
-                     (setf need-refresh nil)
-                     (charms:refresh-window disasm-window)
-                     ;(charms:refresh-window (charms:standard-window))
-                     ;(charms:refresh-window command-window)
-                     (charms:refresh-window dump-window)
-                     (charms:refresh-window cpu-window))
-                   (when output-window-need-refresh
-                     (charms:refresh-window output-window)
-                     (setf output-window-need-refresh nil))
-                   (setf update-windows nil))
 
-                 ;(case (charms:get-char charms:*standard-window* :ignore-error t)
-                 (case (charms:get-char command-window :ignore-error t)
-                 ;(case (charms:get-char disasm-window :ignore-error t)
-                   ((nil) nil)
-                   ((#\Space) (when (not run)
-                                (update-status command-window "stepped")
-                                (setf single-step 1)))
-                   ((#\r) (progn
-                            (when run
-                              (update-status command-window "stopped")
-                              (setf need-refresh t)
-                              (setf update-windows t))
-                            (when (not run)
-                              (update-status command-window "running"))
-                            (setf run (not run))))
-                   ((#\n) (when (not run)
-                            (update-status command-window "next subroutine")
-                            (setf run t)
-                            (setf single-step nil)
-                            (setf fcall-break t)))
-                   ((#\R) (progn
-                            (reset-processor (emulated-system-processor emul))
-                            (setf update-windows t)))
-                   ((#\b) (get-breakpoint breakpoints command-window))
-                   ((#\q #\Q) (return-from emulate)))
-                 ;(sleep 0.1)
-                 (when run (setf need-refresh nil))
-                 (when single-step (setf need-refresh t))
-                 (if (or run single-step)
-                     (progn
-                       (setf update-windows t)
-                       (execute-instruction
-                         (emulated-system-processor emul) 
-                         (emulated-system-imem emul)
-                         (emulated-system-dmem emul))
-                       (let ((p (emulated-system-processor emul)))
-                         (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
-                           (update-status command-window "stopped subr")
-                           (setf run nil)
-                           (setf need-refresh t)
-                           (setf fcall-break nil)))
-                       ))
-                 (if mem-was-written 
+  (let ((*terminal-io* (if (boundp '*console-io*) ; swank will set *console-io*
+                           *console-io*           ; so that ncurses uses correct tty
+                           *terminal-io*)))
+    (charms:with-curses ()
+      (charms:disable-echoing)
+      (charms:enable-raw-input) ; :interpret-control-characters t)
+      (charms:clear-window (charms:standard-window))
+      (let ((disasm-window (charms:make-window  45 49 36 1))
+            (output-window (charms:make-window  40 20 01 32))
+            (cpu-window (charms:make-window     30 30 01 0))
+            (command-window (charms:make-window 30  5  1 45))
+            (dump-window (charms:make-window    75 50 87 0))
+            (breakpoints (make-hash-table))
+            (output-window-need-refresh nil)
+            (mem-was-written nil))
+        (processor-add-wr-callback 
+          (emulated-system-processor emul)
+          (lambda (addr data)
+            (when (and (>= addr dump-start-address) (<= addr dump-end-address))
+              (setf mem-was-written t))
+            (when (equal (logand #xffffffff addr) #xffffffff)
+              (setf output-window-need-refresh t)
+              (write-cb-write-win addr data output-window))
+            t))
+        (charms:clear-window disasm-window)
+        (charms:clear-window output-window)
+        (charms:clear-window cpu-window)
+        (charms:clear-window command-window)
+        (charms:clear-window dump-window)
+        (draw-window-box cpu-window)
+        (draw-window-box command-window)
+        (draw-window-box dump-window)
+        (dump-mem (emulated-system-dmem emul) dump-window)
+        (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
+        (charms/ll:scrollok (charms::window-pointer output-window) 1)
+        (charms:enable-non-blocking-mode command-window)
+        (charms:refresh-window disasm-window)
+        (charms:refresh-window output-window)
+        (charms:refresh-window cpu-window)
+        (charms:refresh-window command-window)
+        (charms:refresh-window dump-window)
+        (loop named emulate
+              with single-step := nil and run := nil and update-windows := t
+              and fcall-break := nil and need-refresh := t
+              do (progn
+                   (when update-windows
+                     (write-processor-state 
+                       cpu-window
+                       (emulated-system-processor emul)
+                       (emulated-system-imem emul))
+                     (write-disasm 
+                       disasm-window
+                       (emulated-system-processor emul)
+                       (emulated-system-imem emul)
+                       symtab)
+                     (when need-refresh
+                       (setf need-refresh nil)
+                       (charms:refresh-window disasm-window)
+                       ;(charms:refresh-window (charms:standard-window))
+                       ;(charms:refresh-window command-window)
+                       (charms:refresh-window dump-window)
+                       (charms:refresh-window cpu-window))
+                     (when output-window-need-refresh
+                       (charms:refresh-window output-window)
+                       (setf output-window-need-refresh nil))
+                     (setf update-windows nil))
+
+                   ;(sleep 0.5)
+                   ;(format t "get-char~%")
+                   ;(case (charms:get-char charms:*standard-window* :ignore-error t)
+                   (case (charms:get-char command-window :ignore-error t)
+                     ;(case (charms:get-char disasm-window :ignore-error t)
+                     ;(case (charms:get-char the-tty :ignore-error t)
+                     ;((nil) nil)
+                     ((nil) nil)
+                     ((#\Space) (when (not run)
+                                  (update-status command-window "stepped")
+                                  (setf single-step 1)))
+                     ((#\r) (progn
+                              (when run
+                                (update-status command-window "stopped")
+                                (setf need-refresh t)
+                                (setf update-windows t))
+                              (when (not run)
+                                (update-status command-window "running"))
+                              (setf run (not run))))
+                     ((#\n) (when (not run)
+                              (update-status command-window "next subroutine")
+                              (setf run t)
+                              (setf single-step nil)
+                              (setf fcall-break t)))
+                     ((#\R) (progn
+                              (reset-processor (emulated-system-processor emul))
+                              (setf update-windows t)))
+                     ((#\b) (get-breakpoint breakpoints command-window))
+                     ((#\q #\Q) (return-from emulate)))
+                   ;(sleep 0.1)
+                   (when run (setf need-refresh nil))
+                   (when single-step (setf need-refresh t))
+                   (if (or run single-step)
+                       (progn
+                         (setf update-windows t)
+                         (execute-instruction
+                           (emulated-system-processor emul) 
+                           (emulated-system-imem emul)
+                           (emulated-system-dmem emul))
+                         (let ((p (emulated-system-processor emul)))
+                           (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
+                             (update-status command-window "stopped subr")
+                             (setf run nil)
+                             (setf need-refresh t)
+                             (setf fcall-break nil)))
+                         ))
+                   (if mem-was-written 
                        (dump-mem (emulated-system-dmem emul) dump-window))
-                 (when (gethash 
-                         (processor-state-pc (emulated-system-processor emul))
-                       breakpoints)
-                   (when run
-                     (update-status command-window "stopped bp")
-                     (setf need-refresh t)
-                     (setf run nil)))
-                 (when (processor-state-break (emulated-system-processor emul))
-                   (when run
-                     (update-status command-window "stopped break")
-                     (setf (processor-state-break (emulated-system-processor emul)) nil)
-                     (setf need-refresh t)
-                     (setf run nil)))
-                 (setf single-step nil))))))
+                   (when (gethash 
+                           (processor-state-pc (emulated-system-processor emul))
+                           breakpoints)
+                     (when run
+                       (update-status command-window "stopped bp")
+                       (setf need-refresh t)
+                       (setf run nil)))
+                   (when (processor-state-break (emulated-system-processor emul))
+                     (when run
+                       (update-status command-window "stopped break")
+                       (setf (processor-state-break (emulated-system-processor emul)) nil)
+                       (setf need-refresh t)
+                       (setf run nil)))
+                   (setf single-step nil)))))))
 
 
 (defun run-with-curses-io ( emul pty &optional symtab )
