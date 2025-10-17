@@ -7,6 +7,7 @@
 ;;;(load "charms-extra")
 ;;;(load "emulator")
 (asdf:load-system :literisc)
+(defparameter regression t)
 (load "lisp")
 
 (use-package :unit)

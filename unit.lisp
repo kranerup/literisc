@@ -26,5 +26,5 @@ test functions or use `check' to run individual test cases."
 
 (defun report-result (result form)
   "Report the results of a single test case. Called by `check'."
-  (format t "~:[FAIL~;pass~] ... ~a: ~a~%" result *test-name* form)
+  (format t "~:[FAIL~;pass~] ... ~a~%" result *test-name*)
   result)
