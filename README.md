@@ -587,3 +587,17 @@ sbcl
 cd ~/liteRISC # or the path where you ran git clone
 sbcl --load run.lisp
 ```
+
+## Running Lisp
+
+To run the emulator with a emulated terminal you need to configure
+lisp.lisp to use emulated io and setup which pty to use.
+
+The create sockets with `socat` and connect one end to a terminal that supports 
+connecting to a pty, e.g. `screen`. The other end of the sockets will be connected
+to the emulator.
+
+```
+socat -d -d pty,raw,echo=0 pty,raw,echo=0
+screen /dev/pts/2
+```

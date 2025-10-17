@@ -105,6 +105,10 @@
 (defvar dmem-allocated 0)
 (setq dmem (make-dmem 40000))
 
+(defvar *symtab* nil)
+(defvar *hello-world* nil)
+
+
 (defmacro alloc-init ( sym data )
   `(progn
      (defvar ,sym nil)
@@ -406,6 +410,7 @@
     (label str-prthex-32 )(lstring "prthex-32")
     (label str-peek   )(lstring "peek")
     (label str-land   )(lstring "logand")
+    (label str-asr8   )(lstring "asr8")
    
     (label str-free)
     (lalloc-bytes 128)
@@ -457,6 +462,7 @@
     (aword (/ (- prim-prthex-32 n-cons) 4)) (aword (- str-prthex-32 n-string-space) ); prthex-32 
     (aword (/ (- prim-peek    n-cons) 4)) (aword (- str-peek n-string-space) ); peek 
     (aword (/ (- prim-logand  n-cons) 4)) (aword (- str-land n-string-space) ); logand 
+    (aword (/ (- prim-asr8    n-cons) 4)) (aword (- str-asr8 n-string-space) ); asr8 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -493,6 +499,7 @@
     (label prim-prthex-32) (adword  l-prim-phex32)  ; prthex-32
     (label prim-peek   ) (adword  l-prim-peek )     ; peek 
     (label prim-logand ) (adword  l-prim-logand )   ; logand 
+    (label prim-asr8   ) (adword  l-prim-asr8 )     ; asr8 
 
     ;; ---- global env ----------
     (label l-env)
@@ -532,8 +539,9 @@
     (aword 33) (aword (+ 32 (/ (- l-env n-cons) 4)) )  ; prthex-16
     (aword 34) (aword (+ 33 (/ (- l-env n-cons) 4)) )  ; prthex-32
     (aword 35) (aword (+ 34 (/ (- l-env n-cons) 4)) )  ; peek
-    (label l-env-start)
     (aword 36) (aword (+ 35 (/ (- l-env n-cons) 4)) )  ; logand
+    (label l-env-start)
+    (aword 37) (aword (+ 36 (/ (- l-env n-cons) 4)) )  ; asr8
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -581,6 +589,7 @@
     (abyte c-cons-symbol) ; prthex-32
     (abyte c-cons-symbol) ; peek
     (abyte c-cons-symbol) ; logand
+    (abyte c-cons-symbol) ; asr8
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -616,6 +625,7 @@
     (abyte c-cons-primitive) ; prthex-32
     (abyte c-cons-primitive) ; peek
     (abyte c-cons-primitive) ; logand
+    (abyte c-cons-primitive) ; asr8
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -654,6 +664,7 @@
     (abyte c-cons-cons) ; prthex-32
     (abyte c-cons-cons) ; peek
     (abyte c-cons-cons) ; logand
+    (abyte c-cons-cons) ; asr8
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -746,6 +757,17 @@
   (alloc-dwords n-stack 300)
   (setq n-stack-highest (- (logand dmem-allocated #xfffffffc) 4)))
 
+
+(defun print-reader-state (dmem)
+  (format t "reader-state ~a~%" reader-state)
+  (format t "use-unread ~a~%"
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-use-unread)))
+  (format t "last-read ~a~%"
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-last-read)))
+  (format t "read-ptr ~a~%"
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-read-ptr)))
+  (format t "eof ~a~%"
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-eof))))
 
 (init-lisp)
 
@@ -4318,14 +4340,16 @@
   '( ;; --- test read/eval/print -----------------------------------
      (Rx= n-stack-highest SP)
 
-     ;; --- init scan -----------
+     ;; ----- initialize reader state ---------
      ;; setup read-ptr to point to source-start
-     (mvi->r n-source-start R1)
-     (mvi->r reader-state R0) ; base-ptr
-     (r->a R0) ; base-ptr
-     (st-r->a-rel rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
-     (mvi->r 0 R1) ; use-unread
-     (st-r->a-rel rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (Rx= n-source-start R1)
+     (Rx= reader-state R0) ; base-ptr
+     (A=Rx R0) ; base-ptr
+     (M[A+n]=Rx rs-read-ptr R1) ; M[ A(base) + read-ptr-offs ] = R1 (read-ptr)
+     (Rx= 0 R1) ; use-unread = 0
+     (M[A+n]=Rx rs-use-unread R1) ; M[ A(base) + use-unread-offs ] = R1 (0)
+     (M[A+n]=Rx rs-eof R1) ; M[ A(base) + eof-offs ] = R1 (0)
+     ;; ---------------------------------------
 
      (jsr l-read) ; P0 = result (cons-ptr)
 
@@ -4989,12 +5013,39 @@
 
      
      ;; --- -----------------------------------
+     ;; input: P0=arg-list
+     ;;        P1=env
+     ;; output: -
+     ;;
+     (label l-prim-asr8)
+     ;; do not push SRP, apply already did that
+     (push-r R0)
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+     (A=Rx P0)(Rx=A R0)
+     ;; get number value, assume eval:ed arg is a number
+     (jsr l-getcons) 
+     (A=Rx P0)
+     (Rx=A R0)
+     (jsr l-asr-8)
+     (A=Rx R0)
+     (Rx=A P0)
+     (jsr l-box-int)
+
+     (pop-r R0)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ;; --- -----------------------------------
      ;; input: P0=arg-list (but no arg allowed)
      ;;        P1=env
      ;; output: -
      ;;
      (label l-prim-phex32)
      ;; do not push SRP, apply already did that
+     (push-r R0)
 
      ;; get the first argument and evaluate it
      (jsr l-car) ; P0=car(arg-list)
@@ -5007,6 +5058,7 @@
      (jsr l-prthex-32)
 
      (A= 0)(Rx=A P0)
+     (pop-r R0)
      (pop-a) ;; apply did push SRP
      (j-a)
      
@@ -5017,6 +5069,7 @@
      ;;
      (label l-prim-phex16)
      ;; do not push SRP, apply already did that
+     (push-r R0)
 
      ;; get the first argument and evaluate it
      (jsr l-car) ; P0=car(arg-list)
@@ -5029,6 +5082,7 @@
      (jsr l-prthex-16)
 
      (A= 0)(Rx=A P0)
+     (pop-r R0)
      (pop-a) ;; apply did push SRP
      (j-a)
      
@@ -5039,6 +5093,7 @@
      ;;
      (label l-prim-phex8)
      ;; do not push SRP, apply already did that
+     (push-r R0)
 
      ;; get the first argument and evaluate it
      (jsr l-car) ; P0=car(arg-list)
@@ -5051,6 +5106,7 @@
      (jsr l-prthex-8)
 
      (A= 0)(Rx=A P0)
+     (pop-r R0)
      (pop-a) ;; apply did push SRP
      (j-a)
      
@@ -5214,6 +5270,24 @@
      (pop-a)
      (j-a)))
 
+(defun print-hash-differences (ht1 ht2)
+  (maphash (lambda (key val1)
+             (multiple-value-bind (val2 present)
+                 (gethash key ht2)
+               (cond ((not present)
+                      (format t "Key ~a val ~a only in ht1~%" key val1))
+                     ((not (equal val1 val2))
+                      (format t "Key ~a differs: ~a vs ~a~%" 
+                              key val1 val2))
+                     (t (format t "Key ~a equal~%" key)))))
+           ht1)
+  ;; Keys only in ht2
+  (maphash (lambda (key val2)
+             (unless (nth-value 1 (gethash key ht1))
+               (format t "Key ~a only in ht2~%" key)))
+           ht2))
+
+
 (defvar *hello-world* nil)
 ;(setq *hello-world*
 ;      (masm main func-prtstr read-c scan))
@@ -5224,8 +5298,6 @@
         do (if (> item 255) (format t "Index ~D: ~A~%" i item))))
 
 (defvar e nil)
-(defvar *symtab* nil)
-(defvar *hello-world* nil)
 
 (defparameter guard-start nil)
 (defparameter guard-end nil)
@@ -5237,10 +5309,6 @@
                         (nr-instr 1000)
                         (pty nil)
                         (lisp-init nil))
-  ;(setq *symtab* 
-  ;      (if no-curses
-  ;          nil
-  ;          (make-hash-table)))
   (setq *symtab* (make-hash-table))
   (setq *hello-world*
         (masm *symtab*
@@ -5251,7 +5319,7 @@
               func-car func-parse func-rplca func-rplcd
               func-cons func-gc func-print-symbol func-print func-print-char
               func-print-list func-str2num func-div10
-              func-print-number func/logand-read func-assoc func-eval
+              func-print-number func-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
               func-bitwise
               func-primitives func-primitives2 func-primitives3
@@ -5429,16 +5497,20 @@
 
 ;;; expected: (h e j)
 (defun test-parse-string ( &optional (regression nil) )
-  (asm-n-run test-parse-3
-    #'(lambda (dmem proc)
-        (setq string-space-free 0)
-        (add-symbol dmem "nil" 0) ; nil must be symbol 0
-        (set-program dmem 
-                     (string-to-mem "\"hej\"") 
-                     n-source-start))
-    nil regression 10000))
+  (let ((X (asm-n-run test-parse-3
+                      #'(lambda (dmem proc)
+                          (setq string-space-free 0)
+                          (add-symbol dmem "nil"   0) ; nil must be symbol 0
+                          (add-symbol dmem "t"     0)
+                          (add-symbol dmem "err"   0)
+                          (add-symbol dmem "quote" 0)
+                          (set-program dmem 
+                                       (string-to-mem "\"hej\"") 
+                                       n-source-start))
+                      nil regression 10000)))
+    t))
 
-(deftest run-parse-string () (run-test #'test-parse-string "(104 101 106)"))
+(deftest run-parse-string () (run-test #'test-parse-string "(quote hej)"))
 
 
 ;;; expected: P0=1 P1=1234
@@ -5522,18 +5594,14 @@
 (defparameter test-prthex
   '( (Rx= n-stack-highest SP)
      
-     (Rx= 0 P0)
-     (jsr l-box-int)
-     (jsr l-prthex)
-     (Rx= #x00001234 P0)
-     (jsr l-box-int)
-     (jsr l-prthex)
-     (Rx= #xabcd0000 P0)
-     (jsr l-box-int)
-     (jsr l-prthex)
-     (Rx= #xffffffff P0)
-     (jsr l-box-int)
-     (jsr l-prthex)
+     (Rx= 0 R0)
+     (jsr l-prthex-32)
+     (Rx= #x00001234 R0)
+     (jsr l-prthex-32)
+     (Rx= #xabcd0000 R0)
+     (jsr l-prthex-32)
+     (Rx= #xffffffff R0)
+     (jsr l-prthex-32)
      (label l-end-ph32)
      (j l-end-ph32)))
      
@@ -5739,6 +5807,7 @@
     (cond ((equal c-cons-symbol cons-type) (print-symbol dmem cons-index))
           ((equal c-cons-free cons-type) t)
           ((equal c-cons-number cons-type) (print-number dmem cons-index nil))
+          ((equal c-cons-char cons-type) (print-number dmem cons-index nil))
           ((equal c-cons-primitive cons-type) (print-number dmem cons-index t))
           ((equal c-cons-func cons-type) (print-cons dmem cons-index))
           ((equal c-cons-macro cons-type) (print-cons dmem cons-index))
@@ -6434,7 +6503,7 @@ nil
     (asm-n-run test-repl-noecho
                #'(lambda (dmem proc)
                      (set-source dmem source-string))
-               nil regression 20000000 nil
+               nil regression 30000000 nil
                asm-init-lisp)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
@@ -6768,7 +6837,7 @@ nil
 (pr16)
 " t)
 (test-run-source
-  "(prthex-32 (peek 12345))" nil)
+  "(prthex-32 (peek 256))" t)
 
 (test-run-source
 "(defun crlf () (putc 10)(putc 13))
@@ -6785,6 +6854,59 @@ nil
   (crlf))
 (pr 0)
 " t)
+(test-run-source
+  "(prthex-16 (asr8 43776))" t)
+
+(defparameter src1
+  "(defun printable (c)
+     (if (< c 32)
+       46
+       (if (< 127 c)
+         46
+         c)))
+(defun crlf () (putc 10)(putc 13))
+(defun pr4asc (w)
+   (putc (printable (logand 255 w)))
+   (let ((shift1 (asr8 w)))
+     (putc (printable (logand 255 shift1)))
+     (let ((shift2 (asr8 shift1)))
+       (putc (printable (logand 255 shift2)))
+       (let ((shift3 (asr8 shift2)))
+         (putc (printable (logand 255 shift3)))))))
+")
+(defparameter src2
+  "
+(defun prhex (adr)
+  (let ((i adr))
+    (tagbody
+     loop
+     (if (not (eql i 0))
+      (putc 32))
+     (prthex-32 (peek i))
+     (setq i (+ i 4))
+     (if (< i (+ adr 16))
+       (go loop)))))")
+(defparameter src3
+  "
+(defun prasc (adr)
+  (let ((i adr))
+    (tagbody
+     loop
+     (pr4asc (peek i))
+     (setq i (+ i 4))
+     (if (< i (+ adr 16))
+       (go loop)))))
+(defun prline (adr)
+  (prhex adr)
+  (putc 32)
+  (prasc adr)
+  (crlf))
+")
+
+(test-run-source
+  (concatenate 'string src1 src2 src3
+              "(prline 0)(prline 2112)") t)
+
 |#
 ;;; ------------------------------------------------------------------------
 (defparameter predef-lisp
