@@ -1355,6 +1355,7 @@
         window
         (format nil "~c" (code-char (logand #xff data))))))
 
+#|
 (defun get-string (window)
   (loop with cr := nil and ch := nil and s := ""
         do (setf ch (charms:get-char window :ignore-error t))
@@ -1364,8 +1365,26 @@
                       (princ ch *standard-output*)))
         do (charms:write-string-at-cursor window ch)
         finally (return s)))
+|#
 
-(defun get-breakpoint (breakpoints window)
+(defun get-string (window)
+  (let ((s nil))
+    (loop for c = (charms:get-char window :ignore-error t)
+      until (eq c #\Newline)
+      do (progn
+           (cond ((equal c #\Rubout)
+                  (when (> (length s) 0)
+                    (setf s (subseq s 0 (1- (length s))))
+                    (charms:write-string-at-cursor window (string #\Backspace))
+                    (charms:write-string-at-cursor window " ")
+                    (charms:write-string-at-cursor window (string #\Backspace))))
+                 (t (setf s (concatenate 'string s (list c)))
+                  (setf c (with-output-to-string (*standard-output*)
+                            (princ c *standard-output*)))
+                  (charms:write-string-at-cursor window c)))))
+    s))
+
+(defun get-breakpoint (breakpoints symtab window)
   (charms:disable-non-blocking-mode window)
   (charms:clear-window window)
   (draw-window-box window)
@@ -1376,7 +1395,11 @@
   (charms:refresh-window window)
   (let ((s (get-string window))
         (bp nil))
-    (setf bp (parse-integer s))
+    (setf bp
+      (handler-case (parse-integer s)
+        (parse-error () 
+                     (format t "bp label len:~a s:~a v:~a~%" (length s) s (get-label s symtab))
+                     (get-label s symtab))))
     (setf (gethash bp breakpoints) bp)
     (charms:clear-window window)
     (draw-window-box window)
@@ -1514,10 +1537,20 @@
                               (setf run t)
                               (setf single-step nil)
                               (setf fcall-break t)))
+                     ((#\o) (when (not run)
+                              (update-status command-window "over subroutine")
+                              (let* ((pc (processor-state-pc (emulated-system-processor emul)))
+                                     (instr-len (disasm-length
+                                                  (coerce (subseq (emulated-system-dmem emul) pc (+ pc 10)) 'list)))
+                                     (bp (+ pc instr-len)))
+                                (setf over-bp bp)
+                                (setf (gethash bp breakpoints) bp))
+                              (setf run t)
+                              (setf single-step nil)))
                      ((#\R) (progn
                               (reset-processor (emulated-system-processor emul))
                               (setf update-windows t)))
-                     ((#\b) (get-breakpoint breakpoints command-window))
+                     ((#\b) (get-breakpoint breakpoints symtab command-window))
                      ((#\q #\Q) (return-from emulate)))
                    ;(sleep 0.1)
                    (when run (setf need-refresh nil))
@@ -1538,13 +1571,15 @@
                          ))
                    (if mem-was-written 
                        (dump-mem (emulated-system-dmem emul) dump-window))
-                   (when (gethash 
-                           (processor-state-pc (emulated-system-processor emul))
-                           breakpoints)
-                     (when run
-                       (update-status command-window "stopped bp")
-                       (setf need-refresh t)
-                       (setf run nil)))
+                   (let ((bp (gethash (processor-state-pc (emulated-system-processor emul)) breakpoints)))
+                     (when bp
+                       (when run
+                         (update-status command-window "stopped bp")
+                         (when (equal bp over-bp)
+                           (setf over-bp nil)
+                           (remhash bp breakpoints))
+                         (setf need-refresh t)
+                         (setf run nil))))
                    (when (processor-state-break (emulated-system-processor emul))
                      (when run
                        (update-status command-window "stopped break")

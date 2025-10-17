@@ -1,7 +1,8 @@
 ;;; ===========================================================================
 (defpackage :lr-disasm
   (:use :cl :unit :lr-asm :lr-opcodes)
-  (:export :disasm))
+  (:export :disasm
+           :disasm-length))
 (in-package :lr-disasm)
 
 (load-opcodes 
@@ -200,9 +201,20 @@
                   (setf pc (+ pc nr-bytes))))
           do (setf nr-instr (1- nr-instr)))))
 
-;;;====================================================================================
+;; calculates the length of the first instruction in the bytes list
+(defun disasm-length (bytes)
+  (destructuring-bind (s nr-bytes) 
+    (disassemble-instr bytes)
+    (progn
+      (format t "l:~a i:~a~%"
+              nr-bytes s)
+      nr-bytes)))
+    
 ;;;========================== unit test ===============================================
-(deftest test-disasm ()
+(deftest test-len ()
+         (check (equal (disasm-length '( #xaf #x01 )) 2))) ; jsr #1  - 1
+
+(deftest test-mcode ()
   (let* ((mcode
           '( #x00 ; mv A,R0 - 0
              #xaf ; jsr #1  - 1
@@ -256,3 +268,9 @@
        (disasm-res (with-output-to-string (*standard-output*) (disasm mcode)))
 )
     (check (equal exp-str disasm-res))))
+
+(deftest test-disasm ()
+  (combine-results
+    (test-mcode)
+    (test-len)))
+
