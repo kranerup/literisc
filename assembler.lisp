@@ -464,14 +464,23 @@
     (if (equal (car item) 'label)
         (progn
           (if verbose (format t "label ~a~%" (cadr item)))
-          (eval item)))))
+          (eval item)
+          (setf (symbol-value (cadr item)) #xfffffff0)
+          ))))
 
 ;;; Evaluate assembler instruction and if it is a jump
-;;; then calculate the relative offset from the absoluate curr-pc.
+;;; then calculate the relative offset from the absolute curr-pc.
 ;;; The curr-pc is pointing to the first byte/opcode of the instruction.
 (defvar m) ; just used to indicate a macro in the assembler code
-(defun eval-asm (instr curr-pc debug)
-  (when debug (format t "instr ~a~%" (car instr)))
+(defun eval-asm (instr curr-pc check-labels debug)
+  (when debug (format t "pc:~a instr ~a ~a~%" curr-pc (car instr)
+                      (if (equal (car instr) 'label)
+                          (cadr instr)
+                          "")))
+  (when (and check-labels (equal (car instr) 'label))
+    (when (not (equal curr-pc (symbol-value (cadr instr))))
+      (format t "missmatch pc:~a label:~a ~a~^"
+              curr-pc (cadr instr) (symbol-value (cadr instr)))))
   (cond ((member (car instr) '(j jlt  jge  jlo  jhs  
                                   jz jnz  jlo-b jhs-b jz-b 
                                   jnz-b jlo-w jhs-w jz-w 
@@ -490,7 +499,7 @@
              (prev-len 2)
              (pc-after-instr (+ curr-pc instr-len))
              (offs (- dest-pc pc-after-instr)))
-        (if debug (format t "label:~a pc-after-jmp:~a curr-pc:~a offs:~a~%"
+        (if debug (format t "jump to label:~a pc-after-jmp:~a curr-pc:~a offs:~a~%"
                 dest-pc
                 pc-after-instr
                 curr-pc
@@ -524,13 +533,16 @@
           (progn
             (if debug (format t "label ~a pc:~a prev:~a~%" (cdr item) curr-pc (symbol-value (cadr item))))
             (setf diff (or diff (not (equal (symbol-value (cadr item)) curr-pc))))
+            (when debug
+            (when (not (equal (symbol-value (cadr item)) curr-pc))
+              (format t "label ~a updated prev:~a new:~a~%" (cdr item) (symbol-value (cadr item)) curr-pc)))
             (setf (symbol-value (cadr item)) curr-pc))
           (progn
             (if debug (format t "item:~a~%" item))
             (if debug (format t "mcode len:~a val:~a~%"
-                              (list-length (eval-asm item curr-pc debug))
-                              (eval-asm item curr-pc debug)))
-            (setf curr-pc (+ curr-pc (list-length (eval-asm item curr-pc debug)) )))))
+                              (list-length (eval-asm item curr-pc nil debug))
+                              (eval-asm item curr-pc nil debug)))
+            (setf curr-pc (+ curr-pc (list-length (eval-asm item curr-pc nil debug)) )))))
     diff))
 
 (defun list-labels (aprog)
@@ -558,9 +570,10 @@
 
 ;;; Calculate label positions until there are no more changes.
 (defun minimize-labels (aprog verbose)
-  (loop for i from 1 to 5 
+  (loop for i from 1 to 10
         while (calc-labels aprog verbose)
-        until (>= i 5)))
+        finally (when (= i 11)
+                  (error "minimize labels didn't stabilize"))))
 
 (defun assemble (aprog &optional (verbose nil) (symtab nil))
   (define-labels aprog verbose)
@@ -572,7 +585,8 @@
   (if verbose (format t "--- assemble ---~%"))
   (loop with mcode := nil and curr-pc := 0
         for item in aprog
-        if (listp item) do (setf mcode (eval-asm item curr-pc verbose))
+        if (listp item) do (setf mcode (eval-asm item curr-pc t verbose))
+        ;if (listp item) do (format t "pc:~a mcode:~a~%" curr-pc mcode)
         if (listp item) do (setf curr-pc (+ curr-pc (list-length mcode)))
         if (listp item) append mcode))
 
