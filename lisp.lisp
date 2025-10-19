@@ -146,7 +146,7 @@
      (assert (< dmem-allocated (length dmem)))))
 
 (defvar string-space-free 0) ; relative n-string-space
-(defparameter source-region-size 2048) ; allocated bytes to source buffer
+(defparameter source-region-size 4096) ; allocated bytes to source buffer
 (defvar cons-free nil)
 (defvar n-cons-end nil)
 
@@ -411,9 +411,10 @@
     (label str-peek   )(lstring "peek")
     (label str-land   )(lstring "logand")
     (label str-asr8   )(lstring "asr8")
+    (label str-quit   )(lstring "quit")
    
     (label str-free)
-    (lalloc-bytes 128)
+    (lalloc-bytes 256)
     (label n-string-space-end)
 
     ;; ---------------- start of cons space ----------------------------------------
@@ -463,6 +464,7 @@
     (aword (/ (- prim-peek    n-cons) 4)) (aword (- str-peek n-string-space) ); peek 
     (aword (/ (- prim-logand  n-cons) 4)) (aword (- str-land n-string-space) ); logand 
     (aword (/ (- prim-asr8    n-cons) 4)) (aword (- str-asr8 n-string-space) ); asr8 
+    (aword (/ (- prim-quit    n-cons) 4)) (aword (- str-quit n-string-space) ); quit 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -500,6 +502,7 @@
     (label prim-peek   ) (adword  l-prim-peek )     ; peek 
     (label prim-logand ) (adword  l-prim-logand )   ; logand 
     (label prim-asr8   ) (adword  l-prim-asr8 )     ; asr8 
+    (label prim-quit   ) (adword  l-prim-quit )     ; quit 
 
     ;; ---- global env ----------
     (label l-env)
@@ -540,8 +543,9 @@
     (aword 34) (aword (+ 33 (/ (- l-env n-cons) 4)) )  ; prthex-32
     (aword 35) (aword (+ 34 (/ (- l-env n-cons) 4)) )  ; peek
     (aword 36) (aword (+ 35 (/ (- l-env n-cons) 4)) )  ; logand
-    (label l-env-start)
     (aword 37) (aword (+ 36 (/ (- l-env n-cons) 4)) )  ; asr8
+    (label l-env-start)
+    (aword 38) (aword (+ 37 (/ (- l-env n-cons) 4)) )  ; quit
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -590,6 +594,7 @@
     (abyte c-cons-symbol) ; peek
     (abyte c-cons-symbol) ; logand
     (abyte c-cons-symbol) ; asr8
+    (abyte c-cons-symbol) ; quit
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -626,6 +631,7 @@
     (abyte c-cons-primitive) ; peek
     (abyte c-cons-primitive) ; logand
     (abyte c-cons-primitive) ; asr8
+    (abyte c-cons-primitive) ; quit
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -665,6 +671,7 @@
     (abyte c-cons-cons) ; peek
     (abyte c-cons-cons) ; logand
     (abyte c-cons-cons) ; asr8
+    (abyte c-cons-cons) ; quit
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -696,6 +703,9 @@
     (lalloc-words 1)
     
     ;; ----------------- guard------------------------
+    ;; A guard between the stack and the cons space/string space.
+    ;; When these labels are defined then asm-n-run will add write
+    ;; breakpoint to this word.
     (label guard-start)
     (lalloc-dwords 2)
     (label guard-end)
@@ -4583,20 +4593,35 @@
      (pop-a)
      (j-a)))
 
-(defparameter use-uart nil)
+(defparameter use-uart t)
 
 (defparameter char-output nil) ; :uart-io / :emul-io
 (defparameter char-input nil) ; :uart-io / :emul-io
 
-(if (or (boundp 'regression) (not use-uart))
-    (progn
-      (setq char-output :emul-io)
-      (setq char-input :emul-io))
-    (progn
-      (setq char-output :uart-io)
-      (setq char-input :uart-io)))
 
-(defparameter func-putchar
+(defun setup-io (pty-path)
+  (if pty-path
+      (progn
+        (setq pty pty-path)
+        (setq use-uart t))
+      (progn
+        (setq pty nil)
+        (setq use-uart nil)))
+  
+  (if (or (boundp 'regression) (not use-uart))
+      (progn
+        (setq char-output :emul-io)
+        (setq char-input :emul-io))
+      (progn
+        (setq char-output :uart-io)
+        (setq char-input :uart-io)))
+  (setq func-putchar (create-put))
+  (setq func-getchar (create-get)))
+    
+(defparameter func-putchar nil)
+(defparameter func-getchar nil)
+
+(defun create-put ()
   (cond ((equal char-output :emul-io)
          '( ;; --- putchar ---
             ;; params: P0 - char to print
@@ -4633,8 +4658,7 @@
             (A=Rx SRP)
             (j-a)))))
 
-
-(defparameter func-getchar
+(defun create-get ()
   (cond ((equal char-input :emul-io)
          '(
             (label l-getchar)
@@ -4665,6 +4689,11 @@
             (A=Rx SRP)
             (j-a)
             ))))
+
+;; for connecting pty to terminal (setup-io "/dev/pty/8")
+;; for regression and io in repl  (setup-io nil)
+(when (boundp 'regression)
+  (setup-io nil))
 
 (defparameter func-prim-char
   '(
@@ -5039,6 +5068,14 @@
      (j-a)
 
      ;; --- -----------------------------------
+     ;; input: P0=arg-list
+     ;;        P1=env
+     ;; output: -
+     ;;
+     (label l-prim-quit)
+     (j l-prim-quit)
+
+     ;; --- -----------------------------------
      ;; input: P0=arg-list (but no arg allowed)
      ;;        P1=env
      ;; output: -
@@ -5308,7 +5345,8 @@
                         (no-curses nil)
                         (nr-instr 1000)
                         (pty nil)
-                        (lisp-init nil))
+                        (lisp-init nil)
+                        (enable-guard nil))
   (setq *symtab* (make-hash-table))
   (setq *hello-world*
         (masm *symtab*
@@ -5327,7 +5365,7 @@
   (setf e (make-emulator *hello-world* dmem
                          :shared-mem lisp-init
                          :debug debug))
-  (when guard-start
+  (when (and enable-guard guard-start)
     (processor-add-wr-callback 
       (emulated-system-processor e)
       (lambda (addr data)
@@ -5417,7 +5455,7 @@
 
 
 ;;; will read from pty, should input " symbol " to pty
-;(defparameter pty "/dev/pts/5")
+(defparameter pty "/dev/pts/9")
 (defparameter pty nil)
 
 (defun t13 ( &optional (regression nil) )
@@ -6492,7 +6530,7 @@ nil
                      (mem-write-word-l dmem n-global-env env)
                      (when (not regression) (format t "env: ~d~%" env))
                      (set-source dmem source-string)))
-               nil regression 200000)
+               nil regression 200000 pty)
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
@@ -6504,7 +6542,9 @@ nil
                #'(lambda (dmem proc)
                      (set-source dmem source-string))
                nil regression 30000000 nil
-               asm-init-lisp)
+               asm-init-lisp
+               t ; guard
+               )
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
@@ -6515,8 +6555,10 @@ nil
     (asm-n-run run-source
                #'(lambda (dmem proc)
                      (set-source dmem source-string))
-               nil regression 20000000 nil
-               asm-init-lisp)
+               nil regression 1000000000 pty
+               asm-init-lisp
+               t ; guard
+               )
     (when (not regression) (print-conses dmem n-cons n-cons-type))
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
@@ -6530,6 +6572,7 @@ nil
                100000000000 ; nr-instr
                pty ; pty
                asm-init-lisp ; lisp-init
+               t ; guard
                )))
 ;;; ------------------------------------------------------------------------
 (deftest run-car-cdr  () (run-test #'test-source 
@@ -6613,6 +6656,10 @@ nil
                                    "1630"
                                    "(logand 16 255)
                                     (logand 254 127 31)"))
+;;; ------------------------------------------------------------------------
+(deftest run2-asr  () (run-test #'test-source-new 
+                                "255"
+                                "(asr8 65535)"))
 ;;; ------------------------------------------------------------------------
 (deftest run-progn  () (run-test #'test-source 
                                      "97"
@@ -6819,7 +6866,11 @@ nil
 
 
 ;;; ------------------------------------------------------------------------
-#|
+;;; misc under development
+(when nil
+(test-run-source
+  "(prthex-16 (asr8 43776))" t)
+
 (test-run-source
 "
 (defun crlf () (putc 10)(putc 13))
@@ -6854,8 +6905,6 @@ nil
   (crlf))
 (pr 0)
 " t)
-(test-run-source
-  "(prthex-16 (asr8 43776))" t)
 
 (defparameter src1
   "(defun printable (c)
@@ -6905,9 +6954,106 @@ nil
 
 (test-run-source
   (concatenate 'string src1 src2 src3
-              "(prline 0)(prline 2112)") t)
+              "(crlf)(prline 4)(prline 2112)(quit)") t)
 
-|#
+(test-run-source
+  "
+  (defun crlf () (putc 10)(putc 13))
+  (defun char-code (c) (+ 0 c))
+  (defun run-till-quit ()
+   (let ((i 0))
+     (tagbody
+       loop
+       (setq i (+ 1 i))
+       (crlf)
+       (prthex-16 i)
+       (if (eql (char-code (getc)) 32)
+         (go loop))))
+   (crlf)
+   (print \"done\")
+   (crlf))
+   (run-till-quit)
+   (quit)
+  " t)
+
+(defparameter src4
+  "
+  (defun erase-char ()
+    (putc 8)
+    (putc 32)
+    (putc 8))
+  (defun delete-last (str)
+    (reverse (cdr (reverse str))))
+  (defun readline ()
+    (let ((str '()))
+      (tagbody
+        next-char
+        (let ((c (getc)))
+          (if (not (eql (char-code c) 13))
+            (if (eql (char-code c) 127)
+              (progn
+                (erase-char)
+                (setq str (delete-last str))
+                (go next-char))
+              (progn
+                (putc c)
+                (setq str (append str (cons c nil)))
+                (go next-char))))))
+      str
+      ))
+  ")
+(test-run-source "(print \"cmd:\")" t)
+(test-run-source "(defun f (p) (setq p 12) p) (print (f 1))(quit)" t)
+(test-run-source "
+  (defun char-code (c) (+ 0 c))
+  (print (char-code (getc)))
+  (quit)" t)
+(defparameter src5
+  "
+  (defun dump (addr)
+    (crlf)(prin1 \"dump:\")(prin1 addr)(crlf)
+     (tagbody
+       loop
+       (prline addr)
+       (setq addr (+ 16 addr))
+       (let ((c (getc)))
+         (if (eql (char-code c) 32)
+           (go loop))))
+     (print \"end\"))
+  
+(defun crlf () (putc 10)(putc 13))
+(defun read-command ()
+  (crlf) 
+  (print \"cmd:\")
+  (let ((cmd (readline)))
+    (crlf) 
+    cmd))
+(let ((end-loop nil))
+  (tagbody
+    cmdloop
+    (let ((c (read-command)))
+      (cond ((equal c \"dump\")
+             (dump 4))
+            ((equal c \"quit\")
+             (setq end-loop t))
+            (t (print \"unknown command\"))))
+    (if (not end-loop)
+      (go cmdloop))))
+(quit)
+")
+(test-run-source
+  (concatenate 'string predef-lisp src1 src2 src3 src4 src5) t)
+
+(test-run-source
+  "(defun cb1 () (putc 123))
+   (defun cb2 () (putc 112))
+   (defun f2 (p) (p))
+   (f2 cb1)
+   (f2 cb2)
+   (quit)" t)
+)
+;;; ------------------------------------------------------------------------
+
 ;;; ------------------------------------------------------------------------
 (defparameter predef-lisp
   "
@@ -6935,29 +7081,6 @@ nil
                        (append (reverse (cdr r)) (cons (car r) nil ))
                        r))
   (defun char-code (c) (+ 0 c))
-  (defun erase-char ()
-    (putc 8)
-    (putc 32)
-    (putc 8))
-  (defun delete-last (str)
-    (reverse (cdr (reverse str))))
-  (defun readline ()
-    (let ((str '()))
-      (tagbody
-        next-char
-        (let ((c (getc)))
-          (if (not (eql (char-code c) 13))
-            (if (eql (char-code c) 127)
-              (progn
-                (erase-char)
-                (setq str (delete-last str))
-                (go next-char))
-              (progn
-                (putc c)
-                (setq str (append str (cons c nil)))
-                (go next-char))))))
-      str
-      ))
   "
   )
 #|
@@ -7115,6 +7238,7 @@ nil
     (run2-equal)
     (run2-phex)
     (run2-logand)
+    (run2-asr)
     ))
 
 ;(run-emul e 200 nil)

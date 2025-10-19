@@ -588,12 +588,24 @@ cd ~/liteRISC # or the path where you ran git clone
 sbcl --load run.lisp
 ```
 
-## Running Lisp
+There is a regression that can be run with:
+sbcl --load regression.lisp
 
-To run the emulator with a emulated terminal you need to configure
-lisp.lisp to use emulated io and setup which pty to use.
+## Running The LiteRISC Lisp Interpreter
 
-The create sockets with `socat` and connect one end to a terminal that supports 
+In REPL mode (slimv/slime) visit lisp.lisp and load the whole buffer.
+Then select which type of I/O to use by running the function:
+```(setup_io nil)```
+or
+```(setup-io "/dev/pts/9")```
+
+The first alternative will use stdout for I/O which will either be into
+the REPL or in the emulator curses window.
+
+The second alternative uses a pty to allow a terminals stdin/stdout to be
+connected to the interpreters I/O. 
+
+The create the sockets/pty use `socat` and connect one end to a terminal that supports 
 connecting to a pty, e.g. `screen`. The other end of the sockets will be connected
 to the emulator.
 
