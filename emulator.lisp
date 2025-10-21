@@ -243,6 +243,7 @@
 ;;; I/O device emulation
 
 (defparameter *uart-fd* nil)
+(defparameter rx-string-stream nil) ;; list of char-code
 
 ;;; uart pty device connection
 (defun uart-tx-data (data)
@@ -252,17 +253,19 @@
 (defun uart-tx-status () 1)
 
 (defun uart-rx-data ()
-  (let ((char (pty-read-char-no-hang *uart-fd*)))
-    (format t "uart rx:~a ~a~%" (char-code char) char)
-        (char-code char)))
+  (cond ((pty-char-available-p *uart-fd*)
+         (let ((char (pty-read-char-no-hang *uart-fd*)))
+           (format t "uart rx:~a ~a~%" (char-code char) char)
+           (char-code char)))
+        (rx-string-stream (let ((head (car rx-string-stream))
+                                (rest (cdr rx-string-stream)))
+                            (setf rx-string-stream rest)
+                            head))))
 
 (defun uart-rx-status ()
-  (cond ((pty-char-available-p *uart-fd*)
-         ;(format t "uart rx s:1~%")
-         1)
-        (t
-         ;(format t "uart rx s:0~%")
-         0)))
+  (cond ((pty-char-available-p *uart-fd*) 1)
+        (rx-string-stream 1)
+        (t 0)))
 
 (defun uart-write-char-cb (addr data)
   ;(format t "in uart-write-char-cb  ~a ~a~%" addr data)
@@ -273,7 +276,6 @@
                   nil)
                  (t t))))
         (t t)))
-
 
 (defun uart-read-char-cb (addr)
   (let ((ret
@@ -503,6 +505,12 @@
           (processor-state-a ps)
           (aref (processor-state-r ps) rx))))
 
+; A = A ^ Rx
+(defun i-xor (ps rx)
+  (setf (processor-state-a ps)
+        (logxor
+          (processor-state-a ps)
+          (aref (processor-state-r ps) rx))))
 ; A = ~A
 (defun i-not (ps)
   (setf (processor-state-a ps)
@@ -1181,6 +1189,8 @@
                              (i-st-b-a-rx p param2 dmem))
                             ((equal opcode2 OPCI2_STB_RX)
                              (i-st-b-rx-a p param2 dmem))
+                            ((equal opcode2 OPCI2_XOR)
+                             (i-xor p param2))
                             ((equal opcode2 OPCI2_LDW_A_OFFS )
                              (i-ld-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 OPCI2_LDW_A)
@@ -1598,6 +1608,7 @@
   (setf *uart-fd* nil))
 
 (defun run-emul-io ( emul pty nr-instr &optional symtab )
+  (format t "run-emul-io pty:~a~%" pty)
   (add-uart emul) ; add callbacks
   (with-open-pty (fd pty)
     (with-raw-pty (fd)

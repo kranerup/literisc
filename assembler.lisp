@@ -97,6 +97,7 @@
            :A+=Rx
            :A&=Rx
            :A\|=Rx
+           :A^=Rx
            :M[Rx]=A
            :M[Rx].b=A
            :M[Rx].w=A
@@ -312,6 +313,10 @@
   (cons (opc OPC_ST_A_OFFS :reg r)
         (asm-immediate offs)))
 (setf (symbol-function 'M[A+n]=Rx) #'st-r->a-rel )
+
+(defun xor-r (r)
+  (opci2 OPCI2_XOR :reg r))
+(setf (symbol-function 'A^=Rx) #'or-r)
 
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)

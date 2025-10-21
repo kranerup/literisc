@@ -347,6 +347,7 @@
 (defparameter rs-last-read 4)
 (defparameter rs-read-ptr 8)
 (defparameter rs-eof 12)
+(defparameter rs-echo 16)
 
 (defparameter asm-init-lisp
   '(
@@ -412,6 +413,7 @@
     (label str-land   )(lstring "logand")
     (label str-asr8   )(lstring "asr8")
     (label str-quit   )(lstring "quit")
+    (label str-echo   )(lstring "echo")
    
     (label str-free)
     (lalloc-bytes 256)
@@ -465,6 +467,7 @@
     (aword (/ (- prim-logand  n-cons) 4)) (aword (- str-land n-string-space) ); logand 
     (aword (/ (- prim-asr8    n-cons) 4)) (aword (- str-asr8 n-string-space) ); asr8 
     (aword (/ (- prim-quit    n-cons) 4)) (aword (- str-quit n-string-space) ); quit 
+    (aword (/ (- prim-echo    n-cons) 4)) (aword (- str-echo n-string-space) ); echo 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -503,6 +506,7 @@
     (label prim-logand ) (adword  l-prim-logand )   ; logand 
     (label prim-asr8   ) (adword  l-prim-asr8 )     ; asr8 
     (label prim-quit   ) (adword  l-prim-quit )     ; quit 
+    (label prim-echo   ) (adword  l-prim-echo )     ; echo 
 
     ;; ---- global env ----------
     (label l-env)
@@ -544,8 +548,9 @@
     (aword 35) (aword (+ 34 (/ (- l-env n-cons) 4)) )  ; peek
     (aword 36) (aword (+ 35 (/ (- l-env n-cons) 4)) )  ; logand
     (aword 37) (aword (+ 36 (/ (- l-env n-cons) 4)) )  ; asr8
-    (label l-env-start)
     (aword 38) (aword (+ 37 (/ (- l-env n-cons) 4)) )  ; quit
+    (label l-env-start)
+    (aword 39) (aword (+ 38 (/ (- l-env n-cons) 4)) )  ; echo
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -595,6 +600,7 @@
     (abyte c-cons-symbol) ; logand
     (abyte c-cons-symbol) ; asr8
     (abyte c-cons-symbol) ; quit
+    (abyte c-cons-symbol) ; echo
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -632,6 +638,7 @@
     (abyte c-cons-primitive) ; logand
     (abyte c-cons-primitive) ; asr8
     (abyte c-cons-primitive) ; quit
+    (abyte c-cons-primitive) ; echo
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -672,6 +679,7 @@
     (abyte c-cons-cons) ; logand
     (abyte c-cons-cons) ; asr8
     (abyte c-cons-cons) ; quit
+    (abyte c-cons-cons) ; echo
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -683,7 +691,7 @@
 
     (lalign-dword)
     (label reader-state)
-    (lalloc-dwords 4)
+    (lalloc-dwords 5)
     (label scan-in-string)
     (lalloc-dwords 1)
   
@@ -756,11 +764,12 @@
   (setq cons-free 0) ; points to entry nr in n-cons table
 
   ;; use-unread, last-read, read-ptr
-  (alloc-dwords reader-state 4)
+  (alloc-dwords reader-state 5)
   (defparameter rs-use-unread 0)
   (defparameter rs-last-read 4)
   (defparameter rs-read-ptr 8)
   (defparameter rs-eof 12)
+  (defparameter rs-echo 16)
   (alloc-dwords scan-in-string 1)
   (alloc-words n-global-env 1)
   
@@ -777,7 +786,9 @@
   (format t "read-ptr ~a~%"
           (lr-emulator::mem-read-dword dmem (+ reader-state rs-read-ptr)))
   (format t "eof ~a~%"
-          (lr-emulator::mem-read-dword dmem (+ reader-state rs-eof))))
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-eof)))
+  (format t "echo ~a~%"
+          (lr-emulator::mem-read-dword dmem (+ reader-state rs-echo))))
 
 (init-lisp)
 
@@ -870,7 +881,15 @@
      ;; after seeing eof we only read from input stream
      (label l-at-eof)
      (jsr l-getchar) ; -> P0
-     (jsr l-putchar) ; echo
+
+     (A=Rx R0)
+     (Rx=M[A+n] rs-echo R1) ; R1 = M[ base+rs-echo ]
+     (A= 0)
+     (A-=Rx R1)
+     (jz l-get-noecho)
+     (jsr l-putchar) ; P0 -> echo
+
+     (label l-get-noecho)
      (A=Rx R0) ; A = base-ptr
      (j l-update-read)
      ))
@@ -4731,6 +4750,31 @@
 
      (pop-a) ;; apply did push SRP
      (j-a)
+
+     ;; --- -----------------------------------
+     ;; toogles if putchar should echo to terminal
+     ;;
+     ;; input: P0=arg-list (but no arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     ;;
+     (label l-prim-echo)
+     ;; do not push SRP, apply already did that
+     (push-r R1)
+     
+     (Rx= reader-state R0)
+     (A=Rx R0) ; A = R0 base-ptr
+     (Rx=M[A+n] rs-echo R1)
+     (A= 1)
+     (A^=Rx R1) ; toggle
+     (Rx=A R1)
+     (A=Rx R0)
+     (M[A+n]=Rx rs-echo R1)
+
+     (pop-r R1)
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
     ))
 
 (defparameter func-peek
@@ -6563,6 +6607,22 @@ nil
     (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
       (when (not regression) (format t "P0:~a~%" reg-p0)))))
 ;;; ------------------------------------------------------------------------
+;;; Read/eval loop until source is empty. The source code in stream
+;;; is then sent on the input device. Doesn't print eval result.
+(defun test-run-stream( mem-source stream-source &optional (regression nil) )
+  (setf lr-emulator::rx-string-stream (map 'list #'char-code stream-source))
+  (destructuring-bind (dmem proc)
+    (asm-n-run run-source
+               #'(lambda (dmem proc)
+                     (set-source dmem mem-source))
+               nil regression 1000000000 pty
+               asm-init-lisp
+               t ; guard
+               )
+    (when (not regression) (print-conses dmem n-cons n-cons-type))
+    (let ((reg-p0 (aref (lr-emulator::processor-state-r proc) P0)))
+      (when (not regression) (format t "P0:~a~%" reg-p0)))))
+;;; ------------------------------------------------------------------------
 (defun run-repl ( source-string &optional (no-curses t) )
   (destructuring-bind (dmem proc)
     (asm-n-run test-repl
@@ -6864,6 +6924,35 @@ nil
   (setq str (append str 109))
   (setq str (append str 110))"))
 
+;;; ------------------------------------------------------------------------
+(defparameter predef-lisp
+  "
+  (defun length (l)
+    (if (eq l nil)
+      0
+      (+ (length (cdr l)) 1)))
+  (defun atom (x) (not (consp x)))
+  (defun equal (x y)
+    (or
+      (eql x y)
+      (and
+        (consp x)
+        (consp y)
+        (equal (car x) (car y))
+        (equal (cdr x) (cdr y)))))
+  (defun append (x y)
+     (if (eq x nil)
+         y
+         (if (atom x)
+             (cons x y)
+             (cons (car x) (append (cdr x) y)) )))
+  ; recursive reverse list
+   (defun reverse (r) (if (consp r)
+                       (append (reverse (cdr r)) (cons (car r) nil ))
+                       r))
+  (defun char-code (c) (+ 0 c))
+  "
+  )
 
 ;;; ------------------------------------------------------------------------
 ;;; misc under development
@@ -7045,44 +7134,26 @@ nil
   (concatenate 'string predef-lisp src1 src2 src3 src4 src5) t)
 
 (test-run-source
-  "(defun cb1 () (putc 123))
+  "(defun cb1 () (putc 111))
    (defun cb2 () (putc 112))
    (defun f2 (p) (p))
    (f2 cb1)
    (f2 cb2)
    (quit)" t)
+
+(test-run-source
+  "(print (getc))(quit)" t)
+(defparameter sss 
+  "(defun cb1 () (putc 111))
+   (defun cb2 () (putc 112))
+   (defun f2 (p) (p))
+   (f2 cb1)
+   (f2 cb2)
+   (quit)")
+(test-run-stream predef-lisp sss t)
 )
 ;;; ------------------------------------------------------------------------
 
-;;; ------------------------------------------------------------------------
-(defparameter predef-lisp
-  "
-  (defun length (l)
-    (if (eq l nil)
-      0
-      (+ (length (cdr l)) 1)))
-  (defun atom (x) (not (consp x)))
-  (defun equal (x y)
-    (or
-      (eql x y)
-      (and
-        (consp x)
-        (consp y)
-        (equal (car x) (car y))
-        (equal (cdr x) (cdr y)))))
-  (defun append (x y)
-     (if (eq x nil)
-         y
-         (if (atom x)
-             (cons x y)
-             (cons (car x) (append (cdr x) y)) )))
-  ; recursive reverse list
-   (defun reverse (r) (if (consp r)
-                       (append (reverse (cdr r)) (cons (car r) nil ))
-                       r))
-  (defun char-code (c) (+ 0 c))
-  "
-  )
 #|
   (defun length (l)
     (if (eq l nil)
