@@ -233,6 +233,7 @@
            :emulated-system-processor
            :processor-add-wr-callback 
            :processor-state-break
+           :set-break
            :mem-read-word :mem-read-dword :mem-read-byte))
 (in-package :lr-emulator)
 
@@ -374,7 +375,10 @@
 (defun processor-add-rd-callback (proc cb-func)
   (setf (processor-state-read-callback proc)
         (add-callback (processor-state-read-callback proc) cb-func)))
- 
+
+(defun set-break (e)
+  (setf (processor-state-break (emulated-system-processor e)) t))
+  
 
 (defun reset-processor (p)
   (setf (processor-state-pc p) 0)
@@ -1343,6 +1347,38 @@
       (format nil "i: ~a" (str:substring 0 20 dis-str))
       1 *instr-row*))
   )
+
+(defun print-processor-state (e)
+  (let ((proc (emulated-system-processor e))
+        (imem (emulated-system-imem e)))
+    (format t "PC  ~8,'0x ~10d~%" 
+            (processor-state-pc proc)
+            (processor-state-pc proc))
+    (format t "A   ~8,'0x ~10d~%" 
+            (processor-state-a proc)
+            (processor-state-a proc))
+    (loop for r from 0 to 15 
+          do (format t "R~2a ~8,'0x ~10d~%"
+                     r
+                     (logand #xffffffff (aref (processor-state-r proc) r))
+                     (logand #xffffffff (aref (processor-state-r proc) r))))
+    (format t "N V C Z8 C8 Z16 C16~%")
+    (format t "~a ~a ~a ~a  ~a  ~a   ~a~%"
+            (processor-state-n proc)
+            (processor-state-v proc)
+            (processor-state-c proc)
+            (processor-state-z8 proc)
+            (processor-state-c8 proc)
+            (processor-state-z16 proc)
+            (processor-state-c16 proc))
+    (let* ((mem-at-pc (coerce (subseq imem
+                                      (processor-state-pc proc)
+                                      (+ (processor-state-pc proc) imem-padding))
+                              'list))
+           (dis-str (str:trim-right
+                      (with-output-to-string (*standard-output*)
+                        (disasm mem-at-pc 1)))))
+      (format t "i: ~a~%" (str:substring 0 20 dis-str)))))
 
 (defun write-disasm (window proc imem symtab)
   (let* ((pc (processor-state-pc proc))

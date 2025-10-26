@@ -414,6 +414,7 @@
     (label str-asr8   )(lstring "asr8")
     (label str-quit   )(lstring "quit")
     (label str-echo   )(lstring "echo")
+    (label str-p-int  )(lstring "parse-integer")
    
     (label str-free)
     (lalloc-bytes 256)
@@ -468,6 +469,7 @@
     (aword (/ (- prim-asr8    n-cons) 4)) (aword (- str-asr8 n-string-space) ); asr8 
     (aword (/ (- prim-quit    n-cons) 4)) (aword (- str-quit n-string-space) ); quit 
     (aword (/ (- prim-echo    n-cons) 4)) (aword (- str-echo n-string-space) ); echo 
+    (aword (/ (- prim-p-int   n-cons) 4)) (aword (- str-p-int n-string-space) ); parse-integer 
  
     ;; --- primitives  ---
     (label prim-quote  ) (adword  l-quote)          ; quote   
@@ -507,6 +509,7 @@
     (label prim-asr8   ) (adword  l-prim-asr8 )     ; asr8 
     (label prim-quit   ) (adword  l-prim-quit )     ; quit 
     (label prim-echo   ) (adword  l-prim-echo )     ; echo 
+    (label prim-p-int  ) (adword  l-prim-parse-int ); parse-integer 
 
     ;; ---- global env ----------
     (label l-env)
@@ -549,8 +552,9 @@
     (aword 36) (aword (+ 35 (/ (- l-env n-cons) 4)) )  ; logand
     (aword 37) (aword (+ 36 (/ (- l-env n-cons) 4)) )  ; asr8
     (aword 38) (aword (+ 37 (/ (- l-env n-cons) 4)) )  ; quit
-    (label l-env-start)
     (aword 39) (aword (+ 38 (/ (- l-env n-cons) 4)) )  ; echo
+    (label l-env-start)
+    (aword 40) (aword (+ 39 (/ (- l-env n-cons) 4)) )  ; parse-integer
    
     (label l-cons-free) ; start of initial cons free space
     (lalloc-dwords nr-cons)
@@ -601,6 +605,7 @@
     (abyte c-cons-symbol) ; asr8
     (abyte c-cons-symbol) ; quit
     (abyte c-cons-symbol) ; echo
+    (abyte c-cons-symbol) ; parse-integer
 
     (abyte c-cons-primitive) ; quote
     (abyte c-cons-primitive) ; not
@@ -639,6 +644,7 @@
     (abyte c-cons-primitive) ; asr8
     (abyte c-cons-primitive) ; quit
     (abyte c-cons-primitive) ; echo
+    (abyte c-cons-primitive) ; parse-integer
 
     (abyte c-cons-cons) ; nil
     (abyte c-cons-cons) ; t
@@ -680,6 +686,7 @@
     (abyte c-cons-cons) ; asr8
     (abyte c-cons-cons) ; quit
     (abyte c-cons-cons) ; echo
+    (abyte c-cons-cons) ; parse-integer
 
     (lalloc-bytes nr-cons)
     ;; ----------------- end of cons type space ------------------------
@@ -691,7 +698,12 @@
 
     (lalign-dword)
     (label reader-state)
-    (lalloc-dwords 5)
+    (adword 0)
+    (adword 0)
+    (adword 0)
+    (adword 0)
+    (adword 0)
+    ;(lalloc-dwords 5)
     (label scan-in-string)
     (lalloc-dwords 1)
   
@@ -721,7 +733,7 @@
 
     (lalign-dword)
     (label n-stack)
-    (lalloc-dwords 1600)
+    (lalloc-dwords 2600)
     (label n-stack-highest)
     (lalloc-dwords 1)
 
@@ -1265,7 +1277,7 @@
 (defvar func-str2num nil)
 (setq func-str2num
   '( ;; --- str2num ---
-     ;; params:  P0 = string-ptr
+     ;; params:  P0 = string-ptr (ptr into string space, not cons list)
      ;; returns: P0 = true if number
      ;;          P1 = number
      (label l-str2num)
@@ -2051,6 +2063,97 @@
      (j-a)
      
      ))
+
+(defparameter func-mul10
+  '(
+     (label l-mul10)
+     ;; input: P0 = number
+     ;; output: P0 = number*10
+     ;; a * 10 = a*(8+2) = a*8 + a*2
+     (push-r R2)
+     (pop-r R2)
+     (A=Rx P0)
+     (A=A<<1)
+     (Rx=A R0); R0 = a*2
+     (A=A<<1)
+     (A=A<<1) ; a*8
+     (A=A+Rx R0) ; a*8+a*2
+     (Rx=A P0)
+     (A=Rx SRP)
+     (j-a)
+     ))
+
+
+(defparameter func-cstr-num
+  '( ;; --- lst2num ---
+     ;; params:  P0 = cons-ptr, list of chars
+     ;; returns: P0 = value
+     (label l-lst2num)
+     (push-srp)
+     (push-r R2)
+     (A=Rx P0)
+     (Rx=A R2) ; R2 = ptr
+     (Rx= 0 R1) ; R1 = result = 0
+
+     (label l-l2n-loop)
+     (A=Rx R2)(Rx=A P0)
+     (jsr l-car)
+     (jsr l-getcons) ; P0 = the char
+
+     ;; we do no error checking
+     (Rx= (char-code #\0 ) R0)
+     (A=Rx P0)
+     (A-=Rx R0) ; C - '0'
+
+     ; digit, then convert to int
+     ; but that is already done: A = C - '0'
+     ; result *= 10 -> res << 3 + res + res
+     (Rx=A R0) ; save int-digit
+     (A=Rx R1) ; result
+     (A=A<<1)
+     (A=A<<1)
+     (A=A<<1) ; res << 3
+     (A+=Rx R1)
+     (A+=Rx R1) ; + res + res
+     (A+=Rx R0) ; + int-digit
+     (Rx=A R1) ; result = result * 10 + int-digit
+
+     ;; next list item
+     (A=Rx R2)(Rx=A P0)
+     (jsr l-cdr)
+     (A= 0)
+     (A-=Rx P0)
+     (jz l-l2n-end) ; nil, end of list
+
+     (A=Rx P0)(Rx=A R2)
+     (j l-l2n-loop)
+
+     (label l-l2n-end)
+     (A=Rx R1)(Rx=A P0) ; P0 = result
+     (jsr l-box-int) ; P0 = boxed int result
+
+     (pop-r R2)
+     (pop-a)
+     (j-a)
+
+     ;; --- -----------------------------------
+     ;; input: P0=arg-list (but only one arg allowed)
+     ;;        P1=env
+     ;; output: P0=result
+     (label l-prim-parse-int)
+     ;; do not push SRP, apply already did that
+
+     ;; get the first argument and evaluate it
+     (jsr l-car) ; P0=car(arg-list)
+     (jsr l-eval) ; (P0,P1)->P0 eval:ed arg
+
+     (jsr l-lst2num) ; P0 -> P0
+
+     (pop-a) ;; apply did push SRP
+     (j-a)
+
+     ))
+
 
 (defvar func-div10 nil)
 (setq func-div10
@@ -5403,7 +5506,7 @@
               func-print-list func-str2num func-div10
               func-print-number func-read func-assoc func-eval
               func-apply func-evlis func-bind func-reduce
-              func-bitwise
+              func-bitwise func-cstr-num
               func-primitives func-primitives2 func-primitives3
               func-primitives4 func-tagbody func-peek ))
   (setf e (make-emulator *hello-world* dmem
@@ -6925,6 +7028,11 @@ nil
   (setq str (append str 110))"))
 
 ;;; ------------------------------------------------------------------------
+(deftest run2-parse-int  () (run-test #'test-source-new 
+  "123"
+  "(parse-integer \"123\")"))
+;;; ------------------------------------------------------------------------
+
 (defparameter predef-lisp
   "
   (defun length (l)
@@ -6958,7 +7066,7 @@ nil
 ;;; misc under development
 (when nil
 (test-run-source
-  "(prthex-16 (asr8 43776))" t)
+  "(prthex-16 (asr8 43776))(quit)" t)
 
 (test-run-source
 "
@@ -6975,9 +7083,10 @@ nil
        (go loop))))
   (crlf))
 (pr16)
+(quit)
 " t)
 (test-run-source
-  "(prthex-32 (peek 256))" t)
+  "(prthex-32 (peek 256))(quit)" t)
 
 (test-run-source
 "(defun crlf () (putc 10)(putc 13))
@@ -6993,6 +7102,7 @@ nil
        (go loop))))
   (crlf))
 (pr 0)
+(quit)
 " t)
 
 (defparameter src1
@@ -7091,7 +7201,7 @@ nil
       str
       ))
   ")
-(test-run-source "(print \"cmd:\")" t)
+(test-run-source "(print \"cmd:\")(quit)" t)
 (test-run-source "(defun f (p) (setq p 12) p) (print (f 1))(quit)" t)
 (test-run-source "
   (defun char-code (c) (+ 0 c))
@@ -7099,6 +7209,7 @@ nil
   (quit)" t)
 (defparameter src5
   "
+(defun crlf () (putc 10)(putc 13))
   (defun dump (addr)
     (crlf)(prin1 \"dump:\")(prin1 addr)(crlf)
      (tagbody
@@ -7109,29 +7220,33 @@ nil
          (if (eql (char-code c) 32)
            (go loop))))
      (print \"end\"))
-  
-(defun crlf () (putc 10)(putc 13))
 (defun read-command ()
   (crlf) 
   (print \"cmd:\")
   (let ((cmd (readline)))
     (crlf) 
     cmd))
-(let ((end-loop nil))
-  (tagbody
-    cmdloop
-    (let ((c (read-command)))
-      (cond ((equal c \"dump\")
-             (dump 4))
-            ((equal c \"quit\")
-             (setq end-loop t))
-            (t (print \"unknown command\"))))
-    (if (not end-loop)
-      (go cmdloop))))
-(quit)
+(defun exe-cmds ()
+  (let ((end-loop nil))
+    (tagbody
+      cmdloop
+      (let ((c (read-command)))
+        (cond ((equal c \"dump\")
+               (dump 4))
+              ((equal c \"quit\")
+               (setq end-loop t))
+              (t (print \"unknown command\"))))
+      (if (not end-loop)
+        (go cmdloop))))
+  (quit))
+(echo)
 ")
 (test-run-source
   (concatenate 'string predef-lisp src1 src2 src3 src4 src5) t)
+
+;; While reading from string-stream the program can not also read from
+;; getc as it will then start reading the source code from the stream.
+(test-run-stream predef-lisp (concatenate 'string src1 src2 src3 src4 src5) t)
 
 (test-run-source
   "(defun cb1 () (putc 111))
@@ -7144,12 +7259,14 @@ nil
 (test-run-source
   "(print (getc))(quit)" t)
 (defparameter sss 
-  "(defun cb1 () (putc 111))
+  "
+   (defun cb1 () (putc 111))
    (defun cb2 () (putc 112))
    (defun f2 (p) (p))
    (f2 cb1)
    (f2 cb2)
-   (quit)")
+   (quit)
+   ")
 (test-run-stream predef-lisp sss t)
 )
 ;;; ------------------------------------------------------------------------
@@ -7310,6 +7427,7 @@ nil
     (run2-phex)
     (run2-logand)
     (run2-asr)
+    (run2-parse-int)
     ))
 
 ;(run-emul e 200 nil)
