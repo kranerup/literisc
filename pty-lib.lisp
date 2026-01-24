@@ -1,4 +1,3 @@
-(ql:quickload :cffi)
 (defpackage :pty
   (:use :cl :cffi)
   (:export #:with-raw-pty

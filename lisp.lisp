@@ -1,5 +1,4 @@
 (asdf:load-system :literisc)
-(ql:quickload :literisc)
 (use-package :lr-asm)
 (use-package :lr-emulator)
 (use-package :unit)
