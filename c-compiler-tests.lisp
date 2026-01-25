@@ -667,6 +667,595 @@ int main() {
     (test-unsigned-comparison)
     (test-mixed-size-arithmetic)))
 
+;;; ===========================================================================
+;;; Phase 8 Tests: Function Parameters
+;;; ===========================================================================
+
+(deftest test-single-param ()
+  "Test: single parameter passing"
+  (check
+    ;; Identity function
+    (= 42 (run-and-get-result "
+int id(int x) { return x; }
+int main() { return id(42); }"))
+    ;; Negate
+    (result= -10 (run-and-get-result "
+int neg(int x) { return -x; }
+int main() { return neg(10); }"))
+    ;; Double
+    (= 20 (run-and-get-result "
+int dbl(int x) { return x + x; }
+int main() { return dbl(10); }"))))
+
+(deftest test-two-params ()
+  "Test: two parameter passing"
+  (check
+    ;; Add
+    (= 30 (run-and-get-result "
+int add(int a, int b) { return a + b; }
+int main() { return add(10, 20); }"))
+    ;; Subtract (order matters)
+    (= 5 (run-and-get-result "
+int sub(int a, int b) { return a - b; }
+int main() { return sub(15, 10); }"))
+    ;; Multiply
+    (= 56 (run-and-get-result "
+int mul(int a, int b) { return a * b; }
+int main() { return mul(7, 8); }"))))
+
+(deftest test-three-params ()
+  "Test: three parameter passing"
+  (check
+    ;; Sum of three
+    (= 60 (run-and-get-result "
+int sum3(int a, int b, int c) { return a + b + c; }
+int main() { return sum3(10, 20, 30); }"))
+    ;; Weighted sum
+    (= 32 (run-and-get-result "
+int weighted(int a, int b, int c) { return a * 1 + b * 2 + c * 3; }
+int main() { return weighted(2, 3, 8); }"))  ; 2 + 6 + 24 = 32
+    ;; Min of three
+    (= 5 (run-and-get-result "
+int min3(int a, int b, int c) {
+  int m;
+  m = a;
+  if (b < m) m = b;
+  if (c < m) m = c;
+  return m;
+}
+int main() { return min3(10, 5, 15); }"))))
+
+(deftest test-four-params ()
+  "Test: four parameters (all in registers)"
+  (check
+    ;; Sum of four
+    (= 100 (run-and-get-result "
+int sum4(int a, int b, int c, int d) { return a + b + c + d; }
+int main() { return sum4(10, 20, 30, 40); }"))
+    ;; Product of differences
+    (= 200 (run-and-get-result "
+int calc(int a, int b, int c, int d) { return (a - b) * (c - d); }
+int main() { return calc(30, 10, 50, 40); }"))  ; (20) * (10) = 200
+    ;; Nested expression with all params
+    (= 24 (run-and-get-result "
+int f(int a, int b, int c, int d) { return a * b + c * d; }
+int main() { return f(2, 3, 6, 3); }"))))  ; 6 + 18 = 24
+
+(deftest test-five-plus-params ()
+  "Test: five or more parameters (stack parameters)"
+  (check
+    ;; Five parameters
+    (= 150 (run-and-get-result "
+int sum5(int a, int b, int c, int d, int e) {
+  return a + b + c + d + e;
+}
+int main() { return sum5(10, 20, 30, 40, 50); }"
+                               :max-cycles 20000))
+    ;; Six parameters
+    (= 210 (run-and-get-result "
+int sum6(int a, int b, int c, int d, int e, int f) {
+  return a + b + c + d + e + f;
+}
+int main() { return sum6(10, 20, 30, 40, 50, 60); }"
+                               :max-cycles 20000))
+    ;; Seven parameters with computation
+    (= 28 (run-and-get-result "
+int compute(int a, int b, int c, int d, int e, int f, int g) {
+  return a + b + c + d + e + f + g;
+}
+int main() { return compute(1, 2, 3, 4, 5, 6, 7); }"
+                              :max-cycles 20000))))
+
+(deftest test-param-modification ()
+  "Test: parameters are pass-by-value (modifications don't affect caller)"
+  (check
+    ;; Modify parameter inside function
+    (= 10 (run-and-get-result "
+int modify(int x) {
+  x = x + 100;
+  return x;
+}
+int main() {
+  int a;
+  a = 10;
+  modify(a);
+  return a;
+}"))
+    ;; Return modified value
+    (= 110 (run-and-get-result "
+int modify(int x) {
+  x = x + 100;
+  return x;
+}
+int main() {
+  int a;
+  a = 10;
+  return modify(a);
+}"))))
+
+(deftest test-nested-calls ()
+  "Test: nested function calls with parameters"
+  (check
+    ;; f(g(x))
+    (= 24 (run-and-get-result "
+int dbl(int x) { return x * 2; }
+int triple(int x) { return x * 3; }
+int main() { return dbl(triple(4)); }"))  ; triple(4)=12, dbl(12)=24
+    ;; f(g(x), h(y))
+    (= 35 (run-and-get-result "
+int add(int a, int b) { return a + b; }
+int dbl(int x) { return x * 2; }
+int triple(int x) { return x * 3; }
+int main() { return add(dbl(10), triple(5)); }"))  ; 20 + 15 = 35
+    ;; Deeply nested
+    (= 48 (run-and-get-result "
+int dbl(int x) { return x * 2; }
+int main() { return dbl(dbl(dbl(6))); }"))))  ; 6->12->24->48
+
+(deftest test-char-params ()
+  "Test: char type parameters"
+  (check
+    ;; Pass char value
+    (= 65 (run-and-get-result "
+int getval(char c) { return c; }
+int main() { return getval(65); }"))
+    ;; Char arithmetic in function
+    (= 10 (run-and-get-result "
+int diff(char a, char b) { return a - b; }
+int main() { return diff(75, 65); }"))))
+
+(deftest test-short-params ()
+  "Test: short type parameters"
+  (check
+    ;; Pass short value
+    (= 1000 (run-and-get-result "
+int getval(short s) { return s; }
+int main() { return getval(1000); }"))
+    ;; Short arithmetic in function
+    (= 30000 (run-and-get-result "
+int add_shorts(short a, short b) { return a + b; }
+int main() { return add_shorts(10000, 20000); }"))))
+
+(deftest test-mixed-type-params ()
+  "Test: mixed type parameters"
+  (check
+    ;; char, short, int mixed
+    (= 111 (run-and-get-result "
+int mixed(char a, short b, int c) { return a + b + c; }
+int main() { return mixed(1, 10, 100); }"))
+    ;; Different order
+    (= 321 (run-and-get-result "
+int mixed(int a, char b, short c) { return a + b + c; }
+int main() { return mixed(300, 1, 20); }"))))
+
+(deftest test-phase8-params ()
+  "Run Phase 8 parameter tests"
+  (combine-results
+    (test-single-param)
+    (test-two-params)
+    (test-three-params)
+    (test-four-params)
+    (test-five-plus-params)
+    (test-param-modification)
+    (test-nested-calls)
+    (test-char-params)
+    (test-short-params)
+    (test-mixed-type-params)))
+
+;;; ===========================================================================
+;;; Phase 9 Tests: Pointers and Pointer Arithmetic
+;;; ===========================================================================
+
+(deftest test-pointer-basics ()
+  "Test: basic pointer operations"
+  (check
+    ;; Address-of and dereference
+    (= 42 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  x = 42;
+  p = &x;
+  return *p;
+}"))
+    ;; Modify through pointer
+    (= 100 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  x = 42;
+  p = &x;
+  *p = 100;
+  return x;
+}"))
+    ;; Pointer reassignment
+    (= 20 (run-and-get-result "
+int main() {
+  int a;
+  int b;
+  int *p;
+  a = 10;
+  b = 20;
+  p = &a;
+  p = &b;
+  return *p;
+}"))))
+
+(deftest test-pointer-to-array ()
+  "Test: pointers to array elements"
+  (check
+    ;; Point to first element
+    (= 100 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = &arr[0];
+  return *p;
+}"))
+    ;; Point to middle element
+    (= 200 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = &arr[1];
+  return *p;
+}"))
+    ;; Array name as pointer
+    (= 100 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  p = arr;
+  return *p;
+}" :max-cycles 20000))))
+
+(deftest test-pointer-arithmetic-int ()
+  "Test: pointer arithmetic with int pointers"
+  (check
+    ;; Pointer + 1
+    (= 200 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = arr;
+  p = p + 1;
+  return *p;
+}" :max-cycles 20000))
+    ;; Pointer + 2
+    (= 300 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = arr;
+  p = p + 2;
+  return *p;
+}" :max-cycles 20000))
+    ;; Pointer - 1
+    (= 200 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = &arr[2];
+  p = p - 1;
+  return *p;
+}" :max-cycles 20000))))
+
+(deftest test-pointer-arithmetic-char ()
+  "Test: pointer arithmetic with char pointers (1-byte stride)"
+  (check
+    ;; Char pointer + 1
+    (= 2 (run-and-get-result "
+int main() {
+  char arr[4];
+  char *p;
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  p = arr;
+  p = p + 1;
+  return *p;
+}" :max-cycles 20000))
+    ;; Char pointer + 3
+    (= 4 (run-and-get-result "
+int main() {
+  char arr[4];
+  char *p;
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  p = arr;
+  p = p + 3;
+  return *p;
+}" :max-cycles 20000))))
+
+(deftest test-pointer-arithmetic-short ()
+  "Test: pointer arithmetic with short pointers (2-byte stride)"
+  (check
+    ;; Short pointer + 1
+    (= 2000 (run-and-get-result "
+int main() {
+  short arr[4];
+  short *p;
+  arr[0] = 1000;
+  arr[1] = 2000;
+  arr[2] = 3000;
+  arr[3] = 4000;
+  p = arr;
+  p = p + 1;
+  return *p;
+}" :max-cycles 20000))
+    ;; Short pointer + 2
+    (= 3000 (run-and-get-result "
+int main() {
+  short arr[4];
+  short *p;
+  arr[0] = 1000;
+  arr[1] = 2000;
+  arr[2] = 3000;
+  arr[3] = 4000;
+  p = arr;
+  p = p + 2;
+  return *p;
+}" :max-cycles 20000))))
+
+(deftest test-pointer-increment ()
+  "Test: pointer increment/decrement in loops"
+  (check
+    ;; Sum array using pointer increment
+    (= 15 (run-and-get-result "
+int main() {
+  int arr[5];
+  int *p;
+  int sum;
+  int i;
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  arr[4] = 5;
+  p = arr;
+  sum = 0;
+  for (i = 0; i < 5; i = i + 1) {
+    sum = sum + *p;
+    p = p + 1;
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-pointer-comparison ()
+  "Test: pointer comparison operations"
+  (check
+    ;; Pointer equality
+    (= 1 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  int *q;
+  p = &x;
+  q = &x;
+  return p == q;
+}"))
+    ;; Pointer inequality
+    (= 1 (run-and-get-result "
+int main() {
+  int a;
+  int b;
+  int *p;
+  int *q;
+  p = &a;
+  q = &b;
+  return p != q;
+}"))))
+
+(deftest test-pointer-as-param ()
+  "Test: pointer as function parameter"
+  (check
+    ;; Read through pointer param
+    (= 42 (run-and-get-result "
+int read_ptr(int *p) { return *p; }
+int main() {
+  int x;
+  x = 42;
+  return read_ptr(&x);
+}"))
+    ;; Write through pointer param (out parameter)
+    (= 100 (run-and-get-result "
+void set_val(int *p, int v) { *p = v; }
+int main() {
+  int x;
+  x = 0;
+  set_val(&x, 100);
+  return x;
+}" :max-cycles 20000))
+    ;; Swap using pointers
+    (= 20 (run-and-get-result "
+void swap(int *a, int *b) {
+  int t;
+  t = *a;
+  *a = *b;
+  *b = t;
+}
+int main() {
+  int x;
+  int y;
+  x = 10;
+  y = 20;
+  swap(&x, &y);
+  return x;
+}" :max-cycles 20000))))
+
+(deftest test-array-as-param ()
+  "Test: array as function parameter (decays to pointer)"
+  (check
+    ;; Sum array elements
+    (= 15 (run-and-get-result "
+int sum_arr(int *arr, int n) {
+  int i;
+  int s;
+  s = 0;
+  for (i = 0; i < n; i = i + 1) {
+    s = s + arr[i];
+  }
+  return s;
+}
+int main() {
+  int arr[5];
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  arr[4] = 5;
+  return sum_arr(arr, 5);
+}" :max-cycles 50000))
+    ;; Modify array through pointer param
+    (= 100 (run-and-get-result "
+void set_first(int *arr, int val) {
+  arr[0] = val;
+}
+int main() {
+  int arr[3];
+  arr[0] = 0;
+  set_first(arr, 100);
+  return arr[0];
+}" :max-cycles 20000))))
+
+(deftest test-pointer-subscript ()
+  "Test: pointer used with subscript notation"
+  (check
+    ;; p[0] same as *p
+    (= 10 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  p = arr;
+  return p[0];
+}" :max-cycles 20000))
+    ;; p[1] same as *(p+1)
+    (= 20 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  p = arr;
+  return p[1];
+}" :max-cycles 20000))
+    ;; p[2]
+    (= 30 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  p = arr;
+  return p[2];
+}" :max-cycles 20000))))
+
+(deftest test-double-pointer ()
+  "Test: pointer to pointer"
+  (check
+    ;; Basic double pointer
+    (= 42 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  int **pp;
+  x = 42;
+  p = &x;
+  pp = &p;
+  return **pp;
+}"))
+    ;; Modify through double pointer
+    (= 100 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  int **pp;
+  x = 0;
+  p = &x;
+  pp = &p;
+  **pp = 100;
+  return x;
+}"))))
+
+(deftest test-pointer-null ()
+  "Test: null pointer and zero comparison"
+  (check
+    ;; Pointer initialized to zero
+    (= 1 (run-and-get-result "
+int main() {
+  int *p;
+  p = 0;
+  return p == 0;
+}"))
+    ;; Non-null pointer
+    (= 0 (run-and-get-result "
+int main() {
+  int x;
+  int *p;
+  p = &x;
+  return p == 0;
+}"))))
+
+(deftest test-phase9-pointers ()
+  "Run Phase 9 pointer tests"
+  (combine-results
+    (test-pointer-basics)
+    (test-pointer-to-array)
+    (test-pointer-arithmetic-int)
+    (test-pointer-arithmetic-char)
+    (test-pointer-arithmetic-short)
+    (test-pointer-increment)
+    (test-pointer-comparison)
+    (test-pointer-as-param)
+    (test-array-as-param)
+    (test-pointer-subscript)
+    (test-double-pointer)
+    (test-pointer-null)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -676,4 +1265,6 @@ int main() {
     (test-phase4)
     (test-phase5)
     (test-phase6)
-    (test-phase7)))
+    (test-phase7)
+    (test-phase8-params)
+    (test-phase9-pointers)))

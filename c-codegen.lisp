@@ -235,6 +235,9 @@
          (*frame-size* (or (getf func-data :frame-size) 0))
          (*current-param-count* (or (getf func-data :param-count) 0)))
 
+    ;; Set current function for symbol lookup
+    (setf (compiler-state-current-function *state*) name)
+
     (init-registers)
 
     ;; Function label
@@ -645,31 +648,94 @@
       ((string= op "||") (generate-logical-or left right))
       (t (generate-arithmetic-op op left right)))))
 
+(defun get-expression-type (node)
+  "Get the type of an expression (for pointer arithmetic)"
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (var-ref
+       (let ((sym (lookup-symbol (ast-node-value node))))
+         (when sym (sym-entry-type sym))))
+      (literal nil)  ; integer literal, no pointer type
+      (otherwise (ast-node-result-type node)))))
+
+(defun pointer-element-size (type)
+  "Get the element size for pointer arithmetic (returns nil for non-pointers)"
+  (when (and type
+             (type-desc-p type)
+             (> (type-desc-pointer-level type) 0))
+    ;; Use the size slot for element size, default to 4 for int pointers
+    (or (type-desc-size type) 4)))
+
+(defun emit-scale-for-pointer (elem-size)
+  "Scale value in A by element size for pointer arithmetic"
+  (case elem-size
+    (1 nil)                     ; no scaling needed for char*
+    (2 (emit '(A=A<<1)))        ; * 2 for short*
+    (4 (emit '(A=A<<1))         ; * 4 for int*
+       (emit '(A=A<<1)))
+    (otherwise
+     ;; General case: use software multiply
+     (let ((size-reg (alloc-temp-reg)))
+       (emit `(Rx= ,elem-size ,size-reg))
+       (generate-multiply size-reg)
+       (free-temp-reg size-reg)))))
+
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
-  ;; Generate left operand
-  (generate-expression left)
+  ;; Check for pointer arithmetic
+  (let* ((left-type (get-expression-type left))
+         (right-type (get-expression-type right))
+         (left-elem-size (pointer-element-size left-type))
+         (right-elem-size (pointer-element-size right-type)))
 
-  ;; Save left result
-  (let ((left-reg (alloc-temp-reg)))
-    (emit `(Rx=A ,left-reg))
+    ;; Generate left operand
+    (generate-expression left)
 
-    ;; Generate right operand
-    (generate-expression right)
+    ;; Save left result
+    (let ((left-reg (alloc-temp-reg)))
+      (emit `(Rx=A ,left-reg))
 
-    ;; Right is now in A, left is in left-reg
-    ;; Perform operation
-    (cond
-      ((string= op "+")
-       (emit `(A+=Rx ,left-reg)))
+      ;; Generate right operand
+      (generate-expression right)
 
-      ((string= op "-")
-       ;; A = left - right: save right, load left, subtract right
-       (let ((right-reg (alloc-temp-reg)))
-         (emit `(Rx=A ,right-reg))    ; save right
-         (emit `(A=Rx ,left-reg))     ; A = left
-         (emit `(A-=Rx ,right-reg))   ; A = left - right
-         (free-temp-reg right-reg)))
+      ;; For pointer + int or pointer - int, scale the integer
+      (when (and (or (string= op "+") (string= op "-"))
+                 left-elem-size
+                 (not right-elem-size))
+        ;; Left is pointer, right is integer - scale right by element size
+        (emit-scale-for-pointer left-elem-size))
+
+      ;; For int + pointer (less common), scale the integer
+      (when (and (string= op "+")
+                 right-elem-size
+                 (not left-elem-size))
+        ;; Right is pointer, left is integer - need to swap and scale
+        ;; left-reg has the integer, A has the pointer
+        ;; Save pointer, scale integer, add
+        (let ((ptr-reg (alloc-temp-reg)))
+          (emit `(Rx=A ,ptr-reg))      ; save pointer
+          (emit `(A=Rx ,left-reg))     ; A = integer
+          (emit-scale-for-pointer right-elem-size)
+          (emit `(A+=Rx ,ptr-reg))     ; add pointer
+          (emit `(Rx=A ,left-reg))     ; put result back in convention
+          (emit `(A=Rx ,left-reg))
+          (free-temp-reg ptr-reg)
+          (free-temp-reg left-reg)
+          (return-from generate-arithmetic-op)))
+
+      ;; Right is now in A, left is in left-reg
+      ;; Perform operation
+      (cond
+        ((string= op "+")
+         (emit `(A+=Rx ,left-reg)))
+
+        ((string= op "-")
+         ;; A = left - right: save right, load left, subtract right
+         (let ((right-reg (alloc-temp-reg)))
+           (emit `(Rx=A ,right-reg))    ; save right
+           (emit `(A=Rx ,left-reg))     ; A = left
+           (emit `(A-=Rx ,right-reg))   ; A = left - right
+           (free-temp-reg right-reg)))
 
       ((string= op "*")
        ;; Software multiply - result in A
@@ -744,7 +810,7 @@
 
       (t (compiler-warning "Unknown binary operator: ~a" op)))
 
-    (free-temp-reg left-reg)))
+    (free-temp-reg left-reg))))
 
 (defun generate-comparison (left-reg jump-type)
   "Generate code for comparison, result 0 or 1 in A"
@@ -858,12 +924,27 @@
        (emit '(not-a)))
 
       ((string= op "*")
-       ;; Dereference
+       ;; Dereference - use sized load based on pointer element type
        (generate-expression operand)
-       (let ((temp (alloc-temp-reg)))
-         (emit `(Rx=M[A] ,temp))
-         (emit `(A=Rx ,temp))
-         (free-temp-reg temp)))
+       (let ((temp (alloc-temp-reg))
+             (ptr-type (get-expression-type operand)))
+         ;; Determine element type from pointer
+         (if (and ptr-type (> (type-desc-pointer-level ptr-type) 0))
+             (let ((elem-type (make-type-desc
+                               :base (type-desc-base ptr-type)
+                               :pointer-level (1- (type-desc-pointer-level ptr-type))
+                               :size (type-desc-size ptr-type)
+                               :unsigned-p (type-desc-unsigned-p ptr-type))))
+               (emit-load-sized elem-type temp)
+               (emit `(A=Rx ,temp))
+               (free-temp-reg temp)
+               ;; Sign extend if needed
+               (emit-promote-to-int elem-type))
+             ;; Fallback to word load
+             (progn
+               (emit `(Rx=M[A] ,temp))
+               (emit `(A=Rx ,temp))
+               (free-temp-reg temp)))))
 
       ((string= op "&")
        ;; Address-of
@@ -919,14 +1000,18 @@
          (compiler-error "Undefined variable: ~a" name))
        (case (sym-entry-storage sym)
          (:local
-          (let ((offset (+ (sym-entry-offset sym) *frame-size*)))
+          (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+                (temp (alloc-temp-reg)))
             (emit `(A=Rx SP))
-            (emit `(Rx= ,offset R0))
-            (emit '(A+=Rx R0))))
+            (emit `(Rx= ,offset ,temp))
+            (emit `(A+=Rx ,temp))
+            (free-temp-reg temp)))
          (:global
-          (let ((label (intern (string-upcase name) :c-compiler)))
-            (emit `(Rx= ,label R0))
-            (emit '(A=Rx R0))))
+          (let ((label (intern (string-upcase name) :c-compiler))
+                (temp (alloc-temp-reg)))
+            (emit `(Rx= ,label ,temp))
+            (emit `(A=Rx ,temp))
+            (free-temp-reg temp)))
          (:parameter
           (compiler-error "Cannot take address of register parameter")))))
     (subscript

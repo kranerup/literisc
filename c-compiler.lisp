@@ -52,7 +52,8 @@
   type      ; type-desc
   storage   ; :parameter, :local, :global
   offset    ; stack offset for locals/params, or address for globals
-  scope)    ; scope level (0 = global)
+  scope     ; scope level (0 = global)
+  function) ; function name (nil for globals)
 
 ;;; Compiler state
 (defstruct compiler-state
@@ -91,35 +92,48 @@
 ;;; Symbol Table Management
 ;;; ===========================================================================
 
-(defun make-symbol-key (name scope)
+(defun make-symbol-key (name scope function)
   "Create a unique key for the symbol table"
-  (format nil "~a@~a" name scope))
+  (format nil "~a@~a@~a" name scope (or function "global")))
 
 (defun add-symbol (name type storage &optional offset)
   "Add a symbol to the symbol table"
-  (let ((key (make-symbol-key name (compiler-state-scope-level *state*)))
-        (entry (make-sym-entry :name name
-                               :type type
-                               :storage storage
-                               :offset offset
-                               :scope (compiler-state-scope-level *state*))))
+  (let* ((func (compiler-state-current-function *state*))
+         (key (make-symbol-key name (compiler-state-scope-level *state*) func))
+         (entry (make-sym-entry :name name
+                                :type type
+                                :storage storage
+                                :offset offset
+                                :scope (compiler-state-scope-level *state*)
+                                :function func)))
     (setf (gethash key (compiler-state-symbols *state*)) entry)
     entry))
 
 (defun lookup-symbol (name)
-  "Look up a symbol, searching all scopes (needed because code gen runs after parsing)"
-  ;; Search all entries in the hash table for this name
-  ;; Return the one with the highest scope level (innermost)
-  (let ((best-entry nil)
-        (best-scope -1))
+  "Look up a symbol, preferring symbols from current function, then globals"
+  ;; First try to find in current function
+  (let ((current-func (compiler-state-current-function *state*))
+        (best-entry nil)
+        (best-scope -1)
+        (best-global nil)
+        (best-global-scope -1))
     (maphash (lambda (key entry)
                (declare (ignore key))
-               (when (and (string= (sym-entry-name entry) name)
-                          (> (sym-entry-scope entry) best-scope))
-                 (setf best-entry entry)
-                 (setf best-scope (sym-entry-scope entry))))
+               (when (string= (sym-entry-name entry) name)
+                 (cond
+                   ;; Symbol from current function - prefer higher scope
+                   ((equal (sym-entry-function entry) current-func)
+                    (when (> (sym-entry-scope entry) best-scope)
+                      (setf best-entry entry)
+                      (setf best-scope (sym-entry-scope entry))))
+                   ;; Global symbol (no function)
+                   ((null (sym-entry-function entry))
+                    (when (> (sym-entry-scope entry) best-global-scope)
+                      (setf best-global entry)
+                      (setf best-global-scope (sym-entry-scope entry)))))))
              (compiler-state-symbols *state*))
-    best-entry))
+    ;; Return current function's symbol if found, otherwise global
+    (or best-entry best-global)))
 
 (defun enter-scope ()
   "Enter a new scope level"
