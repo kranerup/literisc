@@ -14,7 +14,12 @@
            ;; Re-export key types/functions
            :tokenize
            :parse-program
-           :generate-program))
+           :generate-program
+           ;; Pretty printing and test output
+           :pretty-print-asm
+           :pretty-print-asm-to-string
+           :save-compilation-output
+           :compile-and-save))
 
 (in-package :c-compiler)
 
@@ -70,10 +75,16 @@
   (code nil)             ; generated assembly code (list of s-expressions)
   (data nil)             ; data section for strings/globals
   (errors nil)           ; compilation errors
-  (warnings nil))        ; compilation warnings
+  (warnings nil)         ; compilation warnings
+  (source-lines nil)     ; original source lines for annotations
+  (source-annotations t)) ; enable source annotations in output
 
 ;;; Global compiler state
 (defvar *state* nil)
+
+;;; Current source context for annotations
+(defvar *current-source-line* nil)    ; line number in source
+(defvar *current-source-context* nil) ; description of what we're generating
 
 ;;; ===========================================================================
 ;;; Error Handling
@@ -158,6 +169,28 @@
             instruction)
         (compiler-state-code *state*)))
 
+(defun emit-comment (text)
+  "Emit a comment/annotation in the assembly"
+  (when (and *state* (compiler-state-source-annotations *state*))
+    (push (list :comment text) (compiler-state-code *state*))))
+
+(defun emit-source-line (line-num)
+  "Emit a source line annotation"
+  (when (and *state*
+             (compiler-state-source-annotations *state*)
+             (compiler-state-source-lines *state*)
+             line-num
+             (> line-num 0)
+             (<= line-num (length (compiler-state-source-lines *state*))))
+    (let ((line (nth (1- line-num) (compiler-state-source-lines *state*))))
+      (emit-comment (format nil "~a: ~a" line-num (string-trim '(#\Space #\Tab) line))))))
+
+(defmacro with-source-context ((line-num context) &body body)
+  "Execute body with source context set for annotations"
+  `(let ((*current-source-line* ,line-num)
+         (*current-source-context* ,context))
+     ,@body))
+
 (defun emit-label (name)
   "Emit a label"
   (emit (list 'label name)))
@@ -237,9 +270,29 @@
 ;;; Main Entry Points
 ;;; ===========================================================================
 
-(defun compile-c (source &key (verbose nil))
+(defun split-source-lines (source)
+  "Split source into a list of lines"
+  (let ((lines nil)
+        (start 0))
+    (loop for i from 0 below (length source)
+          when (char= (char source i) #\Newline)
+          do (progn
+               (push (subseq source start i) lines)
+               (setf start (1+ i))))
+    ;; Handle last line without newline
+    (when (< start (length source))
+      (push (subseq source start) lines))
+    (nreverse lines)))
+
+(defun compile-c (source &key (verbose nil) (annotate t))
   "Compile C source code to assembly S-expressions"
-  (let ((*state* (make-compiler-state)))
+  (let ((*state* (make-compiler-state))
+        (*current-source-line* nil)
+        (*current-source-context* nil))
+    ;; Store source lines for annotations
+    (setf (compiler-state-source-lines *state*) (split-source-lines source))
+    (setf (compiler-state-source-annotations *state*) annotate)
+
     ;; Lexical analysis
     (setf (compiler-state-tokens *state*) (tokenize source))
     (when verbose
@@ -274,10 +327,16 @@
       (read-sequence source stream)
       (compile-c source :verbose verbose))))
 
+(defun strip-asm-comments (asm)
+  "Remove comment annotations from assembly code for the assembler"
+  (remove-if (lambda (instr)
+               (and (listp instr) (eq (first instr) :comment)))
+             asm))
+
 (defun compile-c-to-asm (source &key (verbose nil))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose)))
-    (assemble asm verbose)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil)))
+    (assemble (strip-asm-comments asm) verbose)))
 
 (defun run-c-program (source &key (verbose nil) (max-cycles 10000))
   "Compile, assemble, and run a C program, returning the result"
@@ -290,6 +349,78 @@
     (aref (lr-emulator::processor-state-r
            (lr-emulator:emulated-system-processor emul))
           10)))
+
+;;; ===========================================================================
+;;; Pretty Print and Test Output
+;;; ===========================================================================
+
+(defun format-asm-instruction (instr)
+  "Format an assembly instruction for pretty printing"
+  (cond
+    ;; Comment/annotation (keyword :comment)
+    ((and (listp instr) (eq (first instr) :comment))
+     (format nil ";; ~a" (second instr)))
+    ;; Label
+    ((and (listp instr) (eq (first instr) 'label))
+     (format nil "~a:" (second instr)))
+    ;; Regular instruction
+    ((listp instr)
+     (format nil "    ~{~a~^ ~}" instr))
+    ;; Symbol instruction
+    (t (format nil "    ~a" instr))))
+
+(defun pretty-print-asm (code &optional (stream t))
+  "Pretty print assembly code with proper indentation"
+  (dolist (instr code)
+    (format stream "~a~%" (format-asm-instruction instr))))
+
+(defun pretty-print-asm-to-string (code)
+  "Pretty print assembly code to a string"
+  (with-output-to-string (s)
+    (pretty-print-asm code s)))
+
+(defun save-compilation-output (source filename &key (run-result nil run-result-p))
+  "Save C source and annotated assembly to a file"
+  (let ((asm (compile-c source :annotate t)))
+    (with-open-file (out filename :direction :output :if-exists :supersede)
+      ;; Write header
+      (format out ";;; =============================================================~%")
+      (format out ";;; C Compiler Output~%")
+      (format out ";;; =============================================================~%~%")
+
+      ;; Write C source
+      (format out ";;; -------------------------------------------------------------~%")
+      (format out ";;; C Source Code~%")
+      (format out ";;; -------------------------------------------------------------~%")
+      (let ((line-num 0))
+        (dolist (line (split-source-lines source))
+          (incf line-num)
+          (format out ";;; ~3d: ~a~%" line-num line)))
+      (format out "~%")
+
+      ;; Write run result if provided
+      (when run-result-p
+        (format out ";;; -------------------------------------------------------------~%")
+        (format out ";;; Execution Result: ~a~%" run-result)
+        (format out ";;; -------------------------------------------------------------~%~%"))
+
+      ;; Write annotated assembly
+      (format out ";;; -------------------------------------------------------------~%")
+      (format out ";;; Generated Assembly (Annotated)~%")
+      (format out ";;; -------------------------------------------------------------~%~%")
+      (pretty-print-asm asm out))
+
+    filename))
+
+(defun compile-and-save (source filename &key (run t) (max-cycles 10000))
+  "Compile C source, optionally run it, and save output to file"
+  (if run
+      (let ((result (run-c-program source :max-cycles max-cycles)))
+        (save-compilation-output source filename :run-result result)
+        result)
+      (progn
+        (save-compilation-output source filename)
+        nil)))
 
 ;;; ===========================================================================
 ;;; Load component files

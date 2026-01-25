@@ -250,6 +250,12 @@
 
     (init-registers)
 
+    ;; Function header annotation
+    (emit-comment (format nil "======== function ~a ========" name))
+    (emit-comment (format nil "frame-size: ~a, params: ~a, local-regs: ~a, leaf: ~a"
+                          *frame-size* *current-param-count* *local-reg-count*
+                          (if *is-leaf-function* "yes" "no")))
+
     ;; Function label
     (emit `(label ,func-label))
 
@@ -349,9 +355,25 @@
 ;;; Statement Generation
 ;;; ===========================================================================
 
+(defun get-source-line (node)
+  "Get the source line number from an AST node"
+  (when (and node (ast-node-source-loc node))
+    (car (ast-node-source-loc node))))
+
+(defun emit-source-annotation (node &optional description)
+  "Emit a source annotation comment for an AST node"
+  (let ((line-num (get-source-line node)))
+    (when line-num
+      (emit-source-line line-num))
+    (when description
+      (emit-comment description))))
+
 (defun generate-statement (node)
   "Generate code for a statement"
   (when node
+    ;; Emit source annotation for non-block statements
+    (unless (eq (ast-node-type node) 'block)
+      (emit-source-annotation node))
     (case (ast-node-type node)
       (block (generate-block node))
       (if (generate-if node))
