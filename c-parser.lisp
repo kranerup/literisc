@@ -89,6 +89,39 @@
       (print-ast child (+ indent 2)))))
 
 ;;; ===========================================================================
+;;; Address-Taken Analysis
+;;; ===========================================================================
+
+(defun is-operand-token (tok)
+  "Check if token is an operand (can be followed by binary operator)"
+  (when tok
+    (or (eq (token-type tok) 'identifier)
+        (eq (token-type tok) 'number)
+        (and (eq (token-type tok) 'punctuation)
+             (string= (token-value tok) ")")))))
+
+(defun scan-address-taken-variables ()
+  "Pre-scan tokens to find variables that have their address taken with &.
+   This is needed to prevent register allocation for such variables."
+  (let ((tokens (compiler-state-tokens *state*))
+        (addr-taken (compiler-state-address-taken *state*)))
+    (loop for i from 0 below (1- (length tokens))
+          for tok = (nth i tokens)
+          for next-tok = (nth (1+ i) tokens)
+          for prev-tok = (when (> i 0) (nth (1- i) tokens))
+          when (and (eq (token-type tok) 'operator)
+                    (string= (token-value tok) "&")
+                    (eq (token-type next-tok) 'identifier)
+                    ;; Not after an operand means it's unary & (address-of)
+                    ;; After an operand, it's binary & (bitwise AND)
+                    (not (is-operand-token prev-tok)))
+          do (setf (gethash (token-value next-tok) addr-taken) t))))
+
+(defun is-address-taken (name)
+  "Check if a variable has its address taken"
+  (gethash name (compiler-state-address-taken *state*)))
+
+;;; ===========================================================================
 ;;; Type Parsing
 ;;; ===========================================================================
 
@@ -533,29 +566,36 @@
           (when (match-token 'operator "=")
             (setf init (parse-assignment-expression)))
 
-          ;; Calculate stack offset with alignment
-          (let* ((size (if array-size
-                           (* array-size (type-size var-type))
-                           (type-size var-type)))
-                 ;; Align offset based on variable size (4-byte alignment for int/pointers)
-                 (elem-size (type-size var-type))
-                 (alignment (if (>= elem-size 4) 4
-                               (if (>= elem-size 2) 2 1)))
-                 (current-offset (compiler-state-local-offset *state*))
-                 ;; Round down to align (negative stack growth)
-                 (aligned-offset (- current-offset
-                                    (mod current-offset alignment)))
-                 (offset (- aligned-offset size)))
-            (setf (compiler-state-local-offset *state*) offset)
+          ;; Decide between register and stack allocation
+          ;; Use register for scalar (non-array) variables when registers available
+          ;; and the variable doesn't have its address taken
+          (let ((local-reg-count (compiler-state-local-reg-count *state*)))
+            (if (and (not array-size)               ; Not an array
+                     (< local-reg-count 4)          ; Have free local regs (R6-R9)
+                     (not (is-address-taken name))) ; Address not taken
+                ;; Register allocation
+                (progn
+                  (add-symbol name var-type :register local-reg-count)
+                  (incf (compiler-state-local-reg-count *state*)))
+                ;; Stack allocation (arrays or when out of registers)
+                (let* ((size (if array-size
+                                 (* array-size (type-size var-type))
+                                 (type-size var-type)))
+                       (elem-size (type-size var-type))
+                       (alignment (if (>= elem-size 4) 4
+                                     (if (>= elem-size 2) 2 1)))
+                       (current-offset (compiler-state-local-offset *state*))
+                       (aligned-offset (- current-offset
+                                          (mod current-offset alignment)))
+                       (offset (- aligned-offset size)))
+                  (setf (compiler-state-local-offset *state*) offset)
+                  (add-symbol name var-type :local offset))))
 
-            ;; Add to symbol table
-            (add-symbol name var-type :local offset)
-
-            (push (make-node 'var-decl
-                             :value name
-                             :children (when init (list init))
-                             :result-type var-type)
-                  decls))))
+          (push (make-node 'var-decl
+                           :value name
+                           :children (when init (list init))
+                           :result-type var-type)
+                decls)))
 
       ;; Check for more declarators
       (unless (match-token 'punctuation ",")
@@ -573,6 +613,7 @@
   (setf (compiler-state-current-function *state*) name)
   (setf (compiler-state-local-offset *state*) 0)
   (setf (compiler-state-param-count *state*) 0)
+  (setf (compiler-state-local-reg-count *state*) 0)  ; Reset local register count
 
   (expect-token 'punctuation "(")
   (enter-scope)
@@ -610,15 +651,17 @@
       (exit-scope)
 
       ;; Calculate frame size from locals allocated during parsing
-      (let ((frame-size (- (compiler-state-local-offset *state*))))
-        ;; Create function node
+      (let ((frame-size (- (compiler-state-local-offset *state*)))
+            (local-reg-count (compiler-state-local-reg-count *state*)))
+        ;; Create function node with local register info
         (make-node 'function
                    :value name
                    :children (list (make-node 'params :children (reverse params))
                                    body)
                    :result-type ret-type
                    :data (list :frame-size frame-size
-                               :param-count param-idx))))))
+                               :param-count param-idx
+                               :local-reg-count local-reg-count))))))
 
 (defun parse-global-declaration (var-type name)
   "Parse a global variable declaration"

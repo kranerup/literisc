@@ -10,25 +10,30 @@
 ;;; ===========================================================================
 
 ;;; Register usage:
-;;; R0-R9  : Temporaries / scratch
+;;; R0-R5  : Temporaries / scratch (for expression evaluation)
+;;; R6-R9  : Local variable registers (when register-allocated)
 ;;; P0-P3  : Parameters (R10-R13), P0 is also return value
 ;;; SRP    : Subroutine return pointer (R14)
 ;;; SP     : Stack pointer (R15)
 ;;; A      : Accumulator - primary computation register
 
-(defparameter *temp-regs* '(R0 R1 R2 R3 R4 R5 R6 R7 R8 R9))
+(defparameter *temp-regs* '(R0 R1 R2 R3 R4 R5))  ; 6 regs for temps
+(defparameter *local-regs* '(R6 R7 R8 R9))        ; 4 regs for locals
 (defparameter *param-regs* '(P0 P1 P2 P3))
 
 ;;; Track which temp registers are in use
 (defvar *reg-in-use* nil)
 
+;;; Track local register usage for current function
+(defvar *local-reg-count* 0)  ; how many of R6-R9 are used
+
 (defun init-registers ()
   "Initialize register allocation state"
-  (setf *reg-in-use* (make-array 10 :initial-element nil)))
+  (setf *reg-in-use* (make-array 6 :initial-element nil)))  ; Only 6 temp regs now
 
 (defun alloc-temp-reg ()
   "Allocate a temporary register"
-  (loop for i from 0 below 10
+  (loop for i from 0 below 6
         when (not (aref *reg-in-use* i))
         do (progn
              (setf (aref *reg-in-use* i) t)
@@ -43,9 +48,13 @@
 
 (defun save-temp-regs ()
   "Return list of temp registers currently in use"
-  (loop for i from 0 below 10
+  (loop for i from 0 below 6
         when (aref *reg-in-use* i)
         collect (nth i *temp-regs*)))
+
+(defun get-local-reg (index)
+  "Get local register by index (0-3 -> R6-R9)"
+  (nth index *local-regs*))
 
 ;;; ===========================================================================
 ;;; Code Generation Context
@@ -233,7 +242,8 @@
          (*function-end-label* (gen-label (format nil "~a_END" (string-upcase name))))
          (*is-leaf-function* (is-leaf-function body))
          (*frame-size* (or (getf func-data :frame-size) 0))
-         (*current-param-count* (or (getf func-data :param-count) 0)))
+         (*current-param-count* (or (getf func-data :param-count) 0))
+         (*local-reg-count* (or (getf func-data :local-reg-count) 0)))
 
     ;; Set current function for symbol lookup
     (setf (compiler-state-current-function *state*) name)
@@ -270,12 +280,15 @@
     (unless *is-leaf-function*
       (emit '(push-srp)))
 
-    ;; For non-leaf functions, we need to save parameters to stack
-    ;; because function calls will overwrite P0-P3
-    (let ((save-param-space (if *is-leaf-function* 0
-                                (* 4 (min param-count 4)))))
-      ;; Allocate stack frame for locals + saved parameters
-      (let ((total-frame (+ *frame-size* save-param-space)))
+    ;; For non-leaf functions, we need to save parameters and local registers
+    ;; because function calls will overwrite P0-P3 and R0-R9
+    (let* ((save-param-space (if *is-leaf-function* 0
+                                 (* 4 (min param-count 4))))
+           ;; Also need space for local registers in non-leaf functions
+           (save-local-reg-space (if *is-leaf-function* 0
+                                     (* 4 *local-reg-count*))))
+      ;; Allocate stack frame for locals + saved parameters + saved local regs
+      (let ((total-frame (+ *frame-size* save-param-space save-local-reg-space)))
         (setf *param-save-offset* *frame-size*)  ; Params start after locals
         (when (> total-frame 0)
           (emit `(A=Rx SP))
@@ -289,14 +302,33 @@
               for offset = (+ *param-save-offset* (* i 4))
               do (progn
                    (emit `(A=Rx SP))
-                   (emit `(M[A+n]=Rx ,offset ,(nth i *param-regs*)))))))))
+                   (emit `(M[A+n]=Rx ,offset ,(nth i *param-regs*)))))
+        ;; Save local registers (R6-R9) that are used
+        (loop for i from 0 below *local-reg-count*
+              for offset = (+ *param-save-offset* save-param-space (* i 4))
+              do (progn
+                   (emit `(A=Rx SP))
+                   (emit `(M[A+n]=Rx ,offset ,(get-local-reg i)))))))))
 
 (defun generate-epilogue ()
   "Generate function epilogue"
-  ;; Calculate total frame size (locals + saved params for non-leaf)
-  (let ((save-param-space (if *is-leaf-function* 0
-                              (* 4 (min *current-param-count* 4)))))
-    (let ((total-frame (+ *frame-size* save-param-space)))
+  ;; Calculate total frame size (locals + saved params + saved local regs for non-leaf)
+  (let* ((save-param-space (if *is-leaf-function* 0
+                               (* 4 (min *current-param-count* 4))))
+         (save-local-reg-space (if *is-leaf-function* 0
+                                   (* 4 *local-reg-count*))))
+    ;; Restore local registers (R6-R9) before deallocating frame (for non-leaf)
+    (unless *is-leaf-function*
+      (loop for i from 0 below *local-reg-count*
+            for offset = (+ *param-save-offset* save-param-space (* i 4))
+            do (let ((temp (alloc-temp-reg)))
+                 (emit `(A=Rx SP))
+                 (emit `(Rx=M[A+n] ,offset ,temp))
+                 (emit `(A=Rx ,temp))
+                 (emit `(Rx=A ,(get-local-reg i)))
+                 (free-temp-reg temp))))
+
+    (let ((total-frame (+ *frame-size* save-param-space save-local-reg-space)))
       ;; Deallocate stack frame
       (when (> total-frame 0)
         (emit `(A=Rx SP))
@@ -505,10 +537,16 @@
           ;; Mask value to appropriate size before storing
           (when (and var-type (< (type-size var-type) 4))
             (emit-mask-to-size var-type))
-          ;; Store to local variable with appropriate size
+          ;; Store to local variable
           (let ((sym (lookup-symbol name)))
             (when sym
-              (generate-store-local (sym-entry-offset sym) var-type))))))))
+              (case (sym-entry-storage sym)
+                (:register
+                 ;; Store directly to local register (R6-R9)
+                 (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
+                (:local
+                 ;; Store to stack with appropriate size
+                 (generate-store-local (sym-entry-offset sym) var-type))))))))))
 
 ;;; ===========================================================================
 ;;; Expression Generation
@@ -580,16 +618,23 @@
               (free-temp-reg temp)))
            ;; Stack parameter (5th param and beyond)
            (t
-            (let ((save-param-space (if *is-leaf-function* 0
-                                        (* 4 (min *current-param-count* 4))))
-                  (temp (alloc-temp-reg)))
-              (let ((offset (+ *frame-size* save-param-space
+            (let* ((save-param-space (if *is-leaf-function* 0
+                                         (* 4 (min *current-param-count* 4))))
+                   (save-local-reg-space (if *is-leaf-function* 0
+                                             (* 4 *local-reg-count*)))
+                   (temp (alloc-temp-reg)))
+              (let ((offset (+ *frame-size* save-param-space save-local-reg-space
                                (if *is-leaf-function* 0 4)  ; saved SRP
                                (* (- idx 4) 4))))
                 (emit `(A=Rx SP))
                 (emit `(Rx=M[A+n] ,offset ,temp))
                 (emit `(A=Rx ,temp))
                 (free-temp-reg temp)))))))
+
+      (:register
+       ;; Register-allocated local variable - read directly from R6-R9
+       (let ((reg-idx (sym-entry-offset sym)))
+         (emit `(A=Rx ,(get-local-reg reg-idx)))))
 
       (:local
        ;; For arrays, return the address (array-to-pointer decay)
@@ -1000,6 +1045,8 @@
        (unless sym
          (compiler-error "Undefined variable: ~a" name))
        (case (sym-entry-storage sym)
+         (:register
+          (compiler-error "Cannot take address of register variable ~a" name))
          (:local
           (let ((offset (+ (sym-entry-offset sym) *frame-size*))
                 (temp (alloc-temp-reg)))
@@ -1031,6 +1078,10 @@
          (compiler-error "Undefined variable: ~a" name))
        (let ((var-type (sym-entry-type sym)))
          (case (sym-entry-storage sym)
+           (:register
+            ;; Register-allocated local - store directly to R6-R9
+            (let ((reg-idx (sym-entry-offset sym)))
+              (emit `(Rx=A ,(get-local-reg reg-idx)))))
            (:local
             (let ((offset (+ (sym-entry-offset sym) *frame-size*))
                   (value-reg (alloc-temp-reg)))
@@ -1143,13 +1194,31 @@
                         (ast-node-value func-expr)
                         nil))
          (func-label (when func-name
-                       (intern (string-upcase func-name) :c-compiler))))
+                       (intern (string-upcase func-name) :c-compiler)))
+         (arg-count (length args)))
 
-    ;; Evaluate arguments FIRST (before pushing saved regs)
+    ;; Handle stack arguments FIRST (args 5+) before allocating temps for args 0-3
+    ;; This maximizes available temp regs during stack arg evaluation
+    ;; Note: Can't use push-r because it's a multi-register push (R0..Rn)
+    (when (> arg-count 4)
+      (let ((const-temp (alloc-temp-reg)))
+        (emit `(Rx= -4 ,const-temp))
+        (loop for i from (1- arg-count) downto 4
+              for arg = (nth i args)
+              do (let ((value-temp (alloc-temp-reg)))
+                   (generate-expression arg)
+                   (emit `(Rx=A ,value-temp))
+                   ;; Decrement SP and store value
+                   (emit '(A=Rx SP))
+                   (emit `(A+=Rx ,const-temp))
+                   (emit '(Rx=A SP))
+                   (emit `(M[A]=Rx ,value-temp))
+                   (free-temp-reg value-temp)))
+        (free-temp-reg const-temp)))
+
+    ;; Now evaluate args 0-3 and save to temp registers
     ;; This ensures stack-relative parameter reads work correctly
-    (let ((arg-count (length args))
-          (arg-temps nil))
-      ;; Evaluate each argument and save to a temp register
+    (let ((arg-temps nil))
       (loop for i from 0 below (min arg-count 4)
             for arg = (nth i args)
             do (let ((temp (alloc-temp-reg)))
@@ -1158,30 +1227,11 @@
                  (push temp arg-temps)))
       (setf arg-temps (nreverse arg-temps))
 
-      ;; Now save caller-saved registers (excluding the arg temps we just allocated)
+      ;; Save caller-saved registers (excluding the arg temps we just allocated)
       (let ((saved-regs (remove-if (lambda (r) (member r arg-temps))
                                    (save-temp-regs))))
         (dolist (reg saved-regs)
           (emit `(push-r ,reg)))
-
-        ;; Handle stack arguments (args 5+) - evaluate and push
-        ;; Note: Can't use push-r because it's a multi-register push (R0..Rn)
-        ;; Instead manually decrement SP and store
-        (when (> arg-count 4)
-          (loop for i from (1- arg-count) downto 4
-                for arg = (nth i args)
-                do (let ((value-temp (alloc-temp-reg))
-                         (const-temp (alloc-temp-reg)))
-                     (generate-expression arg)
-                     (emit `(Rx=A ,value-temp))
-                     ;; Decrement SP and store value
-                     (emit '(A=Rx SP))
-                     (emit `(Rx= -4 ,const-temp))
-                     (emit `(A+=Rx ,const-temp))
-                     (emit '(Rx=A SP))
-                     (emit `(M[A]=Rx ,value-temp))
-                     (free-temp-reg const-temp)
-                     (free-temp-reg value-temp))))
 
         ;; Move evaluated args from temp regs to P0-P3
         (loop for i from 0 below (min arg-count 4)
@@ -1194,8 +1244,8 @@
         (emit `(jsr ,func-label))
 
         ;; Clean up stack arguments
-        (when (> (length args) 4)
-          (let ((stack-args (* 4 (- (length args) 4))))
+        (when (> arg-count 4)
+          (let ((stack-args (* 4 (- arg-count 4))))
             (emit `(A=Rx SP))
             (emit `(Rx= ,stack-args R0))
             (emit '(A+=Rx R0))

@@ -65,6 +65,8 @@
   (current-function nil) ; name of function being compiled
   (local-offset 0)       ; current local variable offset
   (param-count 0)        ; number of parameters in current function
+  (local-reg-count 0)    ; number of local registers used (0-4 for R6-R9)
+  (address-taken (make-hash-table :test 'equal)) ; variables whose address is taken
   (code nil)             ; generated assembly code (list of s-expressions)
   (data nil)             ; data section for strings/globals
   (errors nil)           ; compilation errors
@@ -244,6 +246,9 @@
       (format t "~%Tokens:~%")
       (dolist (tok (compiler-state-tokens *state*))
         (format t "  ~a~%" tok)))
+
+    ;; Pre-scan for address-taken variables (affects register allocation)
+    (scan-address-taken-variables)
 
     ;; Parsing
     (let ((ast (parse-program)))
