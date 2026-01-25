@@ -633,8 +633,13 @@
 
       (:register
        ;; Register-allocated local variable - read directly from R6-R9
-       (let ((reg-idx (sym-entry-offset sym)))
-         (emit `(A=Rx ,(get-local-reg reg-idx)))))
+       ;; For signed sub-word types, sign extend after reading
+       (let ((reg-idx (sym-entry-offset sym))
+             (var-type (sym-entry-type sym)))
+         (emit `(A=Rx ,(get-local-reg reg-idx)))
+         ;; Sign extend for signed sub-word types
+         (when (and var-type (< (type-size var-type) 4))
+           (emit-promote-to-int var-type))))
 
       (:local
        ;; For arrays, return the address (array-to-pointer decay)
@@ -1080,7 +1085,12 @@
          (case (sym-entry-storage sym)
            (:register
             ;; Register-allocated local - store directly to R6-R9
+            ;; For sub-word types, mask the value first
             (let ((reg-idx (sym-entry-offset sym)))
+              (when (and var-type (< (type-size var-type) 4))
+                (case (type-size var-type)
+                  (1 (emit '(mask-a-b)))
+                  (2 (emit '(mask-a-w)))))
               (emit `(Rx=A ,(get-local-reg reg-idx)))))
            (:local
             (let ((offset (+ (sym-entry-offset sym) *frame-size*))
