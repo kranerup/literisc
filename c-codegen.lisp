@@ -1,0 +1,1221 @@
+;;; ===========================================================================
+;;; ====================== C Code Generator for liteRISC ======================
+;;; ===========================================================================
+;;; Generates S-expression assembly for the liteRISC assembler
+
+(in-package :c-compiler)
+
+;;; ===========================================================================
+;;; Register Allocation
+;;; ===========================================================================
+
+;;; Register usage:
+;;; R0-R9  : Temporaries / scratch
+;;; P0-P3  : Parameters (R10-R13), P0 is also return value
+;;; SRP    : Subroutine return pointer (R14)
+;;; SP     : Stack pointer (R15)
+;;; A      : Accumulator - primary computation register
+
+(defparameter *temp-regs* '(R0 R1 R2 R3 R4 R5 R6 R7 R8 R9))
+(defparameter *param-regs* '(P0 P1 P2 P3))
+
+;;; Track which temp registers are in use
+(defvar *reg-in-use* nil)
+
+(defun init-registers ()
+  "Initialize register allocation state"
+  (setf *reg-in-use* (make-array 10 :initial-element nil)))
+
+(defun alloc-temp-reg ()
+  "Allocate a temporary register"
+  (loop for i from 0 below 10
+        when (not (aref *reg-in-use* i))
+        do (progn
+             (setf (aref *reg-in-use* i) t)
+             (return-from alloc-temp-reg (nth i *temp-regs*))))
+  (compiler-error "Out of temporary registers"))
+
+(defun free-temp-reg (reg)
+  "Free a temporary register"
+  (let ((idx (position reg *temp-regs*)))
+    (when idx
+      (setf (aref *reg-in-use* idx) nil))))
+
+(defun save-temp-regs ()
+  "Return list of temp registers currently in use"
+  (loop for i from 0 below 10
+        when (aref *reg-in-use* i)
+        collect (nth i *temp-regs*)))
+
+;;; ===========================================================================
+;;; Code Generation Context
+;;; ===========================================================================
+
+(defvar *break-label* nil)      ; target for break statements
+(defvar *continue-label* nil)   ; target for continue statements
+(defvar *function-end-label* nil) ; label at end of current function
+(defvar *frame-size* 0)         ; size of current stack frame
+(defvar *is-leaf-function* t)   ; true if function makes no calls
+(defvar *string-literals* nil)  ; list of (label . string) pairs
+(defvar *current-param-count* 0) ; number of parameters in current function
+(defvar *param-save-offset* 0)  ; offset where saved params start on stack
+
+;;; ===========================================================================
+;;; Main Code Generation Entry Points
+;;; ===========================================================================
+
+(defun generate-program (ast)
+  "Generate code for a complete program"
+  (init-registers)
+  (setf *string-literals* nil)
+
+  ;; First pass: collect string literals
+  (collect-strings ast)
+
+  ;; Generate startup code that calls main and then halts
+  (emit '(label _START))
+  ;; Initialize stack pointer to a reasonable value
+  (emit '(Rx= #x8000 SP))  ; 32KB stack
+  ;; Call main
+  (emit '(jsr MAIN))
+  ;; Store return value from main (in P0) for test retrieval
+  ;; Then enter infinite loop to signal completion
+  (emit '(label _HALT))
+  (emit '(j _HALT))
+
+  ;; Generate string data section
+  (dolist (str-pair (reverse *string-literals*))
+    (emit `(label ,(car str-pair)))
+    (emit `(lstring ,(cdr str-pair))))
+
+  ;; Generate code for each function/declaration
+  (dolist (child (ast-node-children ast))
+    (generate-top-level child)))
+
+(defun generate-top-level (node)
+  "Generate code for a top-level declaration"
+  (case (ast-node-type node)
+    (function (generate-function node))
+    (decl-list (generate-global-decls node))
+    (global-var (generate-global-var node))
+    (otherwise
+     (compiler-warning "Ignoring top-level ~a" (ast-node-type node)))))
+
+;;; ===========================================================================
+;;; Function Generation
+;;; ===========================================================================
+
+(defun generate-function (node)
+  "Generate code for a function"
+  (let* ((name (ast-node-value node))
+         (params (first (ast-node-children node)))
+         (body (second (ast-node-children node)))
+         (func-data (ast-node-data node))
+         (func-label (intern (string-upcase name) :c-compiler))
+         (*function-end-label* (gen-label (format nil "~a_END" (string-upcase name))))
+         (*is-leaf-function* (is-leaf-function body))
+         (*frame-size* (or (getf func-data :frame-size) 0))
+         (*current-param-count* (or (getf func-data :param-count) 0)))
+
+    (init-registers)
+
+    ;; Function label
+    (emit `(label ,func-label))
+
+    ;; Prologue
+    (generate-prologue params)
+
+    ;; Body
+    (generate-statement body)
+
+    ;; Epilogue (also target for return statements)
+    (emit-label *function-end-label*)
+    (generate-epilogue)))
+
+(defun is-leaf-function (body)
+  "Check if function body contains no function calls"
+  (not (contains-call body)))
+
+(defun contains-call (node)
+  "Check if AST node or children contain a function call"
+  (when node
+    (or (eq (ast-node-type node) 'call)
+        (some #'contains-call (ast-node-children node)))))
+
+(defun generate-prologue (params-node)
+  "Generate function prologue"
+  (let ((param-count (length (ast-node-children params-node))))
+    ;; Save SRP if not a leaf function
+    (unless *is-leaf-function*
+      (emit '(push-srp)))
+
+    ;; For non-leaf functions, we need to save parameters to stack
+    ;; because function calls will overwrite P0-P3
+    (let ((save-param-space (if *is-leaf-function* 0
+                                (* 4 (min param-count 4)))))
+      ;; Allocate stack frame for locals + saved parameters
+      (let ((total-frame (+ *frame-size* save-param-space)))
+        (setf *param-save-offset* *frame-size*)  ; Params start after locals
+        (when (> total-frame 0)
+          (emit `(A=Rx SP))
+          (emit `(Rx= ,(- total-frame) R0))
+          (emit `(A+=Rx R0))
+          (emit `(Rx=A SP))))
+
+      ;; Save parameters P0-P3 to stack for non-leaf functions
+      (unless *is-leaf-function*
+        (loop for i from 0 below (min param-count 4)
+              for offset = (+ *param-save-offset* (* i 4))
+              do (progn
+                   (emit `(A=Rx SP))
+                   (emit `(M[A+n]=Rx ,offset ,(nth i *param-regs*)))))))))
+
+(defun generate-epilogue ()
+  "Generate function epilogue"
+  ;; Calculate total frame size (locals + saved params for non-leaf)
+  (let ((save-param-space (if *is-leaf-function* 0
+                              (* 4 (min *current-param-count* 4)))))
+    (let ((total-frame (+ *frame-size* save-param-space)))
+      ;; Deallocate stack frame
+      (when (> total-frame 0)
+        (emit `(A=Rx SP))
+        (emit `(Rx= ,total-frame R0))
+        (emit `(A+=Rx R0))
+        (emit `(Rx=A SP)))))
+
+  ;; Return
+  (if *is-leaf-function*
+      (progn
+        (emit '(A=Rx SRP))
+        (emit '(j-a)))
+      (progn
+        (emit '(pop-a))
+        (emit '(j-a)))))
+
+;;; ===========================================================================
+;;; Statement Generation
+;;; ===========================================================================
+
+(defun generate-statement (node)
+  "Generate code for a statement"
+  (when node
+    (case (ast-node-type node)
+      (block (generate-block node))
+      (if (generate-if node))
+      (while (generate-while node))
+      (for (generate-for node))
+      (do-while (generate-do-while node))
+      (return (generate-return node))
+      (break (generate-break node))
+      (continue (generate-continue node))
+      (expr-stmt (generate-expr-stmt node))
+      (decl-list (generate-local-decls node))
+      (empty nil)
+      (otherwise
+       (compiler-warning "Unknown statement type: ~a" (ast-node-type node))))))
+
+(defun generate-block (node)
+  "Generate code for a block of statements"
+  (dolist (stmt (ast-node-children node))
+    (generate-statement stmt)))
+
+(defun generate-if (node)
+  "Generate code for an if statement"
+  (let ((condition (first (ast-node-children node)))
+        (then-branch (second (ast-node-children node)))
+        (else-branch (third (ast-node-children node)))
+        (else-label (gen-label "ELSE"))
+        (end-label (gen-label "ENDIF")))
+
+    ;; Generate condition
+    (generate-expression condition)
+
+    ;; Test condition in A
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (if else-branch
+        (emit `(jz ,else-label))
+        (emit `(jz ,end-label)))
+
+    ;; Then branch
+    (generate-statement then-branch)
+
+    (when else-branch
+      (emit `(j ,end-label))
+      (emit-label else-label)
+      (generate-statement else-branch))
+
+    (emit-label end-label)))
+
+(defun generate-while (node)
+  "Generate code for a while statement"
+  (let ((condition (first (ast-node-children node)))
+        (body (second (ast-node-children node)))
+        (loop-label (gen-label "WHILE"))
+        (end-label (gen-label "ENDWHILE"))
+        (*break-label* (gen-label "ENDWHILE"))
+        (*continue-label* (gen-label "WHILE")))
+
+    ;; Use the actual labels for break/continue
+    (setf *break-label* end-label)
+    (setf *continue-label* loop-label)
+
+    (emit-label loop-label)
+
+    ;; Condition
+    (generate-expression condition)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jz ,end-label))
+
+    ;; Body
+    (generate-statement body)
+    (emit `(j ,loop-label))
+
+    (emit-label end-label)))
+
+(defun generate-for (node)
+  "Generate code for a for statement"
+  (let ((init (first (ast-node-children node)))
+        (condition (second (ast-node-children node)))
+        (update (third (ast-node-children node)))
+        (body (fourth (ast-node-children node)))
+        (loop-label (gen-label "FOR"))
+        (continue-label (gen-label "FORCONT"))
+        (end-label (gen-label "ENDFOR"))
+        (*break-label* nil)
+        (*continue-label* nil))
+
+    (setf *break-label* end-label)
+    (setf *continue-label* continue-label)
+
+    ;; Init
+    (when init
+      (if (eq (ast-node-type init) 'decl-list)
+          (generate-local-decls init)
+          (generate-expression init)))
+
+    (emit-label loop-label)
+
+    ;; Condition
+    (when condition
+      (generate-expression condition)
+      (emit `(Rx= 0 R0))
+      (emit `(A-=Rx R0))
+      (emit `(jz ,end-label)))
+
+    ;; Body
+    (generate-statement body)
+
+    ;; Continue target (before update)
+    (emit-label continue-label)
+
+    ;; Update
+    (when update
+      (generate-expression update))
+
+    (emit `(j ,loop-label))
+    (emit-label end-label)))
+
+(defun generate-do-while (node)
+  "Generate code for a do-while statement"
+  (let ((body (first (ast-node-children node)))
+        (condition (second (ast-node-children node)))
+        (loop-label (gen-label "DOWHILE"))
+        (end-label (gen-label "ENDDOWHILE"))
+        (*break-label* nil)
+        (*continue-label* nil))
+
+    (setf *break-label* end-label)
+    (setf *continue-label* loop-label)
+
+    (emit-label loop-label)
+
+    ;; Body
+    (generate-statement body)
+
+    ;; Condition
+    (generate-expression condition)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jnz ,loop-label))
+
+    (emit-label end-label)))
+
+(defun generate-return (node)
+  "Generate code for a return statement"
+  (when (ast-node-children node)
+    ;; Generate return expression
+    (generate-expression (first (ast-node-children node)))
+    ;; Move result to P0 (R10)
+    (emit '(Rx=A P0)))
+
+  ;; Jump to function epilogue
+  (emit `(j ,*function-end-label*)))
+
+(defun generate-break (node)
+  "Generate code for a break statement"
+  (declare (ignore node))
+  (if *break-label*
+      (emit `(j ,*break-label*))
+      (compiler-error "break statement outside loop")))
+
+(defun generate-continue (node)
+  "Generate code for a continue statement"
+  (declare (ignore node))
+  (if *continue-label*
+      (emit `(j ,*continue-label*))
+      (compiler-error "continue statement outside loop")))
+
+(defun generate-expr-stmt (node)
+  "Generate code for an expression statement"
+  (generate-expression (first (ast-node-children node))))
+
+(defun generate-local-decls (node)
+  "Generate code for local variable declarations"
+  (dolist (decl (ast-node-children node))
+    (when (eq (ast-node-type decl) 'var-decl)
+      (let ((name (ast-node-value decl))
+            (init (first (ast-node-children decl))))
+        (when init
+          ;; Generate initializer
+          (generate-expression init)
+          ;; Store to local variable
+          (let ((sym (lookup-symbol name)))
+            (when sym
+              (generate-store-local (sym-entry-offset sym)))))))))
+
+;;; ===========================================================================
+;;; Expression Generation
+;;; ===========================================================================
+
+(defun generate-expression (node)
+  "Generate code for an expression, result goes in A"
+  (when node
+    (case (ast-node-type node)
+      (literal (generate-literal node))
+      (string-literal (generate-string-literal node))
+      (var-ref (generate-var-ref node))
+      (binary-op (generate-binary-op node))
+      (unary-op (generate-unary-op node))
+      (assign (generate-assignment node))
+      (call (generate-call node))
+      (subscript (generate-subscript node))
+      (ternary (generate-ternary node))
+      (cast (generate-cast node))
+      (sizeof (generate-sizeof node))
+      (post-op (generate-post-op node))
+      (otherwise
+       (compiler-warning "Unknown expression type: ~a" (ast-node-type node))))))
+
+(defun generate-literal (node)
+  "Generate code for a numeric literal"
+  (let ((value (ast-node-value node)))
+    ;; Load immediate into A
+    ;; For small values, use A= instruction
+    ;; For larger values, use Rx= then A=Rx with an allocated temp
+    (if (and (>= value -8) (<= value 7))
+        (emit `(A= ,value))
+        (let ((temp (alloc-temp-reg)))
+          (emit `(Rx= ,value ,temp))
+          (emit `(A=Rx ,temp))
+          (free-temp-reg temp)))))
+
+(defun generate-string-literal (node)
+  "Generate code for a string literal (load address)"
+  (let* ((str (ast-node-value node))
+         (label (car (find str *string-literals* :key #'cdr :test #'string=)))
+         (temp (alloc-temp-reg)))
+    (emit `(Rx= ,label ,temp))
+    (emit `(A=Rx ,temp))
+    (free-temp-reg temp)))
+
+(defun generate-var-ref (node)
+  "Generate code for a variable reference"
+  (let* ((name (ast-node-value node))
+         (sym (lookup-symbol name)))
+    (unless sym
+      (compiler-error "Undefined variable: ~a" name))
+
+    (case (sym-entry-storage sym)
+      (:parameter
+       ;; Parameters 0-3 are in P0-P3 (leaf) or saved on stack (non-leaf)
+       (let ((idx (sym-entry-offset sym)))
+         (cond
+           ;; Leaf function: read directly from register
+           ((and *is-leaf-function* (< idx 4))
+            (emit `(A=Rx ,(nth idx *param-regs*))))
+           ;; Non-leaf function with register param: read from saved stack location
+           ((< idx 4)
+            (let ((offset (+ *param-save-offset* (* idx 4)))
+                  (temp (alloc-temp-reg)))
+              (emit `(A=Rx SP))
+              (emit `(Rx=M[A+n] ,offset ,temp))
+              (emit `(A=Rx ,temp))
+              (free-temp-reg temp)))
+           ;; Stack parameter (5th param and beyond)
+           (t
+            (let ((save-param-space (* 4 (min *current-param-count* 4)))
+                  (temp (alloc-temp-reg)))
+              (let ((offset (+ *frame-size* save-param-space
+                               (if *is-leaf-function* 0 4)  ; saved SRP
+                               (* (- idx 4) 4))))
+                (emit `(A=Rx SP))
+                (emit `(Rx=M[A+n] ,offset ,temp))
+                (emit `(A=Rx ,temp))
+                (free-temp-reg temp)))))))
+
+      (:local
+       ;; For arrays, return the address (array-to-pointer decay)
+       ;; For scalars, load the value from stack
+       (let ((var-type (sym-entry-type sym))
+             (offset (+ (sym-entry-offset sym) *frame-size*)))
+         (if (and var-type (type-desc-array-size var-type))
+             ;; Array: return address (SP + offset)
+             (let ((temp (alloc-temp-reg)))
+               (emit `(A=Rx SP))
+               (emit `(Rx= ,offset ,temp))
+               (emit `(A+=Rx ,temp))
+               (free-temp-reg temp))
+             ;; Scalar: load value from stack
+             (let ((temp (alloc-temp-reg)))
+               (emit `(A=Rx SP))
+               (emit `(Rx=M[A+n] ,offset ,temp))
+               (emit `(A=Rx ,temp))
+               (free-temp-reg temp)))))
+
+      (:global
+       ;; Load from global address
+       (let ((label (intern (string-upcase name) :c-compiler))
+             (temp (alloc-temp-reg)))
+         (emit `(Rx= ,label ,temp))
+         (emit `(A=Rx ,temp))
+         (emit `(Rx=M[A] ,temp))
+         (emit `(A=Rx ,temp))
+         (free-temp-reg temp))))))
+
+(defun generate-store-local (offset)
+  "Generate code to store A to a local variable at offset"
+  (let ((actual-offset (+ offset *frame-size*))
+        (value-reg (alloc-temp-reg)))
+    (emit `(Rx=A ,value-reg))           ; save value
+    (emit `(A=Rx SP))                   ; get SP
+    (emit `(M[A+n]=Rx ,actual-offset ,value-reg)) ; store
+    (free-temp-reg value-reg)))
+
+(defun generate-binary-op (node)
+  "Generate code for a binary operation"
+  (let ((op (ast-node-value node))
+        (left (first (ast-node-children node)))
+        (right (second (ast-node-children node))))
+
+    ;; Handle short-circuit operators specially
+    (cond
+      ((string= op "&&") (generate-logical-and left right))
+      ((string= op "||") (generate-logical-or left right))
+      (t (generate-arithmetic-op op left right)))))
+
+(defun generate-arithmetic-op (op left right)
+  "Generate code for arithmetic/bitwise operation"
+  ;; Generate left operand
+  (generate-expression left)
+
+  ;; Save left result
+  (let ((left-reg (alloc-temp-reg)))
+    (emit `(Rx=A ,left-reg))
+
+    ;; Generate right operand
+    (generate-expression right)
+
+    ;; Right is now in A, left is in left-reg
+    ;; Perform operation
+    (cond
+      ((string= op "+")
+       (emit `(A+=Rx ,left-reg)))
+
+      ((string= op "-")
+       ;; A = left - right: save right, load left, subtract right
+       (let ((right-reg (alloc-temp-reg)))
+         (emit `(Rx=A ,right-reg))    ; save right
+         (emit `(A=Rx ,left-reg))     ; A = left
+         (emit `(A-=Rx ,right-reg))   ; A = left - right
+         (free-temp-reg right-reg)))
+
+      ((string= op "*")
+       ;; Software multiply - result in A
+       (generate-multiply left-reg))
+
+      ((string= op "/")
+       ;; Software divide
+       (generate-divide left-reg nil))
+
+      ((string= op "%")
+       ;; Software modulo
+       (generate-divide left-reg t))
+
+      ((string= op "&")
+       (emit `(A&=Rx ,left-reg)))
+
+      ((string= op "|")
+       (emit `(A\|=Rx ,left-reg)))
+
+      ((string= op "^")
+       (emit `(A^=Rx ,left-reg)))
+
+      ((string= op "<<")
+       (generate-shift-left left-reg))
+
+      ((string= op ">>")
+       (generate-shift-right left-reg))
+
+      ;; Comparison operators
+      ((string= op "==")
+       (generate-comparison left-reg 'jz))
+
+      ((string= op "!=")
+       (generate-comparison left-reg 'jnz))
+
+      ((string= op "<")
+       (generate-comparison left-reg 'jlt))
+
+      ((string= op ">")
+       ;; A > B is B < A, swap operands
+       ;; Currently: left-reg = A, accumulator = B
+       ;; We need: left-reg = B, accumulator = A
+       (let ((temp-reg (alloc-temp-reg))
+             (temp-reg2 (alloc-temp-reg)))
+         (emit `(Rx=A ,temp-reg))       ; temp = B (from accumulator)
+         (emit `(A=Rx ,left-reg))       ; A = A (old left)
+         (emit `(Rx=A ,temp-reg2))      ; temp2 = A (save it)
+         (emit `(A=Rx ,temp-reg))       ; A = B
+         (emit `(Rx=A ,left-reg))       ; left-reg = B (new left)
+         (emit `(A=Rx ,temp-reg2))      ; A = A (new right)
+         (free-temp-reg temp-reg2)
+         (free-temp-reg temp-reg))
+       (generate-comparison left-reg 'jlt))
+
+      ((string= op "<=")
+       ;; A <= B is !(A > B) is !(B < A), swap and use jge
+       ;; Need same swap as > but use jge (jump if >=)
+       (let ((temp-reg (alloc-temp-reg))
+             (temp-reg2 (alloc-temp-reg)))
+         (emit `(Rx=A ,temp-reg))       ; temp = B
+         (emit `(A=Rx ,left-reg))       ; A = A (old left)
+         (emit `(Rx=A ,temp-reg2))      ; temp2 = A
+         (emit `(A=Rx ,temp-reg))       ; A = B
+         (emit `(Rx=A ,left-reg))       ; left-reg = B (new left)
+         (emit `(A=Rx ,temp-reg2))      ; A = A (new right)
+         (free-temp-reg temp-reg2)
+         (free-temp-reg temp-reg))
+       (generate-comparison left-reg 'jge))
+
+      ((string= op ">=")
+       (generate-comparison left-reg 'jge))
+
+      (t (compiler-warning "Unknown binary operator: ~a" op)))
+
+    (free-temp-reg left-reg)))
+
+(defun generate-comparison (left-reg jump-type)
+  "Generate code for comparison, result 0 or 1 in A"
+  (let ((true-label (gen-label "CMPTRUE"))
+        (end-label (gen-label "CMPEND"))
+        (right-reg (alloc-temp-reg)))
+    ;; Compute left - right (sets flags)
+    ;; A has right, left-reg has left
+    (emit `(Rx=A ,right-reg))   ; save right
+    (emit `(A=Rx ,left-reg))    ; A = left
+    (emit `(A-=Rx ,right-reg))  ; A = left - right, sets flags
+    (free-temp-reg right-reg)
+
+    ;; Jump based on condition
+    (emit `(,jump-type ,true-label))
+
+    ;; False path
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+
+    ;; True path
+    (emit-label true-label)
+    (emit '(A= 1))
+
+    (emit-label end-label)))
+
+(defun generate-logical-and (left right)
+  "Generate short-circuit && operator"
+  (let ((false-label (gen-label "ANDFALSE"))
+        (end-label (gen-label "ANDEND")))
+
+    ;; Evaluate left
+    (generate-expression left)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jz ,false-label))
+
+    ;; Left was true, evaluate right
+    (generate-expression right)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jz ,false-label))
+
+    ;; Both true
+    (emit '(A= 1))
+    (emit `(j ,end-label))
+
+    ;; False
+    (emit-label false-label)
+    (emit '(A= 0))
+
+    (emit-label end-label)))
+
+(defun generate-logical-or (left right)
+  "Generate short-circuit || operator"
+  (let ((true-label (gen-label "ORTRUE"))
+        (end-label (gen-label "OREND")))
+
+    ;; Evaluate left
+    (generate-expression left)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jnz ,true-label))
+
+    ;; Left was false, evaluate right
+    (generate-expression right)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jnz ,true-label))
+
+    ;; Both false
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+
+    ;; True
+    (emit-label true-label)
+    (emit '(A= 1))
+
+    (emit-label end-label)))
+
+(defun generate-unary-op (node)
+  "Generate code for a unary operation"
+  (let ((op (ast-node-value node))
+        (operand (first (ast-node-children node))))
+
+    (cond
+      ((string= op "-")
+       ;; Negate: 0 - x
+       (generate-expression operand)
+       (emit '(Rx=A R0))
+       (emit '(A= 0))
+       (emit '(A-=Rx R0)))
+
+      ((string= op "!")
+       ;; Logical not: x == 0 ? 1 : 0
+       (generate-expression operand)
+       (let ((zero-label (gen-label "NOTZERO"))
+             (end-label (gen-label "NOTEND")))
+         (emit `(Rx= 0 R0))
+         (emit `(A-=Rx R0))
+         (emit `(jz ,zero-label))
+         (emit '(A= 0))
+         (emit `(j ,end-label))
+         (emit-label zero-label)
+         (emit '(A= 1))
+         (emit-label end-label)))
+
+      ((string= op "~")
+       ;; Bitwise not
+       (generate-expression operand)
+       (emit '(not-a)))
+
+      ((string= op "*")
+       ;; Dereference
+       (generate-expression operand)
+       (let ((temp (alloc-temp-reg)))
+         (emit `(Rx=M[A] ,temp))
+         (emit `(A=Rx ,temp))
+         (free-temp-reg temp)))
+
+      ((string= op "&")
+       ;; Address-of
+       (generate-address operand))
+
+      ((string= op "++")
+       ;; Pre-increment
+       (generate-pre-inc-dec operand 1))
+
+      ((string= op "--")
+       ;; Pre-decrement
+       (generate-pre-inc-dec operand -1))
+
+      (t (compiler-warning "Unknown unary operator: ~a" op)))))
+
+(defun generate-pre-inc-dec (operand delta)
+  "Generate code for pre-increment/decrement"
+  ;; Load current value
+  (generate-expression operand)
+  ;; Add delta
+  (emit `(Rx= ,delta R0))
+  (emit '(A+=Rx R0))
+  ;; Store back and keep result
+  (generate-store-lvalue operand))
+
+(defun generate-post-op (node)
+  "Generate code for post-increment/decrement"
+  (let ((op (ast-node-value node))
+        (operand (first (ast-node-children node))))
+    ;; Load current value
+    (generate-expression operand)
+    ;; Save original value
+    (let ((save-reg (alloc-temp-reg)))
+      (emit `(Rx=A ,save-reg))
+      ;; Compute new value
+      (if (string= op "++")
+          (emit `(Rx= 1 R0))
+          (emit `(Rx= -1 R0)))
+      (emit '(A+=Rx R0))
+      ;; Store new value
+      (generate-store-lvalue operand)
+      ;; Return original value
+      (emit `(A=Rx ,save-reg))
+      (free-temp-reg save-reg))))
+
+(defun generate-address (node)
+  "Generate code for address-of operator"
+  (case (ast-node-type node)
+    (var-ref
+     (let* ((name (ast-node-value node))
+            (sym (lookup-symbol name)))
+       (unless sym
+         (compiler-error "Undefined variable: ~a" name))
+       (case (sym-entry-storage sym)
+         (:local
+          (let ((offset (+ (sym-entry-offset sym) *frame-size*)))
+            (emit `(A=Rx SP))
+            (emit `(Rx= ,offset R0))
+            (emit '(A+=Rx R0))))
+         (:global
+          (let ((label (intern (string-upcase name) :c-compiler)))
+            (emit `(Rx= ,label R0))
+            (emit '(A=Rx R0))))
+         (:parameter
+          (compiler-error "Cannot take address of register parameter")))))
+    (subscript
+     ;; &arr[i] = arr + i * element_size
+     (generate-subscript-address node))
+    (otherwise
+     (compiler-error "Cannot take address of ~a" (ast-node-type node)))))
+
+(defun generate-store-lvalue (node)
+  "Generate code to store A to an lvalue"
+  (case (ast-node-type node)
+    (var-ref
+     (let* ((name (ast-node-value node))
+            (sym (lookup-symbol name)))
+       (unless sym
+         (compiler-error "Undefined variable: ~a" name))
+       (case (sym-entry-storage sym)
+         (:local
+          (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+                (value-reg (alloc-temp-reg)))
+            (emit `(Rx=A ,value-reg))
+            (emit `(A=Rx SP))
+            (emit `(M[A+n]=Rx ,offset ,value-reg))
+            (free-temp-reg value-reg)))
+         (:global
+          (let ((label (intern (string-upcase name) :c-compiler))
+                (value-reg (alloc-temp-reg))
+                (addr-reg (alloc-temp-reg)))
+            (emit `(Rx=A ,value-reg))
+            (emit `(Rx= ,label ,addr-reg))
+            (emit `(A=Rx ,addr-reg))
+            (emit `(M[A]=Rx ,value-reg))
+            (free-temp-reg addr-reg)
+            (free-temp-reg value-reg)))
+         (:parameter
+          (let ((idx (sym-entry-offset sym)))
+            (if (< idx 4)
+                (emit `(Rx=A ,(nth idx *param-regs*)))
+                (compiler-error "Cannot store to stack parameter")))))))
+    (unary-op
+     ;; *ptr = value
+     (when (string= (ast-node-value node) "*")
+       (let ((value-reg (alloc-temp-reg)))
+         (emit `(Rx=A ,value-reg))  ; save value
+         (generate-expression (first (ast-node-children node)))  ; get pointer
+         (emit `(M[A]=Rx ,value-reg))  ; store value at pointer
+         (free-temp-reg value-reg))))
+    (subscript
+     ;; arr[i] = value
+     (let ((value-reg (alloc-temp-reg)))
+       (emit `(Rx=A ,value-reg))  ; save value
+       (generate-subscript-address node)  ; get address
+       (emit `(M[A]=Rx ,value-reg))  ; store
+       (free-temp-reg value-reg)))
+    (otherwise
+     (compiler-error "Cannot assign to ~a" (ast-node-type node)))))
+
+(defun generate-assignment (node)
+  "Generate code for assignment"
+  (let ((op (ast-node-value node))
+        (left (first (ast-node-children node)))
+        (right (second (ast-node-children node))))
+
+    (cond
+      ((string= op "=")
+       ;; Simple assignment
+       (generate-expression right)
+       (generate-store-lvalue left))
+
+      (t
+       ;; Compound assignment: +=, -=, etc.
+       (let ((base-op (subseq op 0 (1- (length op)))))
+         ;; Compute left op right
+         (generate-binary-op
+          (make-node 'binary-op
+                     :value base-op
+                     :children (list left right)))
+         ;; Store result
+         (generate-store-lvalue left))))))
+
+(defun generate-call (node)
+  "Generate code for a function call"
+  (let* ((func-expr (first (ast-node-children node)))
+         (args (rest (ast-node-children node)))
+         (func-name (if (eq (ast-node-type func-expr) 'var-ref)
+                        (ast-node-value func-expr)
+                        nil))
+         (func-label (when func-name
+                       (intern (string-upcase func-name) :c-compiler))))
+
+    ;; Evaluate arguments FIRST (before pushing saved regs)
+    ;; This ensures stack-relative parameter reads work correctly
+    (let ((arg-count (length args))
+          (arg-temps nil))
+      ;; Evaluate each argument and save to a temp register
+      (loop for i from 0 below (min arg-count 4)
+            for arg = (nth i args)
+            do (let ((temp (alloc-temp-reg)))
+                 (generate-expression arg)
+                 (emit `(Rx=A ,temp))
+                 (push temp arg-temps)))
+      (setf arg-temps (nreverse arg-temps))
+
+      ;; Now save caller-saved registers (excluding the arg temps we just allocated)
+      (let ((saved-regs (remove-if (lambda (r) (member r arg-temps))
+                                   (save-temp-regs))))
+        (dolist (reg saved-regs)
+          (emit `(push-r ,reg)))
+
+        ;; Handle stack arguments (args 5+) - evaluate and push
+        (when (> arg-count 4)
+          (loop for i from (1- arg-count) downto 4
+                for arg = (nth i args)
+                do (progn
+                     (generate-expression arg)
+                     (emit '(Rx=A R0))
+                     (emit '(push-r R0)))))
+
+        ;; Move evaluated args from temp regs to P0-P3
+        (loop for i from 0 below (min arg-count 4)
+              for temp in arg-temps
+              do (progn
+                   (emit `(A=Rx ,temp))
+                   (emit `(Rx=A ,(nth i *param-regs*)))))
+
+        ;; Call function
+        (emit `(jsr ,func-label))
+
+        ;; Clean up stack arguments
+        (when (> (length args) 4)
+          (let ((stack-args (* 4 (- (length args) 4))))
+            (emit `(A=Rx SP))
+            (emit `(Rx= ,stack-args R0))
+            (emit '(A+=Rx R0))
+            (emit '(Rx=A SP))))
+
+        ;; Restore caller-saved registers (reverse order)
+        (dolist (reg (reverse saved-regs))
+          (emit `(pop-r ,reg)))
+
+        ;; Free the arg temps
+        (dolist (temp arg-temps)
+          (free-temp-reg temp))
+
+        ;; Result is in P0, move to A
+        (emit '(A=Rx P0))))))
+
+(defun generate-subscript (node)
+  "Generate code for array subscript"
+  (generate-subscript-address node)
+  ;; Load value at computed address
+  (let ((temp (alloc-temp-reg)))
+    (emit `(Rx=M[A] ,temp))
+    (emit `(A=Rx ,temp))
+    (free-temp-reg temp)))
+
+(defun generate-subscript-address (node)
+  "Generate code to compute address of array subscript"
+  (let ((array (first (ast-node-children node)))
+        (index (second (ast-node-children node)))
+        (base-reg (alloc-temp-reg)))
+    ;; Get array base address
+    (generate-expression array)
+    (emit `(Rx=A ,base-reg))  ; save base
+
+    ;; Get index
+    (generate-expression index)
+    ;; Multiply by element size (assume 4 bytes for now)
+    (emit '(A=A<<1))
+    (emit '(A=A<<1))
+
+    ;; Add to base
+    (emit `(A+=Rx ,base-reg))
+    (free-temp-reg base-reg)))
+
+(defun generate-ternary (node)
+  "Generate code for ternary conditional"
+  (let ((condition (first (ast-node-children node)))
+        (then-expr (second (ast-node-children node)))
+        (else-expr (third (ast-node-children node)))
+        (else-label (gen-label "TERNELSE"))
+        (end-label (gen-label "TERNEND")))
+
+    ;; Evaluate condition
+    (generate-expression condition)
+    (emit `(Rx= 0 R0))
+    (emit `(A-=Rx R0))
+    (emit `(jz ,else-label))
+
+    ;; Then expression
+    (generate-expression then-expr)
+    (emit `(j ,end-label))
+
+    ;; Else expression
+    (emit-label else-label)
+    (generate-expression else-expr)
+
+    (emit-label end-label)))
+
+(defun generate-cast (node)
+  "Generate code for type cast"
+  (let ((target-type (ast-node-value node))
+        (expr (first (ast-node-children node))))
+    ;; Generate the expression
+    (generate-expression expr)
+    ;; Apply any necessary conversions
+    (when (and target-type (eq (type-desc-base target-type) 'char))
+      (emit '(mask-a-b)))))
+
+(defun generate-sizeof (node)
+  "Generate code for sizeof"
+  (let ((operand (first (ast-node-children node))))
+    (if (type-desc-p operand)
+        (emit `(Rx= ,(type-size operand) R0))
+        ;; sizeof expression - just compute type size
+        (emit '(Rx= 4 R0)))  ; default to 4 bytes
+    (emit '(A=Rx R0))))
+
+;;; ===========================================================================
+;;; Software Multiply/Divide
+;;; ===========================================================================
+
+(defun generate-multiply (left-reg)
+  "Generate software multiply: A = left-reg * A"
+  ;; Simple shift-and-add multiply
+  ;; Result in A, multiplicand in left-reg, multiplier in A
+  ;; Allocate temp registers to avoid conflicts
+  (let ((loop-label (gen-label "MULLOOP"))
+        (skip-label (gen-label "MULSKIP"))
+        (end-label (gen-label "MULEND"))
+        (multiplier-reg (alloc-temp-reg))
+        (multiplicand-reg (alloc-temp-reg))
+        (result-reg (alloc-temp-reg))
+        (temp-reg (alloc-temp-reg)))
+
+    (emit `(Rx=A ,multiplier-reg))     ; multiplier-reg = multiplier (from A)
+    (emit `(A=Rx ,left-reg))           ; A = multiplicand
+    (emit `(Rx=A ,multiplicand-reg))   ; multiplicand-reg = multiplicand
+    (emit '(A= 0))
+    (emit `(Rx=A ,result-reg))         ; result-reg = 0
+
+    (emit-label loop-label)
+    ;; Check if multiplier is zero
+    (emit `(A=Rx ,multiplier-reg))
+    (emit `(Rx= 0 ,temp-reg))
+    (emit `(A-=Rx ,temp-reg))
+    (emit `(jz ,end-label))
+
+    ;; Check LSB of multiplier
+    (emit `(A=Rx ,multiplier-reg))
+    (emit `(Rx= 1 ,temp-reg))
+    (emit `(A&=Rx ,temp-reg))
+    (emit `(Rx= 0 ,temp-reg))
+    (emit `(A-=Rx ,temp-reg))
+    (emit `(jz ,skip-label))
+
+    ;; Add multiplicand to result
+    (emit `(A=Rx ,result-reg))
+    (emit `(A+=Rx ,multiplicand-reg))
+    (emit `(Rx=A ,result-reg))
+
+    (emit-label skip-label)
+    ;; Shift multiplicand left
+    (emit `(A=Rx ,multiplicand-reg))
+    (emit '(A=A<<1))
+    (emit `(Rx=A ,multiplicand-reg))
+
+    ;; Shift multiplier right
+    (emit `(A=Rx ,multiplier-reg))
+    (emit '(A=A>>1))
+    (emit `(Rx=A ,multiplier-reg))
+
+    (emit `(j ,loop-label))
+
+    (emit-label end-label)
+    (emit `(A=Rx ,result-reg))
+
+    ;; Free allocated registers
+    (free-temp-reg temp-reg)
+    (free-temp-reg result-reg)
+    (free-temp-reg multiplicand-reg)
+    (free-temp-reg multiplier-reg)))
+
+(defun generate-divide (left-reg get-remainder)
+  "Generate software divide: A = left-reg / A or left-reg % A"
+  ;; Simple repeated subtraction (works correctly, can be optimized later)
+  ;; Allocate temp registers to avoid conflicts
+  (let ((loop-label (gen-label "DIVLOOP"))
+        (end-label (gen-label "DIVEND"))
+        (dividend-reg (alloc-temp-reg))
+        (divisor-reg (alloc-temp-reg))
+        (quotient-reg (alloc-temp-reg))
+        (temp-reg (alloc-temp-reg)))
+
+    ;; dividend-reg = dividend, divisor-reg = divisor, quotient-reg = quotient
+    (emit `(Rx=A ,divisor-reg))        ; divisor-reg = divisor (from A)
+    (emit `(A=Rx ,left-reg))           ; A = dividend
+    (emit `(Rx=A ,dividend-reg))       ; dividend-reg = dividend (will become remainder)
+    (emit '(A= 0))
+    (emit `(Rx=A ,quotient-reg))       ; quotient-reg = 0
+
+    (emit-label loop-label)
+    ;; Check if dividend >= divisor
+    (emit `(A=Rx ,dividend-reg))       ; A = current dividend
+    (emit `(A-=Rx ,divisor-reg))       ; A = dividend - divisor (sets flags)
+    (emit `(jlt ,end-label))           ; if dividend < divisor, done
+
+    ;; dividend >= divisor: update dividend and increment quotient
+    (emit `(Rx=A ,dividend-reg))       ; dividend-reg = dividend - divisor
+    (emit `(A=Rx ,quotient-reg))
+    (emit `(Rx= 1 ,temp-reg))
+    (emit `(A+=Rx ,temp-reg))
+    (emit `(Rx=A ,quotient-reg))       ; quotient-reg = quotient + 1
+
+    (emit `(j ,loop-label))
+
+    (emit-label end-label)
+    (if get-remainder
+        (emit `(A=Rx ,dividend-reg))   ; return remainder
+        (emit `(A=Rx ,quotient-reg)))  ; return quotient
+
+    ;; Free allocated registers
+    (free-temp-reg temp-reg)
+    (free-temp-reg quotient-reg)
+    (free-temp-reg divisor-reg)
+    (free-temp-reg dividend-reg)))
+
+(defun generate-shift-left (left-reg)
+  "Generate left shift: A = left-reg << A"
+  (let ((loop-label (gen-label "SHLLOOP"))
+        (end-label (gen-label "SHLEND")))
+
+    ;; A = shift count, left-reg = value
+    (emit '(Rx=A R2))           ; R2 = count
+    (emit `(A=Rx ,left-reg))    ; A = value
+
+    (emit-label loop-label)
+    ;; Check if count is zero
+    (emit '(Rx=A R1))           ; save value
+    (emit '(A=Rx R2))
+    (emit '(Rx= 0 R0))
+    (emit '(A-=Rx R0))
+    (emit `(jz ,end-label))
+
+    ;; Decrement count
+    (emit '(A=Rx R2))
+    (emit '(Rx= -1 R0))
+    (emit '(A+=Rx R0))
+    (emit '(Rx=A R2))
+
+    ;; Shift value left
+    (emit '(A=Rx R1))
+    (emit '(A=A<<1))
+
+    (emit `(j ,loop-label))
+
+    (emit-label end-label)
+    (emit '(A=Rx R1))))
+
+(defun generate-shift-right (left-reg)
+  "Generate right shift: A = left-reg >> A"
+  (let ((loop-label (gen-label "SHRLOOP"))
+        (end-label (gen-label "SHREND")))
+
+    ;; A = shift count, left-reg = value
+    (emit '(Rx=A R2))           ; R2 = count
+    (emit `(A=Rx ,left-reg))    ; A = value
+
+    (emit-label loop-label)
+    ;; Check if count is zero
+    (emit '(Rx=A R1))           ; save value
+    (emit '(A=Rx R2))
+    (emit '(Rx= 0 R0))
+    (emit '(A-=Rx R0))
+    (emit `(jz ,end-label))
+
+    ;; Decrement count
+    (emit '(A=Rx R2))
+    (emit '(Rx= -1 R0))
+    (emit '(A+=Rx R0))
+    (emit '(Rx=A R2))
+
+    ;; Shift value right
+    (emit '(A=Rx R1))
+    (emit '(A=A>>1))
+
+    (emit `(j ,loop-label))
+
+    (emit-label end-label)
+    (emit '(A=Rx R1))))
+
+;;; ===========================================================================
+;;; Global Variable Generation
+;;; ===========================================================================
+
+(defun generate-global-decls (node)
+  "Generate code for global variable declarations"
+  (dolist (decl (ast-node-children node))
+    (generate-global-var decl)))
+
+(defun generate-global-var (node)
+  "Generate code/data for a global variable"
+  (let* ((name (ast-node-value node))
+         (var-type (ast-node-result-type node))
+         (label (intern (string-upcase name) :c-compiler))
+         (size (type-size var-type)))
+    (emit `(label ,label))
+    (emit `(lalloc-bytes ,size))))
+
+;;; ===========================================================================
+;;; String Literal Collection
+;;; ===========================================================================
+
+(defun collect-strings (node)
+  "Collect all string literals in AST"
+  (when node
+    (when (eq (ast-node-type node) 'string-literal)
+      (let ((str (ast-node-value node)))
+        (unless (find str *string-literals* :key #'cdr :test #'string=)
+          (push (cons (gen-label "STR") str) *string-literals*))))
+    (dolist (child (ast-node-children node))
+      (collect-strings child))))

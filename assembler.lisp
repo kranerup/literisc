@@ -316,7 +316,7 @@
 
 (defun xor-r (r)
   (opci2 OPCI2_XOR :reg r))
-(setf (symbol-function 'A^=Rx) #'or-r)
+(setf (symbol-function 'A^=Rx) #'xor-r)
 
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)
