@@ -400,6 +400,273 @@ int main() {
     (test-global-vars)
     (test-multiple-globals)))
 
+;;; ===========================================================================
+;;; Phase 7 Tests: Extended Integer Types
+;;; ===========================================================================
+
+(deftest test-type-sizes ()
+  "Test: sizeof for various types"
+  (check
+    ;; Basic types
+    (= 1 (run-and-get-result "int main() { return sizeof(char); }"))
+    (= 2 (run-and-get-result "int main() { return sizeof(short); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(int); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(long); }"))
+    ;; C99 fixed-width types
+    (= 1 (run-and-get-result "int main() { return sizeof(int8_t); }"))
+    (= 1 (run-and-get-result "int main() { return sizeof(uint8_t); }"))
+    (= 2 (run-and-get-result "int main() { return sizeof(int16_t); }"))
+    (= 2 (run-and-get-result "int main() { return sizeof(uint16_t); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(int32_t); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(uint32_t); }"))
+    ;; Unsigned variants
+    (= 1 (run-and-get-result "int main() { return sizeof(unsigned char); }"))
+    (= 2 (run-and-get-result "int main() { return sizeof(unsigned short); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(unsigned int); }"))
+    (= 4 (run-and-get-result "int main() { return sizeof(unsigned long); }"))))
+
+(deftest test-uint8-boundaries ()
+  "Test: uint8_t boundary conditions"
+  (check
+    ;; Max value
+    (= 255 (run-and-get-result "
+int main() {
+  uint8_t x;
+  x = 255;
+  return x;
+}"))
+    ;; Overflow wraps
+    (= 0 (run-and-get-result "
+int main() {
+  uint8_t x;
+  x = 255;
+  x = x + 1;
+  return x;
+}"))
+    ;; Min value
+    (= 0 (run-and-get-result "
+int main() {
+  uint8_t x;
+  x = 0;
+  return x;
+}"))))
+
+(deftest test-int8-boundaries ()
+  "Test: int8_t boundary conditions"
+  (check
+    ;; Positive max
+    (= 127 (run-and-get-result "
+int main() {
+  int8_t x;
+  x = 127;
+  return x;
+}"))
+    ;; Negative value
+    (result= -1 (run-and-get-result "
+int main() {
+  int8_t x;
+  x = -1;
+  return x;
+}"))
+    ;; Negative 50
+    (result= -50 (run-and-get-result "
+int main() {
+  int8_t x;
+  x = -50;
+  return x;
+}"))))
+
+(deftest test-uint16-boundaries ()
+  "Test: uint16_t boundary conditions"
+  (check
+    ;; Max value
+    (= 65535 (run-and-get-result "
+int main() {
+  uint16_t x;
+  x = 65535;
+  return x;
+}"))
+    ;; Overflow wraps
+    (= 0 (run-and-get-result "
+int main() {
+  uint16_t x;
+  x = 65535;
+  x = x + 1;
+  return x;
+}"))))
+
+(deftest test-int16-boundaries ()
+  "Test: int16_t boundary conditions"
+  (check
+    ;; Positive max
+    (= 32767 (run-and-get-result "
+int main() {
+  int16_t x;
+  x = 32767;
+  return x;
+}"))
+    ;; Negative value
+    (result= -1 (run-and-get-result "
+int main() {
+  int16_t x;
+  x = -1;
+  return x;
+}"))
+    ;; Negative 1000
+    (result= -1000 (run-and-get-result "
+int main() {
+  int16_t x;
+  x = -1000;
+  return x;
+}"))))
+
+(deftest test-sign-extension ()
+  "Test: sign extension when assigning to larger types"
+  (check
+    ;; Negative int8_t to int
+    (result= -50 (run-and-get-result "
+int main() {
+  int8_t x;
+  int y;
+  x = -50;
+  y = x;
+  return y;
+}"))
+    ;; Positive int8_t to int (no sign extension needed)
+    (= 50 (run-and-get-result "
+int main() {
+  int8_t x;
+  int y;
+  x = 50;
+  y = x;
+  return y;
+}"))
+    ;; Negative int16_t to int
+    (result= -1000 (run-and-get-result "
+int main() {
+  int16_t x;
+  int y;
+  x = -1000;
+  y = x;
+  return y;
+}"))))
+
+(deftest test-char-array ()
+  "Test: char arrays"
+  (check
+    (= 3 (run-and-get-result "
+int main() {
+  char arr[4];
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  return arr[2];
+}" :max-cycles 20000))
+    ;; Sum of elements
+    (= 10 (run-and-get-result "
+int main() {
+  char arr[4];
+  int sum;
+  int i;
+  arr[0] = 1;
+  arr[1] = 2;
+  arr[2] = 3;
+  arr[3] = 4;
+  sum = 0;
+  for (i = 0; i < 4; i = i + 1) {
+    sum = sum + arr[i];
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-short-array ()
+  "Test: short arrays"
+  (check
+    (= 300 (run-and-get-result "
+int main() {
+  short arr[4];
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  arr[3] = 400;
+  return arr[2];
+}" :max-cycles 20000))
+    ;; Sum of elements
+    (= 1000 (run-and-get-result "
+int main() {
+  short arr[4];
+  int sum;
+  int i;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  arr[3] = 400;
+  sum = 0;
+  for (i = 0; i < 4; i = i + 1) {
+    sum = sum + arr[i];
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-unsigned-comparison ()
+  "Test: unsigned value comparisons"
+  (check
+    ;; uint8_t comparison
+    (= 1 (run-and-get-result "
+int main() {
+  uint8_t a;
+  uint8_t b;
+  a = 200;
+  b = 100;
+  return a > b;
+}"))
+    ;; uint8_t equal
+    (= 1 (run-and-get-result "
+int main() {
+  uint8_t a;
+  uint8_t b;
+  a = 255;
+  b = 255;
+  return a == b;
+}"))))
+
+(deftest test-mixed-size-arithmetic ()
+  "Test: arithmetic with mixed-size types"
+  (check
+    ;; int8_t + int8_t
+    (= 10 (run-and-get-result "
+int main() {
+  int8_t a;
+  int8_t b;
+  a = 3;
+  b = 7;
+  return a + b;
+}"))
+    ;; int16_t + int16_t
+    (= 1500 (run-and-get-result "
+int main() {
+  int16_t a;
+  int16_t b;
+  a = 500;
+  b = 1000;
+  return a + b;
+}"))))
+
+(deftest test-phase7 ()
+  "Run Phase 7 tests (Extended Integer Types)"
+  (combine-results
+    (test-type-sizes)
+    (test-uint8-boundaries)
+    (test-int8-boundaries)
+    (test-uint16-boundaries)
+    (test-int16-boundaries)
+    (test-sign-extension)
+    (test-char-array)
+    (test-short-array)
+    (test-unsigned-comparison)
+    (test-mixed-size-arithmetic)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -408,4 +675,5 @@ int main() {
     (test-phase3)
     (test-phase4)
     (test-phase5)
-    (test-phase6)))
+    (test-phase6)
+    (test-phase7)))

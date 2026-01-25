@@ -93,24 +93,63 @@
 ;;; ===========================================================================
 
 (defun parse-type-specifier ()
-  "Parse a type specifier (int, char, void, etc.)"
+  "Parse a type specifier with modifiers (signed/unsigned, short/long)"
+  ;; Handle C99 fixed-width types first
   (cond
-    ((match-token 'keyword "int")
-     (make-int-type))
-    ((match-token 'keyword "char")
-     (make-char-type))
+    ((match-token 'keyword "int8_t")
+     (make-int8-type nil))
+    ((match-token 'keyword "uint8_t")
+     (make-int8-type t))
+    ((match-token 'keyword "int16_t")
+     (make-int16-type nil))
+    ((match-token 'keyword "uint16_t")
+     (make-int16-type t))
+    ((match-token 'keyword "int32_t")
+     (make-int32-type nil))
+    ((match-token 'keyword "uint32_t")
+     (make-int32-type t))
     ((match-token 'keyword "void")
      (make-void-type))
-    ((match-token 'keyword "unsigned")
-     ;; unsigned alone or unsigned int
-     (match-token 'keyword "int")
-     (make-int-type))
-    ((match-token 'keyword "signed")
-     (match-token 'keyword "int")
-     (make-int-type))
     (t
-     (compiler-error "Expected type specifier, got ~a"
-                     (token-value (current-token))))))
+     ;; Parse type with possible modifiers
+     (let ((is-unsigned nil)
+           (is-signed nil)
+           (is-short nil)
+           (is-long nil)
+           (has-int nil)
+           (has-char nil))
+       ;; Collect modifiers and base type (can appear in any order)
+       (loop
+         (cond
+           ((match-token 'keyword "unsigned") (setf is-unsigned t))
+           ((match-token 'keyword "signed") (setf is-signed t))
+           ((match-token 'keyword "short") (setf is-short t))
+           ((match-token 'keyword "long") (setf is-long t))
+           ((match-token 'keyword "int") (setf has-int t))
+           ((match-token 'keyword "char") (setf has-char t))
+           (t (return))))
+
+       ;; Determine the final type based on modifiers
+       (cond
+         ;; char types
+         (has-char
+          (make-char-type is-unsigned))
+
+         ;; short types: "short" or "short int"
+         (is-short
+          (make-short-type is-unsigned))
+
+         ;; long types: "long" or "long int"
+         (is-long
+          (make-long-type is-unsigned))
+
+         ;; int types (explicit or implied by unsigned/signed alone)
+         ((or has-int is-unsigned is-signed)
+          (make-int-type is-unsigned))
+
+         (t
+          (compiler-error "Expected type specifier, got ~a"
+                          (token-value (current-token)))))))))
 
 (defun parse-type ()
   "Parse a full type including pointer levels"
@@ -121,7 +160,9 @@
           do (incf ptr-level))
     (make-type-desc :base (type-desc-base base-type)
                     :pointer-level ptr-level
-                    :array-size nil)))
+                    :array-size nil
+                    :size (type-desc-size base-type)
+                    :unsigned-p (type-desc-unsigned-p base-type))))
 
 ;;; ===========================================================================
 ;;; Expression Parsing (Precedence Climbing)
@@ -226,7 +267,9 @@
       ((and (check-token 'punctuation "(")
             (let ((next (peek-token 1)))
               (and next (eq (token-type next) 'keyword)
-                   (member (token-value next) '("int" "char" "void" "unsigned" "signed")
+                   (member (token-value next)
+                           '("int" "char" "void" "unsigned" "signed" "short" "long"
+                             "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
                            :test #'string=))))
        (advance-token) ; skip (
        (let ((cast-type (parse-type)))
@@ -370,7 +413,9 @@
   "Check if token starts a type declaration"
   (and tok
        (eq (token-type tok) 'keyword)
-       (member (token-value tok) '("int" "char" "void" "unsigned" "signed")
+       (member (token-value tok)
+               '("int" "char" "void" "unsigned" "signed" "short" "long"
+                 "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
                :test #'string=)))
 
 (defun parse-compound-statement ()
@@ -479,18 +524,28 @@
           (expect-token 'punctuation "]")
           (setf var-type (make-type-desc :base (type-desc-base var-type)
                                          :pointer-level (type-desc-pointer-level var-type)
-                                         :array-size array-size)))
+                                         :array-size array-size
+                                         :size (type-desc-size var-type)
+                                         :unsigned-p (type-desc-unsigned-p var-type))))
 
         ;; Check for initializer
         (let ((init nil))
           (when (match-token 'operator "=")
             (setf init (parse-assignment-expression)))
 
-          ;; Calculate stack offset
+          ;; Calculate stack offset with alignment
           (let* ((size (if array-size
                            (* array-size (type-size var-type))
                            (type-size var-type)))
-                 (offset (- (compiler-state-local-offset *state*) size)))
+                 ;; Align offset based on variable size (4-byte alignment for int/pointers)
+                 (elem-size (type-size var-type))
+                 (alignment (if (>= elem-size 4) 4
+                               (if (>= elem-size 2) 2 1)))
+                 (current-offset (compiler-state-local-offset *state*))
+                 ;; Round down to align (negative stack growth)
+                 (aligned-offset (- current-offset
+                                    (mod current-offset alignment)))
+                 (offset (- aligned-offset size)))
             (setf (compiler-state-local-offset *state*) offset)
 
             ;; Add to symbol table

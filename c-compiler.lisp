@@ -42,7 +42,9 @@
 (defstruct type-desc
   base           ; int, char, void
   pointer-level  ; 0 = not a pointer, 1 = *, 2 = **, etc.
-  array-size)    ; nil for non-arrays, integer for arrays
+  array-size     ; nil for non-arrays, integer for arrays
+  size           ; 1, 2, or 4 bytes (nil defaults based on base type)
+  unsigned-p)    ; t for unsigned, nil for signed
 
 ;;; Symbol table entry
 (defstruct sym-entry
@@ -157,29 +159,60 @@
 ;;; Type Utilities
 ;;; ===========================================================================
 
-(defun make-int-type ()
-  (make-type-desc :base 'int :pointer-level 0 :array-size nil))
+(defun make-int-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 4 :unsigned-p unsigned))
 
-(defun make-char-type ()
-  (make-type-desc :base 'char :pointer-level 0 :array-size nil))
+(defun make-char-type (&optional unsigned)
+  ;; char is signed by default (matches GCC/Clang x86 behavior)
+  (make-type-desc :base 'char :pointer-level 0 :array-size nil
+                  :size 1 :unsigned-p unsigned))
 
 (defun make-void-type ()
-  (make-type-desc :base 'void :pointer-level 0 :array-size nil))
+  (make-type-desc :base 'void :pointer-level 0 :array-size nil
+                  :size 0 :unsigned-p nil))
+
+(defun make-short-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 2 :unsigned-p unsigned))
+
+(defun make-long-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 4 :unsigned-p unsigned))
+
+;; C99 fixed-width type constructors
+(defun make-int8-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 1 :unsigned-p unsigned))
+
+(defun make-int16-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 2 :unsigned-p unsigned))
+
+(defun make-int32-type (&optional unsigned)
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 4 :unsigned-p unsigned))
 
 (defun make-pointer-type (base-type)
   (make-type-desc :base (type-desc-base base-type)
                   :pointer-level (1+ (type-desc-pointer-level base-type))
-                  :array-size nil))
+                  :array-size nil
+                  :size (type-desc-size base-type)
+                  :unsigned-p (type-desc-unsigned-p base-type)))
 
 (defun type-size (type)
   "Return the size in bytes of a type"
-  (if (> (type-desc-pointer-level type) 0)
-      4  ; pointers are 4 bytes
-      (case (type-desc-base type)
-        (int 4)
-        (char 1)
-        (void 0)
-        (otherwise 4))))
+  (cond
+    ;; Pointers are always 4 bytes
+    ((> (type-desc-pointer-level type) 0) 4)
+    ;; Use explicit size if set
+    ((type-desc-size type) (type-desc-size type))
+    ;; Fall back to base type defaults
+    (t (case (type-desc-base type)
+         (int 4)
+         (char 1)
+         (void 0)
+         (otherwise 4)))))
 
 (defun is-pointer-type (type)
   (> (type-desc-pointer-level type) 0))

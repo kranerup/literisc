@@ -61,6 +61,124 @@
 (defvar *param-save-offset* 0)  ; offset where saved params start on stack
 
 ;;; ===========================================================================
+;;; Sized Memory Access Helpers
+;;; ===========================================================================
+
+(defun emit-load-sized (type temp-reg)
+  "Emit load instruction based on type size. Address in A, result in temp-reg."
+  (let ((size (type-size type)))
+    (case size
+      (1 (emit `(Rx=M[A].b ,temp-reg)))
+      (2 (emit `(Rx=M[A].w ,temp-reg)))
+      (otherwise (emit `(Rx=M[A] ,temp-reg))))))
+
+(defun emit-store-sized (type value-reg)
+  "Emit store instruction based on type size. Address in A, value in value-reg."
+  (let ((size (type-size type)))
+    (case size
+      (1 (emit `(M[A].b=Rx ,value-reg)))
+      (2 (emit `(M[A].w=Rx ,value-reg)))
+      (otherwise (emit `(M[A]=Rx ,value-reg))))))
+
+(defun emit-load-sized-offset (type offset temp-reg)
+  "Emit load instruction with offset based on type size. Base address in A."
+  (let ((size (type-size type)))
+    (case size
+      (1 (emit `(Rx=M[A+n].b ,offset ,temp-reg)))
+      (2 ;; No M[A+n].w instruction - compute address first
+       (emit `(Rx= ,offset ,temp-reg))
+       (emit `(A+=Rx ,temp-reg))
+       (emit `(Rx=M[A].w ,temp-reg)))
+      (otherwise (emit `(Rx=M[A+n] ,offset ,temp-reg))))))
+
+(defun emit-store-sized-offset (type offset value-reg)
+  "Emit store instruction with offset based on type size. Base address in A."
+  (let ((size (type-size type)))
+    (case size
+      (1 (emit `(M[A+n].b=Rx ,offset ,value-reg)))
+      (2 ;; No M[A+n].w instruction - compute address first
+       (let ((addr-temp (alloc-temp-reg)))
+         (emit `(Rx= ,offset ,addr-temp))
+         (emit `(A+=Rx ,addr-temp))
+         (emit `(M[A].w=Rx ,value-reg))
+         (free-temp-reg addr-temp)))
+      (otherwise (emit `(M[A+n]=Rx ,offset ,value-reg))))))
+
+;;; ===========================================================================
+;;; Sign Extension Helpers
+;;; ===========================================================================
+
+(defun emit-sign-extend (type)
+  "Sign extend value in A if needed for signed types smaller than 32 bits"
+  (when (and (not (type-desc-unsigned-p type))
+             (< (type-size type) 4))
+    (case (type-size type)
+      (1 (emit-sign-extend-byte))
+      (2 (emit-sign-extend-word)))))
+
+(defun emit-sign-extend-byte ()
+  "Sign extend byte in A (bit 7 → bits 8-31)"
+  ;; Check if bit 7 is set: if (A & 0x80) A |= 0xFFFFFF00
+  (let ((done-label (gen-label "SEXTBDONE"))
+        (save-reg (alloc-temp-reg))
+        (mask-reg (alloc-temp-reg)))
+    (emit `(Rx=A ,save-reg))       ; save original value
+    (emit `(Rx= #x80 ,mask-reg))
+    (emit `(A&=Rx ,mask-reg))      ; A = A & 0x80
+    (emit `(Rx= 0 ,mask-reg))
+    (emit `(A-=Rx ,mask-reg))      ; test if zero
+    (emit `(jz ,done-label))       ; if bit 7 not set, done
+    ;; Sign bit is set, extend with 1s
+    (emit `(A=Rx ,save-reg))       ; restore original
+    (emit `(Rx= #xFFFFFF00 ,mask-reg))
+    (emit `(A\|=Rx ,mask-reg))     ; A |= 0xFFFFFF00
+    (emit `(Rx=A ,save-reg))       ; save result
+    (emit-label done-label)
+    (emit `(A=Rx ,save-reg))       ; A = result
+    (free-temp-reg mask-reg)
+    (free-temp-reg save-reg)))
+
+(defun emit-sign-extend-word ()
+  "Sign extend word in A (bit 15 → bits 16-31)"
+  ;; Check if bit 15 is set: if (A & 0x8000) A |= 0xFFFF0000
+  (let ((done-label (gen-label "SEXTWDONE"))
+        (save-reg (alloc-temp-reg))
+        (mask-reg (alloc-temp-reg)))
+    (emit `(Rx=A ,save-reg))       ; save original value
+    (emit `(Rx= #x8000 ,mask-reg))
+    (emit `(A&=Rx ,mask-reg))      ; A = A & 0x8000
+    (emit `(Rx= 0 ,mask-reg))
+    (emit `(A-=Rx ,mask-reg))      ; test if zero
+    (emit `(jz ,done-label))       ; if bit 15 not set, done
+    ;; Sign bit is set, extend with 1s
+    (emit `(A=Rx ,save-reg))       ; restore original
+    (emit `(Rx= #xFFFF0000 ,mask-reg))
+    (emit `(A\|=Rx ,mask-reg))     ; A |= 0xFFFF0000
+    (emit `(Rx=A ,save-reg))       ; save result
+    (emit-label done-label)
+    (emit `(A=Rx ,save-reg))       ; A = result
+    (free-temp-reg mask-reg)
+    (free-temp-reg save-reg)))
+
+(defun emit-mask-to-size (type)
+  "Mask value in A to appropriate size (for storing sub-word values)"
+  (let ((size (type-size type)))
+    (case size
+      (1 (emit `(Rx= #xFF R0))
+         (emit `(A&=Rx R0)))
+      (2 (emit `(Rx= #xFFFF R0))
+         (emit `(A&=Rx R0))))))
+
+(defun emit-promote-to-int (type)
+  "Promote value in A to int (32-bit) for arithmetic"
+  (when (< (type-size type) 4)
+    (if (type-desc-unsigned-p type)
+        ;; Unsigned: already zero-extended by .b/.w load
+        nil
+        ;; Signed: need sign extension
+        (emit-sign-extend type))))
+
+;;; ===========================================================================
 ;;; Main Code Generation Entry Points
 ;;; ===========================================================================
 
@@ -138,7 +256,7 @@
 
 (defun contains-call (node)
   "Check if AST node or children contain a function call"
-  (when node
+  (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
         (some #'contains-call (ast-node-children node)))))
 
@@ -376,14 +494,18 @@
   (dolist (decl (ast-node-children node))
     (when (eq (ast-node-type decl) 'var-decl)
       (let ((name (ast-node-value decl))
-            (init (first (ast-node-children decl))))
+            (init (first (ast-node-children decl)))
+            (var-type (ast-node-result-type decl)))
         (when init
           ;; Generate initializer
           (generate-expression init)
-          ;; Store to local variable
+          ;; Mask value to appropriate size before storing
+          (when (and var-type (< (type-size var-type) 4))
+            (emit-mask-to-size var-type))
+          ;; Store to local variable with appropriate size
           (let ((sym (lookup-symbol name)))
             (when sym
-              (generate-store-local (sym-entry-offset sym)))))))))
+              (generate-store-local (sym-entry-offset sym) var-type))))))))
 
 ;;; ===========================================================================
 ;;; Expression Generation
@@ -467,7 +589,7 @@
 
       (:local
        ;; For arrays, return the address (array-to-pointer decay)
-       ;; For scalars, load the value from stack
+       ;; For scalars, load the value from stack with appropriate size
        (let ((var-type (sym-entry-type sym))
              (offset (+ (sym-entry-offset sym) *frame-size*)))
          (if (and var-type (type-desc-array-size var-type))
@@ -477,30 +599,38 @@
                (emit `(Rx= ,offset ,temp))
                (emit `(A+=Rx ,temp))
                (free-temp-reg temp))
-             ;; Scalar: load value from stack
+             ;; Scalar: load value from stack with sized load
              (let ((temp (alloc-temp-reg)))
                (emit `(A=Rx SP))
-               (emit `(Rx=M[A+n] ,offset ,temp))
+               (emit-load-sized-offset var-type offset temp)
                (emit `(A=Rx ,temp))
-               (free-temp-reg temp)))))
+               (free-temp-reg temp)
+               ;; Apply sign extension for signed sub-word types
+               (emit-promote-to-int var-type)))))
 
       (:global
-       ;; Load from global address
+       ;; Load from global address with sized load
        (let ((label (intern (string-upcase name) :c-compiler))
+             (var-type (sym-entry-type sym))
              (temp (alloc-temp-reg)))
          (emit `(Rx= ,label ,temp))
          (emit `(A=Rx ,temp))
-         (emit `(Rx=M[A] ,temp))
+         (emit-load-sized var-type temp)
          (emit `(A=Rx ,temp))
-         (free-temp-reg temp))))))
+         (free-temp-reg temp)
+         ;; Apply sign extension for signed sub-word types
+         (when var-type
+           (emit-promote-to-int var-type)))))))
 
-(defun generate-store-local (offset)
-  "Generate code to store A to a local variable at offset"
+(defun generate-store-local (offset &optional var-type)
+  "Generate code to store A to a local variable at offset with optional sized store"
   (let ((actual-offset (+ offset *frame-size*))
         (value-reg (alloc-temp-reg)))
     (emit `(Rx=A ,value-reg))           ; save value
     (emit `(A=Rx SP))                   ; get SP
-    (emit `(M[A+n]=Rx ,actual-offset ,value-reg)) ; store
+    (if (and var-type (< (type-size var-type) 4))
+        (emit-store-sized-offset var-type actual-offset value-reg)
+        (emit `(M[A+n]=Rx ,actual-offset ,value-reg))) ; store
     (free-temp-reg value-reg)))
 
 (defun generate-binary-op (node)
@@ -806,53 +936,95 @@
      (compiler-error "Cannot take address of ~a" (ast-node-type node)))))
 
 (defun generate-store-lvalue (node)
-  "Generate code to store A to an lvalue"
+  "Generate code to store A to an lvalue with appropriate sized store"
   (case (ast-node-type node)
     (var-ref
      (let* ((name (ast-node-value node))
             (sym (lookup-symbol name)))
        (unless sym
          (compiler-error "Undefined variable: ~a" name))
-       (case (sym-entry-storage sym)
-         (:local
-          (let ((offset (+ (sym-entry-offset sym) *frame-size*))
-                (value-reg (alloc-temp-reg)))
-            (emit `(Rx=A ,value-reg))
-            (emit `(A=Rx SP))
-            (emit `(M[A+n]=Rx ,offset ,value-reg))
-            (free-temp-reg value-reg)))
-         (:global
-          (let ((label (intern (string-upcase name) :c-compiler))
-                (value-reg (alloc-temp-reg))
-                (addr-reg (alloc-temp-reg)))
-            (emit `(Rx=A ,value-reg))
-            (emit `(Rx= ,label ,addr-reg))
-            (emit `(A=Rx ,addr-reg))
-            (emit `(M[A]=Rx ,value-reg))
-            (free-temp-reg addr-reg)
-            (free-temp-reg value-reg)))
-         (:parameter
-          (let ((idx (sym-entry-offset sym)))
-            (if (< idx 4)
-                (emit `(Rx=A ,(nth idx *param-regs*)))
-                (compiler-error "Cannot store to stack parameter")))))))
+       (let ((var-type (sym-entry-type sym)))
+         (case (sym-entry-storage sym)
+           (:local
+            (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+                  (value-reg (alloc-temp-reg)))
+              (emit `(Rx=A ,value-reg))
+              (emit `(A=Rx SP))
+              (if (and var-type (< (type-size var-type) 4))
+                  (emit-store-sized-offset var-type offset value-reg)
+                  (emit `(M[A+n]=Rx ,offset ,value-reg)))
+              (free-temp-reg value-reg)))
+           (:global
+            (let ((label (intern (string-upcase name) :c-compiler))
+                  (value-reg (alloc-temp-reg))
+                  (addr-reg (alloc-temp-reg)))
+              (emit `(Rx=A ,value-reg))
+              (emit `(Rx= ,label ,addr-reg))
+              (emit `(A=Rx ,addr-reg))
+              (if (and var-type (< (type-size var-type) 4))
+                  (emit-store-sized var-type value-reg)
+                  (emit `(M[A]=Rx ,value-reg)))
+              (free-temp-reg addr-reg)
+              (free-temp-reg value-reg)))
+           (:parameter
+            (let ((idx (sym-entry-offset sym)))
+              (if (< idx 4)
+                  (emit `(Rx=A ,(nth idx *param-regs*)))
+                  (compiler-error "Cannot store to stack parameter"))))))))
     (unary-op
-     ;; *ptr = value
+     ;; *ptr = value - need to determine element type from pointer
      (when (string= (ast-node-value node) "*")
-       (let ((value-reg (alloc-temp-reg)))
+       (let ((value-reg (alloc-temp-reg))
+             (ptr-type (get-lvalue-type (first (ast-node-children node)))))
          (emit `(Rx=A ,value-reg))  ; save value
          (generate-expression (first (ast-node-children node)))  ; get pointer
-         (emit `(M[A]=Rx ,value-reg))  ; store value at pointer
+         (if (and ptr-type (< (type-size ptr-type) 4))
+             (emit-store-sized ptr-type value-reg)
+             (emit `(M[A]=Rx ,value-reg)))  ; store value at pointer
          (free-temp-reg value-reg))))
     (subscript
-     ;; arr[i] = value
-     (let ((value-reg (alloc-temp-reg)))
+     ;; arr[i] = value - get element type
+     (let ((value-reg (alloc-temp-reg))
+           (elem-type (get-subscript-element-type node)))
        (emit `(Rx=A ,value-reg))  ; save value
        (generate-subscript-address node)  ; get address
-       (emit `(M[A]=Rx ,value-reg))  ; store
+       (if (and elem-type (< (type-size elem-type) 4))
+           (emit-store-sized elem-type value-reg)
+           (emit `(M[A]=Rx ,value-reg)))  ; store
        (free-temp-reg value-reg)))
     (otherwise
      (compiler-error "Cannot assign to ~a" (ast-node-type node)))))
+
+(defun get-lvalue-type (node)
+  "Get the type of an lvalue expression (for determining store size)"
+  (case (ast-node-type node)
+    (var-ref
+     (let ((sym (lookup-symbol (ast-node-value node))))
+       (when sym
+         (let ((var-type (sym-entry-type sym)))
+           (when (and var-type (> (type-desc-pointer-level var-type) 0))
+             ;; Dereferencing a pointer - return element type
+             (make-type-desc :base (type-desc-base var-type)
+                             :pointer-level (1- (type-desc-pointer-level var-type))
+                             :size (type-desc-size var-type)
+                             :unsigned-p (type-desc-unsigned-p var-type)))))))
+    (otherwise nil)))
+
+(defun get-subscript-element-type (node)
+  "Get the element type for an array subscript expression"
+  (let ((array-node (first (ast-node-children node))))
+    (case (ast-node-type array-node)
+      (var-ref
+       (let ((sym (lookup-symbol (ast-node-value array-node))))
+         (when sym
+           (let ((arr-type (sym-entry-type sym)))
+             (when arr-type
+               ;; Return element type (pointer level - 1 or same for array)
+               (make-type-desc :base (type-desc-base arr-type)
+                               :pointer-level (max 0 (1- (type-desc-pointer-level arr-type)))
+                               :size (type-desc-size arr-type)
+                               :unsigned-p (type-desc-unsigned-p arr-type)))))))
+      (otherwise nil))))
 
 (defun generate-assignment (node)
   "Generate code for assignment"
@@ -945,28 +1117,45 @@
         (emit '(A=Rx P0))))))
 
 (defun generate-subscript (node)
-  "Generate code for array subscript"
-  (generate-subscript-address node)
-  ;; Load value at computed address
-  (let ((temp (alloc-temp-reg)))
-    (emit `(Rx=M[A] ,temp))
-    (emit `(A=Rx ,temp))
-    (free-temp-reg temp)))
+  "Generate code for array subscript with sized load"
+  (let ((elem-type (get-subscript-element-type node)))
+    (generate-subscript-address node)
+    ;; Load value at computed address with appropriate size
+    (let ((temp (alloc-temp-reg)))
+      (if (and elem-type (< (type-size elem-type) 4))
+          (emit-load-sized elem-type temp)
+          (emit `(Rx=M[A] ,temp)))
+      (emit `(A=Rx ,temp))
+      (free-temp-reg temp)
+      ;; Apply sign extension for signed sub-word types
+      (when elem-type
+        (emit-promote-to-int elem-type)))))
 
 (defun generate-subscript-address (node)
   "Generate code to compute address of array subscript"
-  (let ((array (first (ast-node-children node)))
-        (index (second (ast-node-children node)))
-        (base-reg (alloc-temp-reg)))
+  (let* ((array (first (ast-node-children node)))
+         (index (second (ast-node-children node)))
+         (elem-type (get-subscript-element-type node))
+         (elem-size (if elem-type (type-size elem-type) 4))
+         (base-reg (alloc-temp-reg)))
     ;; Get array base address
     (generate-expression array)
     (emit `(Rx=A ,base-reg))  ; save base
 
     ;; Get index
     (generate-expression index)
-    ;; Multiply by element size (assume 4 bytes for now)
-    (emit '(A=A<<1))
-    (emit '(A=A<<1))
+    ;; Multiply by element size
+    (case elem-size
+      (1 nil)                     ; no shift needed for byte
+      (2 (emit '(A=A<<1)))        ; * 2 for short
+      (4 (emit '(A=A<<1))         ; * 4 for int/pointer
+         (emit '(A=A<<1)))
+      (otherwise
+       ;; General case: use software multiply
+       (let ((size-reg (alloc-temp-reg)))
+         (emit `(Rx= ,elem-size ,size-reg))
+         (generate-multiply size-reg)
+         (free-temp-reg size-reg))))
 
     ;; Add to base
     (emit `(A+=Rx ,base-reg))
@@ -1008,11 +1197,21 @@
 
 (defun generate-sizeof (node)
   "Generate code for sizeof"
-  (let ((operand (first (ast-node-children node))))
-    (if (type-desc-p operand)
-        (emit `(Rx= ,(type-size operand) R0))
-        ;; sizeof expression - just compute type size
-        (emit '(Rx= 4 R0)))  ; default to 4 bytes
+  (let* ((operand (first (ast-node-children node)))
+         (size (cond
+                 ;; sizeof(type)
+                 ((type-desc-p operand)
+                  (type-size operand))
+                 ;; sizeof(variable)
+                 ((and (ast-node-p operand)
+                       (eq (ast-node-type operand) 'var-ref))
+                  (let ((sym (lookup-symbol (ast-node-value operand))))
+                    (if (and sym (sym-entry-type sym))
+                        (type-size (sym-entry-type sym))
+                        4)))
+                 ;; sizeof(expression) - default to 4 bytes
+                 (t 4))))
+    (emit `(Rx= ,size R0))
     (emit '(A=Rx R0))))
 
 ;;; ===========================================================================
@@ -1212,7 +1411,7 @@
 
 (defun collect-strings (node)
   "Collect all string literals in AST"
-  (when node
+  (when (and node (ast-node-p node))
     (when (eq (ast-node-type node) 'string-literal)
       (let ((str (ast-node-value node)))
         (unless (find str *string-literals* :key #'cdr :test #'string=)
