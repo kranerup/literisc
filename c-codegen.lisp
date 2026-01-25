@@ -580,7 +580,8 @@
               (free-temp-reg temp)))
            ;; Stack parameter (5th param and beyond)
            (t
-            (let ((save-param-space (* 4 (min *current-param-count* 4)))
+            (let ((save-param-space (if *is-leaf-function* 0
+                                        (* 4 (min *current-param-count* 4))))
                   (temp (alloc-temp-reg)))
               (let ((offset (+ *frame-size* save-param-space
                                (if *is-leaf-function* 0 4)  ; saved SRP
@@ -1164,13 +1165,23 @@
           (emit `(push-r ,reg)))
 
         ;; Handle stack arguments (args 5+) - evaluate and push
+        ;; Note: Can't use push-r because it's a multi-register push (R0..Rn)
+        ;; Instead manually decrement SP and store
         (when (> arg-count 4)
           (loop for i from (1- arg-count) downto 4
                 for arg = (nth i args)
-                do (progn
+                do (let ((value-temp (alloc-temp-reg))
+                         (const-temp (alloc-temp-reg)))
                      (generate-expression arg)
-                     (emit '(Rx=A R0))
-                     (emit '(push-r R0)))))
+                     (emit `(Rx=A ,value-temp))
+                     ;; Decrement SP and store value
+                     (emit '(A=Rx SP))
+                     (emit `(Rx= -4 ,const-temp))
+                     (emit `(A+=Rx ,const-temp))
+                     (emit '(Rx=A SP))
+                     (emit `(M[A]=Rx ,value-temp))
+                     (free-temp-reg const-temp)
+                     (free-temp-reg value-temp))))
 
         ;; Move evaluated args from temp regs to P0-P3
         (loop for i from 0 below (min arg-count 4)
