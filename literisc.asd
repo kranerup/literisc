@@ -26,5 +26,6 @@
                (:file "c-compiler")
                (:file "c-lexer")
                (:file "c-parser")
+               (:file "c-optimizer")
                (:file "c-codegen")
                (:file "c-compiler-tests")))

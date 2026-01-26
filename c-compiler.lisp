@@ -16,6 +16,8 @@
            :tokenize
            :parse-program
            :generate-program
+           ;; Optimization
+           :fold-constants
            ;; Pretty printing and test output
            :pretty-print-asm
            :pretty-print-asm-to-string
@@ -78,7 +80,8 @@
   (errors nil)           ; compilation errors
   (warnings nil)         ; compilation warnings
   (source-lines nil)     ; original source lines for annotations
-  (source-annotations t)) ; enable source annotations in output
+  (source-annotations t) ; enable source annotations in output
+  (optimize nil))        ; enable optimizations when t
 
 ;;; Global compiler state
 (defvar *state* nil)
@@ -285,7 +288,7 @@
       (push (subseq source start) lines))
     (nreverse lines)))
 
-(defun compile-c (source &key (verbose nil) (annotate t))
+(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil))
   "Compile C source code to assembly S-expressions"
   (let ((*state* (make-compiler-state))
         (*current-source-line* nil)
@@ -293,6 +296,7 @@
     ;; Store source lines for annotations
     (setf (compiler-state-source-lines *state*) (split-source-lines source))
     (setf (compiler-state-source-annotations *state*) annotate)
+    (setf (compiler-state-optimize *state*) optimize)
 
     ;; Lexical analysis
     (setf (compiler-state-tokens *state*) (tokenize source))
@@ -307,8 +311,15 @@
     ;; Parsing
     (let ((ast (parse-program)))
       (when verbose
-        (format t "~%AST:~%")
+        (format t "~%AST (before optimization):~%")
         (print-ast ast))
+
+      ;; Apply optimizations if enabled
+      (when optimize
+        (setf ast (fold-constants ast))
+        (when verbose
+          (format t "~%AST (after optimization):~%")
+          (print-ast ast)))
 
       ;; Code generation
       (generate-program ast)

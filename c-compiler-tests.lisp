@@ -1284,6 +1284,198 @@ int main() {
     (test-double-pointer)
     (test-pointer-null)))
 
+;;; ===========================================================================
+;;; Phase 10 Tests: Constant Folding Optimization
+;;; ===========================================================================
+
+(defun run-optimized (source &key (max-cycles 10000))
+  "Compile with optimization enabled, run, and return the result"
+  (handler-case
+      (let* ((asm (compile-c source :optimize t :annotate nil))
+             (mcode (assemble (strip-asm-comments asm) nil))
+             (dmem (lr-emulator:make-dmem #x10000))
+             (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug nil)))
+        (lr-emulator:run-emul emul max-cycles nil)
+        (aref (lr-emulator::processor-state-r
+               (lr-emulator:emulated-system-processor emul))
+              10))
+    (error (e)
+      (format t "Error in optimized run: ~a~%" e)
+      nil)))
+
+(deftest test-fold-arithmetic ()
+  "Test: constant folding of arithmetic operations"
+  (check
+    ;; Basic arithmetic
+    (= 5 (run-optimized "int main() { return 2 + 3; }"))
+    (= 200 (run-optimized "int main() { return 10 * 20; }"))
+    (= 7 (run-optimized "int main() { return 15 - 8; }"))
+    (= 5 (run-optimized "int main() { return 15 / 3; }"))
+    (= 2 (run-optimized "int main() { return 17 % 5; }"))
+    ;; Nested arithmetic
+    (= 14 (run-optimized "int main() { return 2 + 3 * 4; }"))
+    (= 20 (run-optimized "int main() { return (2 + 3) * 4; }"))
+    (= 26 (run-optimized "int main() { return 2 * 3 + 4 * 5; }"))
+    ;; Complex nesting
+    (= 14 (run-optimized "int main() { return 2 * (3 + 4); }"))
+    (= 47 (run-optimized "int main() { return (1 + 2) * (3 + 4) + (5 + 6) + (7 + 8); }"))))
+
+(deftest test-fold-bitwise ()
+  "Test: constant folding of bitwise operations"
+  (check
+    ;; AND, OR, XOR
+    (= 15 (run-optimized "int main() { return 0xFF & 0x0F; }"))
+    (= 255 (run-optimized "int main() { return 0xF0 | 0x0F; }"))
+    (= 240 (run-optimized "int main() { return 0xFF ^ 0x0F; }"))
+    ;; Shifts
+    (= 8 (run-optimized "int main() { return 2 << 2; }"))
+    (= 4 (run-optimized "int main() { return 16 >> 2; }"))
+    ;; Nested bitwise
+    (= 7 (run-optimized "int main() { return (0xFF & 0x0F) >> 1; }"))))
+
+(deftest test-fold-comparison ()
+  "Test: constant folding of comparison operations"
+  (check
+    ;; Equality
+    (= 1 (run-optimized "int main() { return 5 == 5; }"))
+    (= 0 (run-optimized "int main() { return 5 == 6; }"))
+    (= 1 (run-optimized "int main() { return 5 != 6; }"))
+    (= 0 (run-optimized "int main() { return 5 != 5; }"))
+    ;; Relational
+    (= 1 (run-optimized "int main() { return 3 < 5; }"))
+    (= 0 (run-optimized "int main() { return 5 < 3; }"))
+    (= 1 (run-optimized "int main() { return 5 > 3; }"))
+    (= 0 (run-optimized "int main() { return 3 > 5; }"))
+    (= 1 (run-optimized "int main() { return 5 <= 5; }"))
+    (= 1 (run-optimized "int main() { return 5 >= 5; }"))
+    ;; Nested comparison in expression
+    (= 2 (run-optimized "int main() { return (3 < 5) + (5 > 3); }"))))
+
+(deftest test-fold-logical ()
+  "Test: constant folding of logical operations"
+  (check
+    ;; AND
+    (= 1 (run-optimized "int main() { return 1 && 1; }"))
+    (= 0 (run-optimized "int main() { return 1 && 0; }"))
+    (= 0 (run-optimized "int main() { return 0 && 1; }"))
+    (= 0 (run-optimized "int main() { return 0 && 0; }"))
+    ;; OR
+    (= 1 (run-optimized "int main() { return 1 || 0; }"))
+    (= 1 (run-optimized "int main() { return 0 || 1; }"))
+    (= 1 (run-optimized "int main() { return 1 || 1; }"))
+    (= 0 (run-optimized "int main() { return 0 || 0; }"))
+    ;; NOT
+    (= 0 (run-optimized "int main() { return !1; }"))
+    (= 1 (run-optimized "int main() { return !0; }"))
+    (= 0 (run-optimized "int main() { return !!0; }"))
+    (= 1 (run-optimized "int main() { return !!42; }"))))
+
+(deftest test-fold-unary ()
+  "Test: constant folding of unary operations"
+  (check
+    ;; Negation
+    (result= -5 (run-optimized "int main() { return -5; }"))
+    (= 5 (run-optimized "int main() { return -(-5); }"))
+    (result= -100 (run-optimized "int main() { return -(50 + 50); }"))
+    ;; Bitwise NOT
+    (result= -1 (run-optimized "int main() { return ~0; }"))
+    (= 0 (run-optimized "int main() { return ~(~0); }"))))
+
+(deftest test-fold-sizeof ()
+  "Test: constant folding of sizeof"
+  (check
+    (= 4 (run-optimized "int main() { return sizeof(int); }"))
+    (= 1 (run-optimized "int main() { return sizeof(char); }"))
+    (= 2 (run-optimized "int main() { return sizeof(short); }"))
+    ;; sizeof in expression
+    (= 8 (run-optimized "int main() { return sizeof(int) + sizeof(int); }"))
+    (= 4 (run-optimized "int main() { return sizeof(int) * sizeof(char); }"))))
+
+;; Note: Ternary operator test skipped - ternary (?:) not fully implemented in lexer/parser
+
+(deftest test-fold-cast ()
+  "Test: constant folding of cast expressions"
+  (check
+    ;; Cast to int (no change)
+    (= 42 (run-optimized "int main() { return (int)42; }"))
+    ;; Cast to char (mask to 8 bits)
+    (= 255 (run-optimized "int main() { return (char)255; }"))
+    (= 0 (run-optimized "int main() { return (char)256; }"))
+    ;; Cast of expression result
+    (= 44 (run-optimized "int main() { return (int)(42 + 2); }"))))
+
+(deftest test-fold-mixed ()
+  "Test: constant folding with mixed expressions (variables and constants)"
+  (check
+    ;; Constant part should be folded even with variables
+    (= 15 (run-optimized "
+int main() {
+  int x;
+  x = 5;
+  return x + 10;
+}"))
+    ;; Entire constant sub-expression should be folded
+    (= 25 (run-optimized "
+int main() {
+  int x;
+  x = 5;
+  return x + (2 + 3) * 4;
+}"))
+    ;; Multiple constants in different branches: (2*3) + (4*5) + 5 = 6 + 20 + 5 = 31
+    (= 31 (run-optimized "
+int main() {
+  int x;
+  x = 5;
+  return (2 * 3) + (4 * 5) + x;
+}"))))
+
+(deftest test-fold-preserves-behavior ()
+  "Test: optimized code produces same results as unoptimized"
+  (check
+    ;; Complex expressions
+    (= (run-and-get-result "int main() { return 2 + 3 * 4 - 5; }")
+       (run-optimized "int main() { return 2 + 3 * 4 - 5; }"))
+    (= (run-and-get-result "int main() { return (10 / 3) * 3 + (10 % 3); }")
+       (run-optimized "int main() { return (10 / 3) * 3 + (10 % 3); }"))
+    ;; Bitwise operations
+    (= (run-and-get-result "int main() { return (0xAB << 4) & 0xFF0; }")
+       (run-optimized "int main() { return (0xAB << 4) & 0xFF0; }"))
+    ;; Mixed with control flow
+    (= (run-and-get-result "
+int main() {
+  int sum;
+  int i;
+  sum = 0;
+  for (i = 0; i < 5; i = i + 1) {
+    sum = sum + (2 * 3);
+  }
+  return sum;
+}" :max-cycles 50000)
+       (run-optimized "
+int main() {
+  int sum;
+  int i;
+  sum = 0;
+  for (i = 0; i < 5; i = i + 1) {
+    sum = sum + (2 * 3);
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-phase10-constant-folding ()
+  "Run Phase 10 constant folding tests"
+  (combine-results
+    (test-fold-arithmetic)
+    (test-fold-bitwise)
+    (test-fold-comparison)
+    (test-fold-logical)
+    (test-fold-unary)
+    (test-fold-sizeof)
+    ;; test-fold-ternary skipped - ternary operator not implemented in lexer
+    (test-fold-cast)
+    (test-fold-mixed)
+    (test-fold-preserves-behavior)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -1295,7 +1487,8 @@ int main() {
     (test-phase6)
     (test-phase7)
     (test-phase8-params)
-    (test-phase9-pointers)))
+    (test-phase9-pointers)
+    (test-phase10-constant-folding)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
