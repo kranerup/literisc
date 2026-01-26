@@ -13,17 +13,18 @@
 (defvar *test-output-counter* 0 "Counter for generating unique test filenames")
 (defvar *current-test-name* nil "Name of the current test for output filenames")
 
-(defun make-test-output-filename ()
+(defun make-test-output-filename (&key optimize)
   "Generate a unique filename for test output"
   (incf *test-output-counter*)
   ;; Use unit:*test-name* which tracks the current test hierarchy
   (let ((test-name (if unit::*test-name*
                        (format nil "~{~a~^-~}" unit::*test-name*)
                        "test")))
-    (format nil "~a/~3,'0d-~a.asm"
+    (format nil "~a/~3,'0d-~a~a.asm"
             *save-test-outputs*
             *test-output-counter*
-            (string-downcase (substitute #\- #\Space test-name)))))
+            (string-downcase (substitute #\- #\Space test-name))
+            (if optimize "-opt" ""))))
 
 (defun run-and-get-result (source &key (verbose nil) (max-cycles 10000))
   "Compile, run, and return the result in P0"
@@ -1296,11 +1297,22 @@ int main() {
              (dmem (lr-emulator:make-dmem #x10000))
              (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug nil)))
         (lr-emulator:run-emul emul max-cycles nil)
-        (aref (lr-emulator::processor-state-r
-               (lr-emulator:emulated-system-processor emul))
-              10))
+        (let ((result (aref (lr-emulator::processor-state-r
+                             (lr-emulator:emulated-system-processor emul))
+                            10)))
+          ;; Save output if enabled
+          (when *save-test-outputs*
+            (let ((filename (make-test-output-filename :optimize t)))
+              (save-compilation-output source filename :run-result result :optimize t)))
+          result))
     (error (e)
       (format t "Error in optimized run: ~a~%" e)
+      ;; Still try to save on error
+      (when *save-test-outputs*
+        (let ((filename (make-test-output-filename :optimize t)))
+          (handler-case
+              (save-compilation-output source filename :run-result "ERROR" :optimize t)
+            (error () nil))))
       nil)))
 
 (deftest test-fold-arithmetic ()
