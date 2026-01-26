@@ -11,6 +11,7 @@
            :compile-c-to-asm
            :run-c-program
            :test-c-compiler
+           :test-c-compiler-with-output
            ;; Re-export key types/functions
            :tokenize
            :parse-program

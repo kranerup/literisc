@@ -8,12 +8,40 @@
 ;;; Test Utilities
 ;;; ===========================================================================
 
+;;; Test output saving configuration
+(defvar *save-test-outputs* nil "When non-nil, save test outputs to this directory")
+(defvar *test-output-counter* 0 "Counter for generating unique test filenames")
+(defvar *current-test-name* nil "Name of the current test for output filenames")
+
+(defun make-test-output-filename ()
+  "Generate a unique filename for test output"
+  (incf *test-output-counter*)
+  ;; Use unit:*test-name* which tracks the current test hierarchy
+  (let ((test-name (if unit::*test-name*
+                       (format nil "~{~a~^-~}" unit::*test-name*)
+                       "test")))
+    (format nil "~a/~3,'0d-~a.asm"
+            *save-test-outputs*
+            *test-output-counter*
+            (string-downcase (substitute #\- #\Space test-name)))))
+
 (defun run-and-get-result (source &key (verbose nil) (max-cycles 10000))
   "Compile, run, and return the result in P0"
   (handler-case
-      (run-c-program source :verbose verbose :max-cycles max-cycles)
+      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles)))
+        ;; Save output if enabled
+        (when *save-test-outputs*
+          (let ((filename (make-test-output-filename)))
+            (save-compilation-output source filename :run-result result)))
+        result)
     (error (e)
       (format t "Error: ~a~%" e)
+      ;; Still try to save on error
+      (when *save-test-outputs*
+        (let ((filename (make-test-output-filename)))
+          (handler-case
+              (save-compilation-output source filename :run-result "ERROR")
+            (error () nil))))
       nil)))
 
 (defun to-signed-32 (n)
@@ -1268,3 +1296,17 @@ int main() {
     (test-phase7)
     (test-phase8-params)
     (test-phase9-pointers)))
+
+(defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
+  "Run all C compiler tests and save each test's output to a separate file.
+   Creates the output directory if it doesn't exist.
+   Returns t if all tests pass, nil otherwise."
+  ;; Create output directory
+  (ensure-directories-exist (format nil "~a/" output-dir))
+  ;; Reset counter and enable saving
+  (let ((*save-test-outputs* output-dir)
+        (*test-output-counter* 0))
+    (format t "~%Saving test outputs to: ~a~%" output-dir)
+    (let ((result (test-c-compiler)))
+      (format t "~%Saved ~a test outputs to ~a~%" *test-output-counter* output-dir)
+      result)))
