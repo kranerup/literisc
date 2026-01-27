@@ -414,3 +414,296 @@
                  ;; Default to int size
                  (t 4))))
     (make-constant-node size (make-int-type) (ast-node-source-loc node))))
+
+;;; ===========================================================================
+;;; Function Inlining
+;;; ===========================================================================
+
+;;; Parameters for inlining heuristics
+(defparameter *inline-stmt-threshold* 10
+  "Maximum number of statements for auto-inlining")
+(defparameter *inline-max-depth* 3
+  "Maximum inlining depth to prevent infinite expansion")
+
+;;; Global state for inlining pass
+(defvar *inline-counter* 0 "Counter for generating unique inline suffixes")
+(defvar *recursive-functions* nil "Set of recursive function names")
+
+(defun detect-recursive-functions (ast)
+  "Detect which functions are recursive (call themselves directly or indirectly)"
+  (let ((call-graph (make-hash-table :test 'equal))
+        (recursive (make-hash-table :test 'equal)))
+    ;; Build call graph: function -> list of functions it calls
+    (dolist (child (ast-node-children ast))
+      (when (and (ast-node-p child) (eq (ast-node-type child) 'function))
+        (let ((name (ast-node-value child)))
+          (setf (gethash name call-graph) (collect-called-functions child)))))
+    ;; Find recursive functions using DFS
+    (maphash (lambda (name callees)
+               (declare (ignore callees))
+               (when (can-reach name name call-graph (make-hash-table :test 'equal))
+                 (setf (gethash name recursive) t)))
+             call-graph)
+    recursive))
+
+(defun collect-called-functions (node)
+  "Collect all function names called within an AST node"
+  (let ((called nil))
+    (labels ((walk (n)
+               (when (and n (ast-node-p n))
+                 (when (eq (ast-node-type n) 'call)
+                   (let ((func-expr (first (ast-node-children n))))
+                     (when (and (ast-node-p func-expr)
+                                (eq (ast-node-type func-expr) 'var-ref))
+                       (pushnew (ast-node-value func-expr) called :test #'string=))))
+                 (dolist (child (ast-node-children n))
+                   (walk child)))))
+      (walk node))
+    called))
+
+(defun can-reach (start target call-graph visited)
+  "Check if 'start' can reach 'target' in the call graph (detecting cycles)"
+  (when (gethash start visited)
+    (return-from can-reach nil))
+  (setf (gethash start visited) t)
+  (let ((callees (gethash start call-graph)))
+    (or (member target callees :test #'string=)
+        (some (lambda (callee)
+                (can-reach callee target call-graph visited))
+              callees))))
+
+(defun can-inline-function (func-name func-node depth)
+  "Check if a function can be inlined"
+  (when (null func-node)
+    (return-from can-inline-function nil))
+  (let ((data (ast-node-data func-node)))
+    (cond
+      ;; Don't inline if depth limit exceeded
+      ((> depth *inline-max-depth*) nil)
+      ;; Don't inline recursive functions
+      ((gethash func-name *recursive-functions*) nil)
+      ;; Inline if explicitly marked
+      ((getf data :inline-hint) t)
+      ;; Auto-inline small functions when optimizing
+      ((and (compiler-state-optimize *state*)
+            (let ((stmt-count (or (getf data :stmt-count) 999)))
+              (<= stmt-count *inline-stmt-threshold*)))
+       t)
+      (t nil))))
+
+(defun gen-inline-suffix ()
+  "Generate a unique suffix for inlined variable names"
+  (format nil "_i~a" (incf *inline-counter*)))
+
+(defun rename-variable (name suffix)
+  "Rename a variable with an inline suffix"
+  (format nil "~a~a" name suffix))
+
+(defun rename-variables-in-node (node renames suffix)
+  "Recursively rename variables in an AST node"
+  (when (null node)
+    (return-from rename-variables-in-node nil))
+  (unless (ast-node-p node)
+    (return-from rename-variables-in-node node))
+
+  (case (ast-node-type node)
+    ;; Variable reference - check if needs renaming
+    (var-ref
+     (let* ((name (ast-node-value node))
+            (new-name (gethash name renames)))
+       (if new-name
+           (make-ast-node :type 'var-ref
+                          :value new-name
+                          :result-type (ast-node-result-type node)
+                          :source-loc (ast-node-source-loc node))
+           node)))
+
+    ;; Variable declaration - rename and track
+    (var-decl
+     (let* ((name (ast-node-value node))
+            (new-name (rename-variable name suffix)))
+       (setf (gethash name renames) new-name)
+       (make-ast-node :type 'var-decl
+                      :value new-name
+                      :children (mapcar (lambda (c) (rename-variables-in-node c renames suffix))
+                                        (ast-node-children node))
+                      :result-type (ast-node-result-type node)
+                      :source-loc (ast-node-source-loc node)
+                      :data (ast-node-data node))))
+
+    ;; Other nodes - recursively process children
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (rename-variables-in-node c renames suffix))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
+(defun transform-returns (node result-var exit-label)
+  "Transform return statements to assignments + jumps for inlining"
+  (when (null node)
+    (return-from transform-returns nil))
+  (unless (ast-node-p node)
+    (return-from transform-returns node))
+
+  (case (ast-node-type node)
+    ;; Transform return into: result = expr; goto exit_label;
+    (return
+     (let ((return-expr (first (ast-node-children node))))
+       (if return-expr
+           ;; return expr; -> { result = expr; jump to exit; }
+           ;; The assign must be wrapped in expr-stmt for generate-statement to handle it
+           (make-ast-node :type 'block
+                          :children (list
+                                     (make-ast-node :type 'expr-stmt
+                                                    :children (list
+                                                               (make-ast-node :type 'assign
+                                                                              :value "="
+                                                                              :children (list
+                                                                                         (make-ast-node :type 'var-ref
+                                                                                                        :value result-var)
+                                                                                         (transform-returns return-expr result-var exit-label)))))
+                                     (make-ast-node :type 'inline-return-jump
+                                                    :value exit-label))
+                          :source-loc (ast-node-source-loc node))
+           ;; return; -> jump to exit;
+           (make-ast-node :type 'inline-return-jump
+                          :value exit-label
+                          :source-loc (ast-node-source-loc node)))))
+
+    ;; Other nodes - recursively process children
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (transform-returns c result-var exit-label))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
+(defun inline-call (call-node func-node depth)
+  "Inline a function call, returning an inline-expr node"
+  (let* ((suffix (gen-inline-suffix))
+         (result-var (format nil "__inline_result~a" suffix))
+         (exit-label (intern (format nil "INLINE_RET~a" suffix) :c-compiler))
+         (args (rest (ast-node-children call-node)))
+         (params-node (first (ast-node-children func-node)))
+         (body (second (ast-node-children func-node)))
+         (param-nodes (ast-node-children params-node))
+         (renames (make-hash-table :test 'equal))
+         (init-stmts nil))
+
+    ;; Create parameter initializations
+    (loop for param in param-nodes
+          for arg in args
+          for i from 0
+          when (ast-node-value param) ; param might have no name in declaration
+          do (let* ((param-name (ast-node-value param))
+                    (temp-name (format nil "__inline_p~a~a" i suffix)))
+               ;; Map parameter name to temp name
+               (setf (gethash param-name renames) temp-name)
+               ;; Create: type temp = arg;
+               (push (make-ast-node :type 'var-decl
+                                    :value temp-name
+                                    :children (list (inline-functions-in-node arg (1+ depth)))
+                                    :result-type (ast-node-result-type param))
+                     init-stmts)))
+
+    ;; Create result variable declaration
+    (let ((result-decl (make-ast-node :type 'var-decl
+                                      :value result-var
+                                      :result-type (or (ast-node-result-type func-node)
+                                                       (make-int-type)))))
+      (push result-decl init-stmts))
+
+    ;; Rename local variables in body to avoid conflicts
+    (let* ((renamed-body (rename-variables-in-node body renames suffix))
+           ;; Transform returns to assignments + jumps
+           (transformed-body (transform-returns renamed-body result-var exit-label))
+           ;; Further inline any calls in the body
+           (inlined-body (inline-functions-in-node transformed-body (1+ depth))))
+
+      ;; Create the inline expression node
+      (make-ast-node :type 'inline-expr
+                     :value result-var
+                     :children (list
+                                ;; Initialization block
+                                (make-ast-node :type 'decl-list
+                                               :children (nreverse init-stmts))
+                                ;; Inlined body
+                                inlined-body
+                                ;; Exit label
+                                (make-ast-node :type 'inline-return-label
+                                               :value exit-label))
+                     :result-type (ast-node-result-type func-node)
+                     :source-loc (ast-node-source-loc call-node)))))
+
+(defun inline-functions-in-node (node depth)
+  "Recursively inline function calls in an AST node"
+  (when (null node)
+    (return-from inline-functions-in-node nil))
+  (unless (ast-node-p node)
+    (return-from inline-functions-in-node node))
+
+  (case (ast-node-type node)
+    ;; Function call - potentially inline
+    (call
+     (let* ((func-expr (first (ast-node-children node)))
+            (func-name (when (and (ast-node-p func-expr)
+                                  (eq (ast-node-type func-expr) 'var-ref))
+                         (ast-node-value func-expr)))
+            (func-node (when func-name
+                         (gethash func-name (compiler-state-function-table *state*)))))
+       (if (and func-node (can-inline-function func-name func-node depth))
+           ;; Inline the call
+           (inline-call node func-node depth)
+           ;; Don't inline - just process arguments
+           (make-ast-node :type 'call
+                          :children (mapcar (lambda (c) (inline-functions-in-node c depth))
+                                            (ast-node-children node))
+                          :result-type (ast-node-result-type node)
+                          :source-loc (ast-node-source-loc node)))))
+
+    ;; Other nodes - recursively process children
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (inline-functions-in-node c depth))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
+(defun inline-functions (ast)
+  "Main entry point for function inlining optimization.
+   Transforms the AST by inlining eligible function calls."
+  (when (null ast)
+    (return-from inline-functions nil))
+
+  ;; Reset inline counter
+  (setf *inline-counter* 0)
+
+  ;; Detect recursive functions first
+  (setf *recursive-functions* (detect-recursive-functions ast))
+
+  ;; Process each top-level declaration
+  (make-ast-node :type 'program
+                 :children (mapcar (lambda (child)
+                                     (if (and (ast-node-p child)
+                                              (eq (ast-node-type child) 'function))
+                                         ;; Inline calls within function bodies
+                                         (let* ((name (ast-node-value child))
+                                                (body (second (ast-node-children child)))
+                                                (new-body (inline-functions-in-node body 0)))
+                                           (make-ast-node :type 'function
+                                                          :value name
+                                                          :children (list (first (ast-node-children child))
+                                                                          new-body)
+                                                          :result-type (ast-node-result-type child)
+                                                          :source-loc (ast-node-source-loc child)
+                                                          :data (ast-node-data child)))
+                                         child))
+                                   (ast-node-children ast))
+                 :source-loc (ast-node-source-loc ast)))

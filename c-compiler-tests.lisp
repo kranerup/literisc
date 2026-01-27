@@ -1488,6 +1488,205 @@ int main() {
     (test-fold-mixed)
     (test-fold-preserves-behavior)))
 
+;;; ===========================================================================
+;;; Phase 11 Tests: Function Inlining
+;;; ===========================================================================
+
+(deftest test-inline-explicit ()
+  "Test: explicit inline keyword"
+  (check
+    ;; Simple inline function
+    (= 30 (run-optimized "
+inline int add(int a, int b) { return a + b; }
+int main() { return add(10, 20); }"))
+    ;; Inline function with computation
+    (= 25 (run-optimized "
+inline int square(int x) { return x * x; }
+int main() { return square(5); }"))
+    ;; Multiple inline calls
+    (= 50 (run-optimized "
+inline int double_it(int x) { return x + x; }
+int main() { return double_it(10) + double_it(15); }"))))
+
+(deftest test-inline-auto ()
+  "Test: automatic inlining of small functions"
+  (check
+    ;; Small function should be auto-inlined
+    (= 42 (run-optimized "
+int inc(int x) { return x + 1; }
+int main() { return inc(41); }"))
+    ;; Small function with single return
+    (= 10 (run-optimized "
+int passthru(int x) { return x; }
+int main() { return passthru(10); }"))
+    ;; Multiple auto-inlines: add3(7)=10, add2(10)=12, add1(12)=13
+    (= 13 (run-optimized "
+int add1(int x) { return x + 1; }
+int add2(int x) { return x + 2; }
+int add3(int x) { return x + 3; }
+int main() { return add1(add2(add3(7))); }"))))
+
+(deftest test-inline-multiple-returns ()
+  "Test: inlining functions with multiple return statements"
+  (check
+    ;; If-else with multiple returns
+    (= 5 (run-optimized "
+inline int my_abs(int x) {
+  if (x < 0) return -x;
+  return x;
+}
+int main() { return my_abs(-5); }"))
+    ;; Return from if without else
+    (= 10 (run-optimized "
+inline int my_abs(int x) {
+  if (x < 0) return -x;
+  return x;
+}
+int main() { return my_abs(10); }"))
+    ;; More complex control flow: sign(10)=1, sign(-10)=-1, sign(0)=0, sign(5)=1 => 1+(-1)+0+1 = 1
+    (= 1 (run-optimized "
+inline int sign(int x) {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
+}
+int main() { return sign(10) + sign(-10) + sign(0) + sign(5); }"))))
+
+(deftest test-inline-recursive-not-inlined ()
+  "Test: recursive functions should NOT be inlined"
+  (check
+    ;; Recursive factorial - should work correctly but not be inlined
+    (= 120 (run-optimized "
+inline int fact(int n) {
+  if (n <= 1) return 1;
+  return n * fact(n - 1);
+}
+int main() { return fact(5); }" :max-cycles 100000))
+    ;; Recursive fibonacci
+    (= 8 (run-optimized "
+inline int fib(int n) {
+  if (n <= 1) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+int main() { return fib(6); }" :max-cycles 1000000))))
+
+(deftest test-inline-with-locals ()
+  "Test: inlining functions with local variables"
+  (check
+    ;; Function with local variable: 10*2 + 10 = 30
+    (= 30 (run-optimized "
+inline int compute(int x) {
+  int temp;
+  temp = x * 2;
+  return temp + x;
+}
+int main() { return compute(10); }"))
+    ;; Function with multiple locals: sum=10+5=15, diff=10-5=5, 15*5=75
+    (= 75 (run-optimized "
+inline int calc(int a, int b) {
+  int sum;
+  int diff;
+  sum = a + b;
+  diff = a - b;
+  return sum * diff;
+}
+int main() { return calc(10, 5); }" :max-cycles 50000))))
+
+(deftest test-inline-nested-calls ()
+  "Test: inlining with nested function calls"
+  (check
+    ;; Inline calling another inline
+    (= 16 (run-optimized "
+inline int square(int x) { return x * x; }
+inline int quad(int x) { return square(square(x)); }
+int main() { return quad(2); }"))  ; 2^4 = 16
+    ;; Chain of inlines
+    (= 15 (run-optimized "
+inline int add5(int x) { return x + 5; }
+inline int add10(int x) { return add5(add5(x)); }
+int main() { return add10(5); }"))))  ; 5+5+5 = 15
+
+(deftest test-inline-expression-context ()
+  "Test: inlined function used in various expression contexts"
+  (check
+    ;; In binary expression
+    (= 25 (run-optimized "
+inline int sq(int x) { return x * x; }
+int main() { return sq(3) + sq(4); }"))  ; 9 + 16 = 25
+    ;; In comparison (ternary not supported, use if-else)
+    (= 1 (run-optimized "
+inline int sq(int x) { return x * x; }
+int main() { if (sq(3) < sq(4)) return 1; return 0; }"))
+    ;; As array index
+    (= 20 (run-optimized "
+inline int idx(int x) { return x + 1; }
+int main() {
+  int arr[5];
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  return arr[idx(0)];
+}" :max-cycles 20000))))
+
+(deftest test-inline-preserves-behavior ()
+  "Test: inlined code produces same results as non-inlined"
+  (check
+    ;; Compare optimized vs non-optimized for simple function
+    (= (run-and-get-result "
+int add(int a, int b) { return a + b; }
+int main() { return add(10, 20); }")
+       (run-optimized "
+int add(int a, int b) { return a + b; }
+int main() { return add(10, 20); }"))
+    ;; Compare for function with locals
+    (= (run-and-get-result "
+int compute(int x) {
+  int y;
+  y = x * 2;
+  return y + 1;
+}
+int main() { return compute(10); }")
+       (run-optimized "
+int compute(int x) {
+  int y;
+  y = x * 2;
+  return y + 1;
+}
+int main() { return compute(10); }"))
+    ;; Compare for multiple calls
+    (= (run-and-get-result "
+int f(int x) { return x + 1; }
+int main() { return f(1) + f(2) + f(3); }")
+       (run-optimized "
+int f(int x) { return x + 1; }
+int main() { return f(1) + f(2) + f(3); }"))))
+
+(deftest test-inline-void-function ()
+  "Test: inlining void functions (side effects only)"
+  (check
+    ;; Void function modifying through pointer
+    (= 100 (run-optimized "
+inline void set_val(int *p, int v) { *p = v; }
+int main() {
+  int x;
+  x = 0;
+  set_val(&x, 100);
+  return x;
+}" :max-cycles 20000))))
+
+(deftest test-phase11-inlining ()
+  "Run Phase 11 function inlining tests"
+  (combine-results
+    (test-inline-explicit)
+    (test-inline-auto)
+    (test-inline-multiple-returns)
+    (test-inline-recursive-not-inlined)
+    (test-inline-with-locals)
+    (test-inline-nested-calls)
+    (test-inline-expression-context)
+    (test-inline-preserves-behavior)
+    (test-inline-void-function)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -1500,7 +1699,8 @@ int main() {
     (test-phase7)
     (test-phase8-params)
     (test-phase9-pointers)
-    (test-phase10-constant-folding)))
+    (test-phase10-constant-folding)
+    (test-phase11-inlining)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

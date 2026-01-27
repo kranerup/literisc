@@ -386,6 +386,9 @@
       (expr-stmt (generate-expr-stmt node))
       (decl-list (generate-local-decls node))
       (empty nil)
+      ;; Inline-related nodes
+      (inline-return-jump (generate-inline-return-jump node))
+      (inline-return-label (generate-inline-return-label node))
       (otherwise
        (compiler-warning "Unknown statement type: ~a" (ast-node-type node))))))
 
@@ -590,6 +593,7 @@
       (cast (generate-cast node))
       (sizeof (generate-sizeof node))
       (post-op (generate-post-op node))
+      (inline-expr (generate-inline-expr node))
       (otherwise
        (compiler-warning "Unknown expression type: ~a" (ast-node-type node))))))
 
@@ -708,6 +712,16 @@
         (emit-store-sized-offset var-type actual-offset value-reg)
         (emit `(M[A+n]=Rx ,actual-offset ,value-reg))) ; store
     (free-temp-reg value-reg)))
+
+(defun generate-load-local (offset &optional var-type)
+  "Generate code to load a local variable at offset into A"
+  (declare (ignore var-type))  ; For now, always do full word load
+  (let ((actual-offset (+ offset *frame-size*))
+        (temp (alloc-temp-reg)))
+    (emit `(A=Rx SP))
+    (emit `(Rx=M[A+n] ,actual-offset ,temp))
+    (emit `(A=Rx ,temp))
+    (free-temp-reg temp)))
 
 (defun generate-binary-op (node)
   "Generate code for a binary operation"
@@ -1391,6 +1405,106 @@
                  (t 4))))
     (emit `(Rx= ,size R0))
     (emit '(A=Rx R0))))
+
+;;; ===========================================================================
+;;; Inlined Function Generation
+;;; ===========================================================================
+
+(defun collect-var-decls (node)
+  "Collect all var-decl nodes from an AST (for registering inline locals)"
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (var-decl (list node))
+      (otherwise
+       (mapcan #'collect-var-decls (ast-node-children node))))))
+
+(defun generate-inline-expr (node)
+  "Generate code for an inlined function expression.
+   The inline-expr node contains:
+   - children[0]: decl-list with result var and parameter temp vars
+   - children[1]: the transformed function body
+   - children[2]: inline-return-label marking the exit point
+   - value: the result variable name
+   Result ends up in A after evaluation."
+  (let* ((result-var (ast-node-value node))
+         (init-decls (first (ast-node-children node)))
+         (body (second (ast-node-children node)))
+         (exit-label-node (third (ast-node-children node)))
+         (inline-vars nil))  ; track variables we add to symbol table
+
+    (emit-comment (format nil "-- inline begin: result in ~a --" result-var))
+
+    ;; First, register all inline variables in the symbol table
+    ;; They need to be allocated storage before we can generate code
+    (dolist (decl (ast-node-children init-decls))
+      (when (eq (ast-node-type decl) 'var-decl)
+        (let* ((name (ast-node-value decl))
+               (var-type (or (ast-node-result-type decl) (make-int-type)))
+               ;; Allocate stack space for the variable
+               (current-offset (compiler-state-local-offset *state*))
+               (new-offset (- current-offset (type-size var-type))))
+          (setf (compiler-state-local-offset *state*) new-offset)
+          (add-symbol name var-type :local new-offset)
+          (push name inline-vars))))
+
+    ;; Also register any local variables declared in the body
+    ;; (these were renamed during the inline transformation)
+    (dolist (decl (collect-var-decls body))
+      (let* ((name (ast-node-value decl))
+             (var-type (or (ast-node-result-type decl) (make-int-type)))
+             (current-offset (compiler-state-local-offset *state*))
+             (new-offset (- current-offset (type-size var-type))))
+        (unless (lookup-symbol name)  ; don't re-register if already done
+          (setf (compiler-state-local-offset *state*) new-offset)
+          (add-symbol name var-type :local new-offset)
+          (push name inline-vars))))
+
+    ;; Now generate initializations for the inline variables
+    (dolist (decl (ast-node-children init-decls))
+      (when (eq (ast-node-type decl) 'var-decl)
+        (let ((name (ast-node-value decl))
+              (init (first (ast-node-children decl)))
+              (var-type (or (ast-node-result-type decl) (make-int-type))))
+          (when init
+            ;; Generate initializer
+            (generate-expression init)
+            ;; Mask value to appropriate size before storing
+            (when (and var-type (< (type-size var-type) 4))
+              (emit-mask-to-size var-type))
+            ;; Store to local variable
+            (let ((sym (lookup-symbol name)))
+              (when sym
+                (generate-store-local (sym-entry-offset sym) var-type)))))))
+
+    ;; Generate the transformed body
+    (generate-statement body)
+
+    ;; Generate the exit label
+    (generate-statement exit-label-node)
+
+    ;; Load result into A
+    (let ((sym (lookup-symbol result-var)))
+      (if sym
+          (let ((offset (sym-entry-offset sym))
+                (var-type (sym-entry-type sym)))
+            (generate-load-local offset var-type))
+          (compiler-warning "Inline result var ~a not found" result-var)))
+
+    ;; Clean up: remove inline variables from symbol table
+    (dolist (name inline-vars)
+      (remove-symbol name))
+
+    (emit-comment "-- inline end --")))
+
+(defun generate-inline-return-jump (node)
+  "Generate a jump to the inline exit label (used in place of return)"
+  (let ((label (ast-node-value node)))
+    (emit `(j ,label))))
+
+(defun generate-inline-return-label (node)
+  "Generate the exit label for an inlined function"
+  (let ((label (ast-node-value node)))
+    (emit-label label)))
 
 ;;; ===========================================================================
 ;;; Software Multiply/Divide

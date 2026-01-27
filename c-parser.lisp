@@ -608,7 +608,22 @@
 ;;; Top-Level Parsing
 ;;; ===========================================================================
 
-(defun parse-function-definition (ret-type name)
+(defun count-statements (node)
+  "Count the number of statements in an AST node (for inlining heuristics)"
+  (when (null node)
+    (return-from count-statements 0))
+  (unless (ast-node-p node)
+    (return-from count-statements 0))
+  (case (ast-node-type node)
+    (block
+     (reduce #'+ (ast-node-children node) :key #'count-statements :initial-value 0))
+    ((if while for do-while)
+     (+ 1 (reduce #'+ (ast-node-children node) :key #'count-statements :initial-value 0)))
+    ((return expr-stmt decl-list break continue)
+     1)
+    (otherwise 0)))
+
+(defun parse-function-definition (ret-type name &optional is-inline)
   "Parse a function definition"
   (setf (compiler-state-current-function *state*) name)
   (setf (compiler-state-local-offset *state*) 0)
@@ -651,17 +666,23 @@
       (exit-scope)
 
       ;; Calculate frame size from locals allocated during parsing
-      (let ((frame-size (- (compiler-state-local-offset *state*)))
-            (local-reg-count (compiler-state-local-reg-count *state*)))
-        ;; Create function node with local register info
-        (make-node 'function
-                   :value name
-                   :children (list (make-node 'params :children (reverse params))
-                                   body)
-                   :result-type ret-type
-                   :data (list :frame-size frame-size
-                               :param-count param-idx
-                               :local-reg-count local-reg-count))))))
+      (let* ((frame-size (- (compiler-state-local-offset *state*)))
+             (local-reg-count (compiler-state-local-reg-count *state*))
+             (stmt-count (count-statements body))
+             ;; Create function node with local register info and inline hint
+             (func-node (make-node 'function
+                                   :value name
+                                   :children (list (make-node 'params :children (reverse params))
+                                                   body)
+                                   :result-type ret-type
+                                   :data (list :frame-size frame-size
+                                               :param-count param-idx
+                                               :local-reg-count local-reg-count
+                                               :inline-hint is-inline
+                                               :stmt-count stmt-count))))
+        ;; Register function in function table for inlining
+        (setf (gethash name (compiler-state-function-table *state*)) func-node)
+        func-node))))
 
 (defun parse-global-declaration (var-type name)
   "Parse a global variable declaration"
@@ -693,14 +714,16 @@
 
 (defun parse-top-level ()
   "Parse a top-level declaration or function definition"
-  ;; Parse type and name
-  (let* ((type-spec (parse-type))
-         (name (token-value (expect-token 'identifier))))
+  ;; Check for inline keyword
+  (let ((is-inline (match-token 'keyword "inline")))
+    ;; Parse type and name
+    (let* ((type-spec (parse-type))
+           (name (token-value (expect-token 'identifier))))
 
-    ;; Function definition or declaration?
-    (if (check-token 'punctuation "(")
-        (parse-function-definition type-spec name)
-        (parse-global-declaration type-spec name))))
+      ;; Function definition or declaration?
+      (if (check-token 'punctuation "(")
+          (parse-function-definition type-spec name is-inline)
+          (parse-global-declaration type-spec name)))))
 
 (defun parse-program ()
   "Parse a complete program"

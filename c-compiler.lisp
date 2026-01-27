@@ -81,7 +81,8 @@
   (warnings nil)         ; compilation warnings
   (source-lines nil)     ; original source lines for annotations
   (source-annotations t) ; enable source annotations in output
-  (optimize nil))        ; enable optimizations when t
+  (optimize nil)         ; enable optimizations when t
+  (function-table (make-hash-table :test 'equal))) ; name -> function AST node for inlining
 
 ;;; Global compiler state
 (defvar *state* nil)
@@ -161,6 +162,20 @@
   ;; Don't remove symbols - they're needed for code generation after parsing
   ;; Just decrement the scope level for future symbol additions
   (decf (compiler-state-scope-level *state*)))
+
+(defun remove-symbol (name)
+  "Remove a symbol from the symbol table (used for inline variable cleanup)"
+  (let ((current-func (compiler-state-current-function *state*))
+        (keys-to-remove nil))
+    ;; Find all keys matching this name in the current function
+    (maphash (lambda (key entry)
+               (when (and (string= (sym-entry-name entry) name)
+                          (equal (sym-entry-function entry) current-func))
+                 (push key keys-to-remove)))
+             (compiler-state-symbols *state*))
+    ;; Remove them
+    (dolist (key keys-to-remove)
+      (remhash key (compiler-state-symbols *state*)))))
 
 ;;; ===========================================================================
 ;;; Code Generation Helpers
@@ -316,9 +331,15 @@
 
       ;; Apply optimizations if enabled
       (when optimize
+        ;; Function inlining first (before constant folding)
+        (setf ast (inline-functions ast))
+        (when verbose
+          (format t "~%AST (after inlining):~%")
+          (print-ast ast))
+        ;; Then constant folding
         (setf ast (fold-constants ast))
         (when verbose
-          (format t "~%AST (after optimization):~%")
+          (format t "~%AST (after constant folding):~%")
           (print-ast ast)))
 
       ;; Code generation
