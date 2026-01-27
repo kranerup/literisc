@@ -10,6 +10,7 @@
            :compile-c-file
            :compile-c-to-asm
            :run-c-program
+           :run-and-verify-registers
            :test-c-compiler
            :test-c-compiler-with-output
            ;; Re-export key types/functions
@@ -515,6 +516,23 @@
     (aref (lr-emulator::processor-state-r
            (lr-emulator:emulated-system-processor emul))
           10)))
+
+(defun run-and-verify-registers (source &key (verbose nil) (max-cycles 10000) (optimize-size t))
+  "Compile, assemble, run, and verify register preservation.
+   Returns (values return-value violations-list).
+   violations-list is nil if all callee-saved registers were properly preserved."
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
+         (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
+         (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug verbose)))
+    ;; Run with verification
+    (multiple-value-bind (reason verifier)
+        (reg-verifier:run-emul-with-verification emul max-cycles verbose)
+      (declare (ignore reason))
+      ;; Return value is in P0 (R10)
+      (let ((result (aref (lr-emulator::processor-state-r
+                           (lr-emulator:emulated-system-processor emul))
+                          10)))
+        (values result (reg-verifier:reg-verifier-violations verifier))))))
 
 ;;; ===========================================================================
 ;;; Pretty Print and Test Output

@@ -23,6 +23,7 @@
                (:file "pty-lib")
                (:file "soc")
                (:file "emulator")
+               (:file "reg-verifier")
                (:file "c-compiler")
                (:file "c-lexer")
                (:file "c-parser")

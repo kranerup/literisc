@@ -1724,6 +1724,174 @@ int main() {
     (test-inline-preserves-behavior)
     (test-inline-void-function)))
 
+;;; ===========================================================================
+;;; Phase 12 Tests: Register Preservation Verification
+;;; ===========================================================================
+
+(defun run-and-check-registers (source &key (max-cycles 10000) (verbose nil) (optimize-size nil))
+  "Run program with register verification, return (values result violations-p)
+   where violations-p is nil if all registers were preserved correctly."
+  (handler-case
+      (multiple-value-bind (result violations)
+          (run-and-verify-registers source :max-cycles max-cycles
+                                    :verbose verbose :optimize-size optimize-size)
+        (values result (null violations)))
+    (error (e)
+      (format t "Error during verification: ~a~%" e)
+      (values nil nil))))
+
+(deftest test-reg-preservation-simple ()
+  "Test: local variable survives single function call"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int helper(int x) { return x + 1; }
+int main() {
+    int a = 100;           // R6
+    int c = helper(50);    // Call clobbers temps
+    return a + c;          // a must still be 100
+}" :max-cycles 20000)
+    (check
+      (= 151 result)       ; 100 + 51
+      preserved)))         ; No violations
+
+(deftest test-reg-preservation-all-locals ()
+  "Test: all four local registers (R6-R9) preserved across call"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int helper(int a, int b, int c, int d) { return a + b + c + d; }
+int main() {
+    int r6 = 100;
+    int r7 = 200;
+    int r8 = 300;
+    int r9 = 400;
+    int x = helper(1, 2, 3, 4);
+    return r6 + r7 + r8 + r9 + x;
+}" :max-cycles 50000)
+    (check
+      (= 1010 result)      ; 100+200+300+400+10
+      preserved)))
+
+(deftest test-reg-preservation-nested ()
+  "Test: locals preserved through 3 levels of function nesting"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int level3(int x) { return x * 2; }
+int level2(int x) { int local = x + 10; return level3(local) + local; }
+int level1(int x) { int local = x + 5; return level2(local) + local; }
+int main() { return level1(10); }
+" :max-cycles 50000)
+    ;; level1(10): local=15, level2(15)+15
+    ;; level2(15): local=25, level3(25)+25 = 50+25=75
+    ;; level1 result: 75+15 = 90
+    (check
+      (= 90 result)
+      preserved)))
+
+(deftest test-reg-preservation-recursive ()
+  "Test: locals preserved through recursive calls (fibonacci)"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int fib(int n) {
+    int saved = n;
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+int main() { return fib(10); }
+" :max-cycles 2000000)
+    (check
+      (= 55 result)        ; fib(10) = 55
+      preserved)))
+
+(deftest test-reg-preservation-interleaved ()
+  "Test: locals preserved with multiple interleaved calls"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int f(int x) { return x * 2; }
+int g(int x) { return x + 3; }
+int main() {
+    int a = 10;
+    int b = 20;
+    int x = f(5);      // Call 1
+    int y = g(a);      // Call 2 - uses local a
+    int z = f(b);      // Call 3 - uses local b
+    return a + b + x + y + z;  // All locals must be intact
+}" :max-cycles 50000)
+    ;; a=10, b=20, x=10, y=13, z=40
+    ;; 10+20+10+13+40 = 93
+    (check
+      (= 93 result)
+      preserved)))
+
+(deftest test-reg-preservation-many-calls ()
+  "Test: locals preserved across many sequential calls"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int inc(int x) { return x + 1; }
+int main() {
+    int base = 1000;
+    int sum = 0;
+    sum = sum + inc(1);
+    sum = sum + inc(2);
+    sum = sum + inc(3);
+    sum = sum + inc(4);
+    sum = sum + inc(5);
+    return base + sum;
+}" :max-cycles 50000)
+    ;; base=1000, sum = 2+3+4+5+6 = 20
+    ;; 1000 + 20 = 1020
+    (check
+      (= 1020 result)
+      preserved)))
+
+(deftest test-reg-preservation-complex ()
+  "Test: complex case with nested calls and multiple locals"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int square(int x) { return x * x; }
+int add(int a, int b) { return a + b; }
+int calc(int x, int y) {
+    int a = square(x);
+    int b = square(y);
+    return add(a, b);
+}
+int main() {
+    int p = 3;
+    int q = 4;
+    return calc(p, q);
+}" :max-cycles 100000)
+    ;; calc(3, 4): a=9, b=16, add(9,16)=25
+    (check
+      (= 25 result)
+      preserved)))
+
+(deftest test-reg-preservation-deep-recursion ()
+  "Test: deep recursive factorial with local preservation"
+  (multiple-value-bind (result preserved)
+      (run-and-check-registers "
+int fact(int n) {
+    int saved_n = n;
+    if (n <= 1) return 1;
+    int sub_result = fact(n - 1);
+    return saved_n * sub_result;
+}
+int main() { return fact(6); }
+" :max-cycles 500000)
+    (check
+      (= 720 result)       ; 6! = 720
+      preserved)))
+
+(deftest test-phase12-reg-preservation ()
+  "Run Phase 12 register preservation tests"
+  (combine-results
+    (test-reg-preservation-simple)
+    (test-reg-preservation-all-locals)
+    (test-reg-preservation-nested)
+    (test-reg-preservation-recursive)
+    (test-reg-preservation-interleaved)
+    (test-reg-preservation-many-calls)
+    (test-reg-preservation-complex)
+    (test-reg-preservation-deep-recursion)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -1737,7 +1905,8 @@ int main() {
     (test-phase8-params)
     (test-phase9-pointers)
     (test-phase10-constant-folding)
-    (test-phase11-inlining)))
+    (test-phase11-inlining)
+    (test-phase12-reg-preservation)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
