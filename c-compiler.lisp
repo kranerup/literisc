@@ -82,6 +82,10 @@
   (source-lines nil)     ; original source lines for annotations
   (source-annotations t) ; enable source annotations in output
   (optimize nil)         ; enable optimizations when t
+  (optimize-size t)      ; optimize for code size (use runtime lib for mul/div/mod)
+  (need-mul-runtime nil) ; set to t when __mul runtime is needed
+  (need-div-runtime nil) ; set to t when __div runtime is needed
+  (need-mod-runtime nil) ; set to t when __mod runtime is needed
   (function-table (make-hash-table :test 'equal))) ; name -> function AST node for inlining
 
 ;;; Global compiler state
@@ -221,7 +225,133 @@
 
 (defun get-generated-code ()
   "Return the generated code in correct order"
+  ;; First emit any needed runtime library functions
+  (emit-runtime-library)
   (reverse (compiler-state-code *state*)))
+
+(defun emit-runtime-library ()
+  "Emit runtime library functions if needed (for size-optimized mul/div/mod)"
+  ;; Emit multiply runtime if needed
+  (when (compiler-state-need-mul-runtime *state*)
+    (emit-mul-runtime))
+  ;; Emit divide runtime if needed
+  (when (compiler-state-need-div-runtime *state*)
+    (emit-div-runtime))
+  ;; Emit modulo runtime if needed
+  (when (compiler-state-need-mod-runtime *state*)
+    (emit-mod-runtime)))
+
+(defun emit-mul-runtime ()
+  "Emit the __mul runtime function: P0 = P0 * P1"
+  (emit '(:comment "======== runtime: __mul ========"))
+  (emit '(:comment "P0 = P0 * P1 (shift-and-add multiply)"))
+  (emit '(label __MUL))
+  ;; Save caller's return address (SRP) in R4 (callee-saved)
+  (emit '(A=Rx SRP))
+  (emit '(Rx=A R4))
+  ;; Use R0-R3 as temp registers (caller-saved)
+  ;; R0 = multiplier (P1), R1 = multiplicand (P0), R2 = result, R3 = temp
+  (emit '(A=Rx P1))           ; A = multiplier
+  (emit '(Rx=A R0))           ; R0 = multiplier
+  (emit '(A=Rx P0))           ; A = multiplicand
+  (emit '(Rx=A R1))           ; R1 = multiplicand
+  (emit '(A= 0))
+  (emit '(Rx=A R2))           ; R2 = result = 0
+  (emit '(label __MUL_LOOP))
+  ;; Check if multiplier is zero
+  (emit '(A=Rx R0))
+  (emit '(Rx= 0 R3))
+  (emit '(A-=Rx R3))
+  (emit '(jz __MUL_END))
+  ;; Check LSB of multiplier
+  (emit '(A=Rx R0))
+  (emit '(Rx= 1 R3))
+  (emit '(A&=Rx R3))
+  (emit '(Rx= 0 R3))
+  (emit '(A-=Rx R3))
+  (emit '(jz __MUL_SKIP))
+  ;; Add multiplicand to result
+  (emit '(A=Rx R2))
+  (emit '(A+=Rx R1))
+  (emit '(Rx=A R2))
+  (emit '(label __MUL_SKIP))
+  ;; Shift multiplicand left
+  (emit '(A=Rx R1))
+  (emit '(A=A<<1))
+  (emit '(Rx=A R1))
+  ;; Shift multiplier right
+  (emit '(A=Rx R0))
+  (emit '(A=A>>1))
+  (emit '(Rx=A R0))
+  (emit '(j __MUL_LOOP))
+  (emit '(label __MUL_END))
+  (emit '(A=Rx R2))           ; A = result
+  (emit '(Rx=A P0))           ; P0 = result
+  ;; Restore caller's return address and return
+  (emit '(A=Rx R4))
+  (emit '(j-A)))
+
+(defun emit-div-runtime ()
+  "Emit the __div runtime function: P0 = P0 / P1"
+  (emit '(:comment "======== runtime: __div ========"))
+  (emit '(:comment "P0 = P0 / P1 (repeated subtraction)"))
+  (emit '(label __DIV))
+  ;; Save caller's return address in R4
+  (emit '(A=Rx SRP))
+  (emit '(Rx=A R4))
+  ;; R0 = dividend (will become remainder), R1 = divisor, R2 = quotient, R3 = temp
+  (emit '(A=Rx P0))           ; A = dividend
+  (emit '(Rx=A R0))           ; R0 = dividend
+  (emit '(A=Rx P1))           ; A = divisor
+  (emit '(Rx=A R1))           ; R1 = divisor
+  (emit '(A= 0))
+  (emit '(Rx=A R2))           ; R2 = quotient = 0
+  (emit '(label __DIV_LOOP))
+  ;; Check if dividend >= divisor
+  (emit '(A=Rx R0))           ; A = dividend
+  (emit '(A-=Rx R1))          ; A = dividend - divisor
+  (emit '(jlt __DIV_END))     ; if dividend < divisor, done
+  ;; dividend >= divisor: update and increment quotient
+  (emit '(Rx=A R0))           ; R0 = dividend - divisor
+  (emit '(A=Rx R2))
+  (emit '(Rx= 1 R3))
+  (emit '(A+=Rx R3))
+  (emit '(Rx=A R2))           ; R2 = quotient + 1
+  (emit '(j __DIV_LOOP))
+  (emit '(label __DIV_END))
+  (emit '(A=Rx R2))           ; A = quotient
+  (emit '(Rx=A P0))           ; P0 = quotient
+  ;; Restore caller's return address and return
+  (emit '(A=Rx R4))
+  (emit '(j-A)))
+
+(defun emit-mod-runtime ()
+  "Emit the __mod runtime function: P0 = P0 % P1"
+  (emit '(:comment "======== runtime: __mod ========"))
+  (emit '(:comment "P0 = P0 % P1 (repeated subtraction)"))
+  (emit '(label __MOD))
+  ;; Save caller's return address in R4
+  (emit '(A=Rx SRP))
+  (emit '(Rx=A R4))
+  ;; R0 = dividend (will become remainder), R1 = divisor
+  (emit '(A=Rx P0))           ; A = dividend
+  (emit '(Rx=A R0))           ; R0 = dividend (becomes remainder)
+  (emit '(A=Rx P1))           ; A = divisor
+  (emit '(Rx=A R1))           ; R1 = divisor
+  (emit '(label __MOD_LOOP))
+  ;; Check if dividend >= divisor
+  (emit '(A=Rx R0))           ; A = dividend
+  (emit '(A-=Rx R1))          ; A = dividend - divisor
+  (emit '(jlt __MOD_END))     ; if dividend < divisor, done
+  ;; dividend >= divisor: update dividend
+  (emit '(Rx=A R0))           ; R0 = dividend - divisor
+  (emit '(j __MOD_LOOP))
+  (emit '(label __MOD_END))
+  (emit '(A=Rx R0))           ; A = remainder
+  (emit '(Rx=A P0))           ; P0 = remainder
+  ;; Restore caller's return address and return
+  (emit '(A=Rx R4))
+  (emit '(j-A)))
 
 ;;; ===========================================================================
 ;;; Type Utilities
@@ -303,8 +433,10 @@
       (push (subseq source start) lines))
     (nreverse lines)))
 
-(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil))
-  "Compile C source code to assembly S-expressions"
+(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t))
+  "Compile C source code to assembly S-expressions.
+   :optimize-size t (default) uses runtime library calls for mul/div/mod to reduce code size.
+   :optimize-size nil inlines mul/div/mod loops for better performance."
   (let ((*state* (make-compiler-state))
         (*current-source-line* nil)
         (*current-source-context* nil))
@@ -312,6 +444,7 @@
     (setf (compiler-state-source-lines *state*) (split-source-lines source))
     (setf (compiler-state-source-annotations *state*) annotate)
     (setf (compiler-state-optimize *state*) optimize)
+    (setf (compiler-state-optimize-size *state*) optimize-size)
 
     ;; Lexical analysis
     (setf (compiler-state-tokens *state*) (tokenize source))
@@ -366,14 +499,14 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil))
+(defun compile-c-to-asm (source &key (verbose nil) (optimize-size t))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose :annotate nil)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize-size optimize-size)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize-size t))
   "Compile, assemble, and run a C program, returning the result"
-  (let* ((mcode (compile-c-to-asm source :verbose verbose))
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug verbose)))
     ;; Run the program

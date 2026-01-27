@@ -68,6 +68,7 @@
 (defvar *string-literals* nil)  ; list of (label . string) pairs
 (defvar *current-param-count* 0) ; number of parameters in current function
 (defvar *param-save-offset* 0)  ; offset where saved params start on stack
+(defvar *skip-final-return-jump* nil) ; when t, generate-return skips the jump
 
 ;;; ===========================================================================
 ;;; Sized Memory Access Helpers
@@ -243,7 +244,8 @@
          (*is-leaf-function* (is-leaf-function body))
          (*frame-size* (or (getf func-data :frame-size) 0))
          (*current-param-count* (or (getf func-data :param-count) 0))
-         (*local-reg-count* (or (getf func-data :local-reg-count) 0)))
+         (*local-reg-count* (or (getf func-data :local-reg-count) 0))
+         (body-ends-with-return (ends-with-return-p body)))
 
     ;; Set current function for symbol lookup
     (setf (compiler-state-current-function *state*) name)
@@ -262,8 +264,10 @@
     ;; Prologue
     (generate-prologue params)
 
-    ;; Body
-    (generate-statement body)
+    ;; Body - if it ends with return, skip the final jump
+    (if body-ends-with-return
+        (generate-body-with-final-return body)
+        (generate-statement body))
 
     ;; Epilogue (also target for return statements)
     (emit-label *function-end-label*)
@@ -278,6 +282,37 @@
   (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
         (some #'contains-call (ast-node-children node)))))
+
+(defun ends-with-return-p (node)
+  "Check if a statement or block ends with a return statement"
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (return t)
+      (block
+       ;; Block ends with return if its last child is a return
+       (let ((children (ast-node-children node)))
+         (and children
+              (ends-with-return-p (car (last children))))))
+      (otherwise nil))))
+
+(defun generate-body-with-final-return (body)
+  "Generate body, skipping the jump for the final return statement"
+  (if (eq (ast-node-type body) 'block)
+      ;; Body is a block - generate all but last, then last with skip flag
+      (let ((children (ast-node-children body)))
+        (when children
+          ;; Generate all statements except the last
+          (dolist (stmt (butlast children))
+            (generate-statement stmt))
+          ;; Generate the last statement with skip flag if it's a return
+          (let ((last-stmt (car (last children))))
+            (if (eq (ast-node-type last-stmt) 'return)
+                (let ((*skip-final-return-jump* t))
+                  (generate-statement last-stmt))
+                (generate-statement last-stmt)))))
+      ;; Body is just a single return statement
+      (let ((*skip-final-return-jump* t))
+        (generate-statement body))))
 
 (defun generate-prologue (params-node)
   "Generate function prologue"
@@ -528,8 +563,9 @@
     ;; Move result to P0 (R10)
     (emit '(Rx=A P0)))
 
-  ;; Jump to function epilogue
-  (emit `(j ,*function-end-label*)))
+  ;; Jump to function epilogue (skip if this is the final return before func_end)
+  (unless *skip-final-return-jump*
+    (emit `(j ,*function-end-label*))))
 
 (defun generate-break (node)
   "Generate code for a break statement"
@@ -1512,6 +1548,25 @@
 
 (defun generate-multiply (left-reg)
   "Generate software multiply: A = left-reg * A"
+  (if (compiler-state-optimize-size *state*)
+      ;; Call runtime library function for code size optimization
+      (generate-multiply-call left-reg)
+      ;; Inline the multiply loop for performance
+      (generate-multiply-inline left-reg)))
+
+(defun generate-multiply-call (left-reg)
+  "Generate a call to __mul runtime function: A = left-reg * A"
+  ;; Mark that we need the multiply runtime
+  (setf (compiler-state-need-mul-runtime *state*) t)
+  ;; Set up arguments: P0 = left operand, P1 = right operand (in A)
+  (emit '(Rx=A P1))              ; P1 = multiplier (from A)
+  (emit `(A=Rx ,left-reg))       ; A = multiplicand
+  (emit '(Rx=A P0))              ; P0 = multiplicand
+  (emit '(jsr __MUL))            ; call runtime
+  (emit '(A=Rx P0)))             ; result in P0, move to A
+
+(defun generate-multiply-inline (left-reg)
+  "Generate inline software multiply: A = left-reg * A"
   ;; Simple shift-and-add multiply
   ;; Result in A, multiplicand in left-reg, multiplier in A
   ;; Allocate temp registers to avoid conflicts
@@ -1573,6 +1628,29 @@
 
 (defun generate-divide (left-reg get-remainder)
   "Generate software divide: A = left-reg / A or left-reg % A"
+  (if (compiler-state-optimize-size *state*)
+      ;; Call runtime library function for code size optimization
+      (generate-divide-call left-reg get-remainder)
+      ;; Inline the divide loop for performance
+      (generate-divide-inline left-reg get-remainder)))
+
+(defun generate-divide-call (left-reg get-remainder)
+  "Generate a call to __div or __mod runtime function"
+  ;; Mark that we need the appropriate runtime
+  (if get-remainder
+      (setf (compiler-state-need-mod-runtime *state*) t)
+      (setf (compiler-state-need-div-runtime *state*) t))
+  ;; Set up arguments: P0 = dividend (left), P1 = divisor (in A)
+  (emit '(Rx=A P1))              ; P1 = divisor (from A)
+  (emit `(A=Rx ,left-reg))       ; A = dividend
+  (emit '(Rx=A P0))              ; P0 = dividend
+  (if get-remainder
+      (emit '(jsr __MOD))        ; call modulo runtime
+      (emit '(jsr __DIV)))       ; call divide runtime
+  (emit '(A=Rx P0)))             ; result in P0, move to A
+
+(defun generate-divide-inline (left-reg get-remainder)
+  "Generate inline software divide: A = left-reg / A or left-reg % A"
   ;; Simple repeated subtraction (works correctly, can be optimized later)
   ;; Allocate temp registers to avoid conflicts
   (let ((loop-label (gen-label "DIVLOOP"))

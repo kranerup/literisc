@@ -26,10 +26,10 @@
             (string-downcase (substitute #\- #\Space test-name))
             (if optimize "-opt" ""))))
 
-(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000))
+(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil))
   "Compile, run, and return the result in P0"
   (handler-case
-      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles)))
+      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size)))
         ;; Save output if enabled
         (when *save-test-outputs*
           (let ((filename (make-test-output-filename)))
@@ -1289,10 +1289,10 @@ int main() {
 ;;; Phase 10 Tests: Constant Folding Optimization
 ;;; ===========================================================================
 
-(defun run-optimized (source &key (max-cycles 10000))
+(defun run-optimized (source &key (max-cycles 10000) (optimize-size nil))
   "Compile with optimization enabled, run, and return the result"
   (handler-case
-      (let* ((asm (compile-c source :optimize t :annotate nil))
+      (let* ((asm (compile-c source :optimize t :annotate nil :optimize-size optimize-size))
              (mcode (assemble (strip-asm-comments asm) nil))
              (dmem (lr-emulator:make-dmem #x10000))
              (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug nil)))
