@@ -155,6 +155,42 @@
     (= 0 (run-and-get-result "int main() { return !1; }"))
     (= 0 (run-and-get-result "int main() { return !42; }"))))
 
+(deftest test-logical-chaining ()
+  "Test: chained && and || operators"
+  (check
+    ;; Chained AND - all must be true
+    (= 1 (run-and-get-result "int main() { return 1 && 1 && 1; }"))
+    (= 0 (run-and-get-result "int main() { return 1 && 1 && 0; }"))
+    (= 0 (run-and-get-result "int main() { return 1 && 0 && 1; }"))
+    (= 0 (run-and-get-result "int main() { return 0 && 1 && 1; }"))
+    ;; Chained OR - any must be true
+    (= 1 (run-and-get-result "int main() { return 1 || 0 || 0; }"))
+    (= 1 (run-and-get-result "int main() { return 0 || 1 || 0; }"))
+    (= 1 (run-and-get-result "int main() { return 0 || 0 || 1; }"))
+    (= 0 (run-and-get-result "int main() { return 0 || 0 || 0; }"))
+    ;; Mixed operators - && has higher precedence than ||
+    ;; a || b && c  means  a || (b && c)
+    (= 1 (run-and-get-result "int main() { return 1 || 0 && 0; }"))  ; 1 || (0 && 0) = 1 || 0 = 1
+    (= 0 (run-and-get-result "int main() { return 0 || 0 && 1; }"))  ; 0 || (0 && 1) = 0 || 0 = 0
+    (= 1 (run-and-get-result "int main() { return 0 || 1 && 1; }"))  ; 0 || (1 && 1) = 0 || 1 = 1
+    ;; a && b || c  means  (a && b) || c
+    (= 1 (run-and-get-result "int main() { return 0 && 0 || 1; }"))  ; (0 && 0) || 1 = 0 || 1 = 1
+    (= 0 (run-and-get-result "int main() { return 0 && 1 || 0; }"))  ; (0 && 1) || 0 = 0 || 0 = 0
+    (= 1 (run-and-get-result "int main() { return 1 && 1 || 0; }"))  ; (1 && 1) || 0 = 1 || 0 = 1
+    ;; Longer chains
+    (= 1 (run-and-get-result "int main() { return 1 && 1 && 1 && 1; }"))
+    (= 0 (run-and-get-result "int main() { return 1 && 1 && 1 && 0; }"))
+    (= 1 (run-and-get-result "int main() { return 0 || 0 || 0 || 1; }"))
+    (= 0 (run-and-get-result "int main() { return 0 || 0 || 0 || 0; }"))
+    ;; Complex mixed chains
+    (= 1 (run-and-get-result "int main() { return 1 || 0 && 0 || 0; }"))  ; 1 || (0&&0) || 0 = 1
+    (= 1 (run-and-get-result "int main() { return 0 && 1 || 1 && 1; }"))  ; (0&&1) || (1&&1) = 0 || 1 = 1
+    (= 0 (run-and-get-result "int main() { return 0 && 1 || 0 && 1; }"))  ; (0&&1) || (0&&1) = 0 || 0 = 0
+    ;; With variables
+    (= 1 (run-and-get-result "int main() { int a=1; int b=1; int c=0; return a && b || c; }"))
+    (= 0 (run-and-get-result "int main() { int a=0; int b=0; int c=0; return a || b || c; }"))
+    (= 1 (run-and-get-result "int main() { int a=5; int b=3; int c=0; return a && b && !c; }"))))
+
 (deftest test-unary ()
   "Test: unary operations"
   (check
@@ -364,6 +400,7 @@ int main() {
     (test-shifts)
     (test-comparisons)
     (test-logical)
+    (test-logical-chaining)
     (test-unary)
     (test-precedence)))
 
