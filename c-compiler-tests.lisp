@@ -1892,6 +1892,324 @@ int main() { return fact(6); }
     (test-reg-preservation-complex)
     (test-reg-preservation-deep-recursion)))
 
+;;; ===========================================================================
+;;; Phase 13 Tests: Variable and Parameter Scope
+;;; ===========================================================================
+;;; These tests verify correct C scoping semantics:
+;;; - Variables in inner blocks should shadow outer variables with same name
+;;; - After exiting a block, the outer variable should be restored
+;;; - Parameters can be shadowed by locals in nested blocks
+
+(deftest test-scope-param-shadow-block ()
+  "Test: local variable in nested block shadows parameter"
+  (check
+    ;; Shadow parameter in nested block
+    (= 200 (run-and-get-result "
+int foo(int x) {
+    {
+        int x = 200;
+        return x;
+    }
+}
+int main() { return foo(100); }"))
+    ;; Parameter accessible before nested block shadows it
+    (= 300 (run-and-get-result "
+int foo(int x) {
+    int y = x;      // Use param x (100)
+    {
+        int x = 200;   // Shadow in nested block
+        y = y + x;     // 100 + 200
+    }
+    return y;
+}
+int main() { return foo(100); }"))))
+
+(deftest test-scope-local-shadow ()
+  "Test: inner local shadows outer local with same name"
+  (check
+    ;; Return from inner block sees inner variable
+    (= 20 (run-and-get-result "
+int main() {
+    int x = 10;
+    {
+        int x = 20;
+        return x;
+    }
+}"))
+    ;; Outer variable should be restored after inner block exits
+    ;; (This is correct C behavior - inner x is destroyed after block)
+    (= 10 (run-and-get-result "
+int main() {
+    int x = 10;
+    {
+        int x = 20;
+    }
+    return x;
+}"))
+    ;; Multiple levels - return from deepest
+    (= 30 (run-and-get-result "
+int main() {
+    int x = 10;
+    {
+        int x = 20;
+        {
+            int x = 30;
+            return x;
+        }
+    }
+}"))))
+
+(deftest test-scope-if-block ()
+  "Test: variable scope in if statement blocks"
+  (check
+    ;; Variable declared in if block, return from inside
+    (= 50 (run-and-get-result "
+int main() {
+    int x = 10;
+    if (1) {
+        int x = 50;
+        return x;
+    }
+    return x;
+}"))
+    ;; Variable in if block should not affect outer after block
+    ;; (Correct C: inner x destroyed, outer x = 10)
+    (= 10 (run-and-get-result "
+int main() {
+    int x = 10;
+    if (1) {
+        int x = 50;
+    }
+    return x;
+}"))
+    ;; Capture value from else block
+    (= 30 (run-and-get-result "
+int main() {
+    int result = 0;
+    if (0) {
+        int y = 20;
+        result = y;
+    } else {
+        int y = 30;
+        result = y;
+    }
+    return result;
+}"))
+    ;; Outer x unchanged after if-else
+    (= 10 (run-and-get-result "
+int main() {
+    int x = 10;
+    if (0) {
+        int y = 20;
+    } else {
+        int y = 30;
+    }
+    return x;
+}"))))
+
+(deftest test-scope-nested-blocks ()
+  "Test: deeply nested blocks without conditionals"
+  (check
+    ;; Three levels deep, return from innermost
+    (= 3 (run-and-get-result "
+int main() {
+    int level = 0;
+    {
+        int level = 1;
+        {
+            int level = 2;
+            {
+                int level = 3;
+                return level;
+            }
+        }
+    }
+}"))
+    ;; Each level accumulates its own x into sum
+    (= 6 (run-and-get-result "
+int main() {
+    int x = 1;
+    int sum = x;
+    {
+        int x = 2;
+        sum = sum + x;
+        {
+            int x = 3;
+            sum = sum + x;
+        }
+    }
+    return sum;
+}"))  ; 1 + 2 + 3 = 6
+    ;; Outer should survive all nested blocks (correct C behavior)
+    (= 100 (run-and-get-result "
+int main() {
+    int x = 100;
+    {
+        int y = 1;
+        {
+            int y = 2;
+            {
+                int y = 3;
+            }
+        }
+    }
+    return x;
+}"))))
+
+(deftest test-scope-loop-blocks ()
+  "Test: variable scope in loop blocks"
+  (check
+    ;; Variable local to loop body
+    (= 55 (run-and-get-result "
+int main() {
+    int sum = 0;
+    int i = 0;
+    while (i < 10) {
+        int x = i + 1;
+        sum = sum + x;
+        i = i + 1;
+    }
+    return sum;
+}" :max-cycles 50000))  ; 1+2+3+...+10 = 55
+    ;; Loop counter in nested block
+    (= 100 (run-and-get-result "
+int main() {
+    int i = 100;
+    int count = 0;
+    {
+        int j;
+        for (j = 0; j < 5; j = j + 1) {
+            count = count + 1;
+        }
+    }
+    return i;
+}" :max-cycles 50000))))
+
+(deftest test-scope-function-calls ()
+  "Test: shadowed variables with function calls"
+  (check
+    ;; Call function with inner shadowed variable value
+    (= 10 (run-and-get-result "
+int add(int a, int b) { return a + b; }
+int main() {
+    int a = 10;
+    {
+        int a = 5;
+        return add(a, a);
+    }
+}" :max-cycles 20000))   ; 5 + 5 = 10
+    ;; Different variables at different scopes
+    (= 25 (run-and-get-result "
+int double_it(int x) { return x * 2; }
+int main() {
+    int x = 10;
+    {
+        int y = 5;
+        int z = double_it(y);
+        return x + z + y;
+    }
+}" :max-cycles 20000))))  ; 10 + 10 + 5 = 25
+
+(deftest test-scope-same-name-different-types ()
+  "Test: shadowing with different types in nested blocks"
+  (check
+    ;; int in inner block
+    (= 1000 (run-and-get-result "
+int main() {
+    char x = 50;
+    {
+        int x = 1000;
+        return x;
+    }
+}"))
+    ;; char in inner block
+    (= 50 (run-and-get-result "
+int main() {
+    int x = 1000;
+    {
+        char x = 50;
+        return x;
+    }
+}"))))
+
+(deftest test-scope-complex-shadowing ()
+  "Test: complex shadowing scenarios"
+  (check
+    ;; Capture from inner shadow to outer variable
+    (= 110 (run-and-get-result "
+int main() {
+    int x = 100;
+    int y = 0;
+    if (1) {
+        int z = 10;
+        y = z;
+    }
+    return x + y;
+}"))  ; 100 + 10
+    ;; Multiple variables, some in nested block
+    (= 24 (run-and-get-result "
+int main() {
+    int a = 10;
+    int b = 20;
+    {
+        int a = 1;
+        int c = 3;
+        return a + b + c;
+    }
+}" :max-cycles 20000))  ; 1 + 20 + 3 = 24
+    ;; Function call with value from inner scope
+    (= 25 (run-and-get-result "
+int square(int n) { return n * n; }
+int main() {
+    int n = 3;
+    {
+        int m = 5;
+        return square(m);
+    }
+}" :max-cycles 20000))))  ; 5 * 5 = 25
+
+(deftest test-scope-param-and-local-interaction ()
+  "Test: interaction between parameters and local variables"
+  (check
+    ;; Use param then different local
+    (= 150 (run-and-get-result "
+int foo(int x) {
+    int first = x;
+    int y = 50;
+    return first + y;
+}
+int main() { return foo(100); }"))  ; 100 + 50
+    ;; Shadow param in nested block
+    (= 70 (run-and-get-result "
+int foo(int x) {
+    int sum = x;
+    {
+        int y = 20;
+        sum = sum + y;
+    }
+    return sum;
+}
+int main() { return foo(50); }"))  ; 50 + 20
+    ;; Multiple params, use all
+    (= 60 (run-and-get-result "
+int foo(int a, int b, int c) {
+    return a + b + c;
+}
+int main() { return foo(10, 20, 30); }"))))
+
+(deftest test-phase13-scope ()
+  "Run Phase 13 variable/parameter scope tests"
+  (combine-results
+    (test-scope-param-shadow-block)
+    (test-scope-local-shadow)
+    (test-scope-if-block)
+    (test-scope-nested-blocks)
+    (test-scope-loop-blocks)
+    (test-scope-function-calls)
+    (test-scope-same-name-different-types)
+    (test-scope-complex-shadowing)
+    (test-scope-param-and-local-interaction)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -1906,7 +2224,8 @@ int main() { return fact(6); }
     (test-phase9-pointers)
     (test-phase10-constant-folding)
     (test-phase11-inlining)
-    (test-phase12-reg-preservation)))
+    (test-phase12-reg-preservation)
+    (test-phase13-scope)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
