@@ -250,6 +250,9 @@
     ;; Set current function for symbol lookup
     (setf (compiler-state-current-function *state*) name)
 
+    ;; Enter function scope (matches parsing which has parameter scope at level 1)
+    (enter-scope)
+
     (init-registers)
 
     ;; Function header annotation
@@ -271,7 +274,10 @@
 
     ;; Epilogue (also target for return statements)
     (emit-label *function-end-label*)
-    (generate-epilogue)))
+    (generate-epilogue)
+
+    ;; Exit function scope
+    (exit-scope)))
 
 (defun is-leaf-function (body)
   "Check if function body contains no function calls"
@@ -298,18 +304,21 @@
 (defun generate-body-with-final-return (body)
   "Generate body, skipping the jump for the final return statement"
   (if (eq (ast-node-type body) 'block)
-      ;; Body is a block - generate all but last, then last with skip flag
-      (let ((children (ast-node-children body)))
-        (when children
-          ;; Generate all statements except the last
-          (dolist (stmt (butlast children))
-            (generate-statement stmt))
-          ;; Generate the last statement with skip flag if it's a return
-          (let ((last-stmt (car (last children))))
-            (if (eq (ast-node-type last-stmt) 'return)
-                (let ((*skip-final-return-jump* t))
-                  (generate-statement last-stmt))
-                (generate-statement last-stmt)))))
+      ;; Body is a block - enter scope and generate children
+      (progn
+        (enter-scope)
+        (let ((children (ast-node-children body)))
+          (when children
+            ;; Generate all statements except the last
+            (dolist (stmt (butlast children))
+              (generate-statement stmt))
+            ;; Generate the last statement with skip flag if it's a return
+            (let ((last-stmt (car (last children))))
+              (if (eq (ast-node-type last-stmt) 'return)
+                  (let ((*skip-final-return-jump* t))
+                    (generate-statement last-stmt))
+                  (generate-statement last-stmt)))))
+        (exit-scope))
       ;; Body is just a single return statement
       (let ((*skip-final-return-jump* t))
         (generate-statement body))))
@@ -429,8 +438,10 @@
 
 (defun generate-block (node)
   "Generate code for a block of statements"
+  (enter-scope)
   (dolist (stmt (ast-node-children node))
-    (generate-statement stmt)))
+    (generate-statement stmt))
+  (exit-scope))
 
 (defun generate-if (node)
   "Generate code for an if statement"

@@ -133,9 +133,10 @@
     entry))
 
 (defun lookup-symbol (name)
-  "Look up a symbol, preferring symbols from current function, then globals"
+  "Look up a symbol, preferring symbols from current function at highest valid scope, then globals"
   ;; First try to find in current function
   (let ((current-func (compiler-state-current-function *state*))
+        (current-scope (compiler-state-scope-level *state*))
         (best-entry nil)
         (best-scope -1)
         (best-global nil)
@@ -143,17 +144,20 @@
     (maphash (lambda (key entry)
                (declare (ignore key))
                (when (string= (sym-entry-name entry) name)
-                 (cond
-                   ;; Symbol from current function - prefer higher scope
-                   ((equal (sym-entry-function entry) current-func)
-                    (when (> (sym-entry-scope entry) best-scope)
-                      (setf best-entry entry)
-                      (setf best-scope (sym-entry-scope entry))))
-                   ;; Global symbol (no function)
-                   ((null (sym-entry-function entry))
-                    (when (> (sym-entry-scope entry) best-global-scope)
-                      (setf best-global entry)
-                      (setf best-global-scope (sym-entry-scope entry)))))))
+                 (let ((entry-scope (sym-entry-scope entry)))
+                   (cond
+                     ;; Symbol from current function - prefer higher scope, but only if in valid scope
+                     ((equal (sym-entry-function entry) current-func)
+                      (when (and (<= entry-scope current-scope)
+                                 (> entry-scope best-scope))
+                        (setf best-entry entry)
+                        (setf best-scope entry-scope)))
+                     ;; Global symbol (no function) - scope 0 is always valid
+                     ((null (sym-entry-function entry))
+                      (when (and (<= entry-scope current-scope)
+                                 (> entry-scope best-global-scope))
+                        (setf best-global entry)
+                        (setf best-global-scope entry-scope)))))))
              (compiler-state-symbols *state*))
     ;; Return current function's symbol if found, otherwise global
     (or best-entry best-global)))
