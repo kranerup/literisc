@@ -329,11 +329,12 @@
        (scan-char-literal))
 
       ;; Operators (check before punctuation since some overlap)
-      ((member char '(#\+ #\- #\* #\/ #\% #\& #\| #\^ #\< #\> #\= #\! #\~))
+      ;; Note: ? is included here for the ternary conditional operator
+      ((member char '(#\+ #\- #\* #\/ #\% #\& #\| #\^ #\< #\> #\= #\! #\~ #\?))
        (scan-operator))
 
       ;; Punctuation
-      ((member char '(#\( #\) #\{ #\} #\[ #\] #\; #\, #\. #\: #\?))
+      ((member char '(#\( #\) #\{ #\} #\[ #\] #\; #\, #\. #\:))
        (scan-punctuation))
 
       ;; Unknown character

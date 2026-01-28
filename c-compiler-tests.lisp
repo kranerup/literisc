@@ -1440,7 +1440,7 @@ int main() {
     (= 8 (run-optimized "int main() { return sizeof(int) + sizeof(int); }"))
     (= 4 (run-optimized "int main() { return sizeof(int) * sizeof(char); }"))))
 
-;; Note: Ternary operator test skipped - ternary (?:) not fully implemented in lexer/parser
+;; Note: Ternary operator constant folding is tested in Phase 14
 
 (deftest test-fold-cast ()
   "Test: constant folding of cast expressions"
@@ -1520,7 +1520,7 @@ int main() {
     (test-fold-logical)
     (test-fold-unary)
     (test-fold-sizeof)
-    ;; test-fold-ternary skipped - ternary operator not implemented in lexer
+    ;; Ternary constant folding tested in Phase 14
     (test-fold-cast)
     (test-fold-mixed)
     (test-fold-preserves-behavior)))
@@ -2210,6 +2210,163 @@ int main() { return foo(10, 20, 30); }"))))
     (test-scope-complex-shadowing)
     (test-scope-param-and-local-interaction)))
 
+;;; ===========================================================================
+;;; Phase 14 Tests: Conditional (Ternary) Operator
+;;; ===========================================================================
+;;; Tests for the ternary conditional operator: condition ? true-expr : false-expr
+
+(deftest test-conditional-basic ()
+  "Test: ternary with constant conditions"
+  (check
+    ;; True condition
+    (= 10 (run-and-get-result "int main() { return 1 ? 10 : 20; }"))
+    ;; False condition
+    (= 20 (run-and-get-result "int main() { return 0 ? 10 : 20; }"))
+    ;; Non-zero as true
+    (= 10 (run-and-get-result "int main() { return 42 ? 10 : 20; }"))
+    ;; Negative as true
+    (= 10 (run-and-get-result "int main() { return -1 ? 10 : 20; }"))))
+
+(deftest test-conditional-with-vars ()
+  "Test: ternary with variable conditions"
+  (check
+    ;; Non-zero variable (true)
+    (= 100 (run-and-get-result "int main() { int x = 5; return x ? 100 : 200; }"))
+    ;; Zero variable (false)
+    (= 200 (run-and-get-result "int main() { int x = 0; return x ? 100 : 200; }"))
+    ;; Variable in result expressions
+    (= 50 (run-and-get-result "int main() { int a = 50; int b = 60; return 1 ? a : b; }"))
+    (= 60 (run-and-get-result "int main() { int a = 50; int b = 60; return 0 ? a : b; }"))))
+
+(deftest test-conditional-comparison ()
+  "Test: ternary with comparison-based selection (max/min patterns)"
+  (check
+    ;; Max of two values
+    (= 5 (run-and-get-result "int main() { int a = 5; int b = 3; return (a > b) ? a : b; }"))
+    (= 7 (run-and-get-result "int main() { int a = 2; int b = 7; return (a > b) ? a : b; }"))
+    ;; Min of two values
+    (= 3 (run-and-get-result "int main() { int a = 5; int b = 3; return (a < b) ? a : b; }"))
+    (= 2 (run-and-get-result "int main() { int a = 2; int b = 7; return (a < b) ? a : b; }"))
+    ;; Equality check
+    (= 1 (run-and-get-result "int main() { int x = 10; return (x == 10) ? 1 : 0; }"))
+    (= 0 (run-and-get-result "int main() { int x = 5; return (x == 10) ? 1 : 0; }"))))
+
+(deftest test-conditional-nested ()
+  "Test: nested ternary expressions"
+  (check
+    ;; Nested: x == 1 ? 10 : (x == 2 ? 20 : 30)
+    (= 10 (run-and-get-result "int main() { int x = 1; return x == 1 ? 10 : x == 2 ? 20 : 30; }"))
+    (= 20 (run-and-get-result "int main() { int x = 2; return x == 1 ? 10 : x == 2 ? 20 : 30; }"))
+    (= 30 (run-and-get-result "int main() { int x = 3; return x == 1 ? 10 : x == 2 ? 20 : 30; }"))
+    ;; Triple nested
+    (= 40 (run-and-get-result "
+int main() {
+    int x = 4;
+    return x == 1 ? 10 : x == 2 ? 20 : x == 3 ? 30 : 40;
+}"))))
+
+(deftest test-conditional-in-expr ()
+  "Test: ternary as subexpression"
+  (check
+    ;; Ternary in addition
+    (= 12 (run-and-get-result "int main() { int a = 3; return (a > 0 ? 10 : 5) + (a < 5 ? 2 : 1); }"))
+    ;; Ternary in multiplication
+    (= 30 (run-and-get-result "int main() { return (1 ? 5 : 3) * (1 ? 6 : 4); }"))
+    ;; Ternary as array index
+    (= 20 (run-and-get-result "
+int main() {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    return arr[1 ? 1 : 0];
+}" :max-cycles 20000))
+    ;; Ternary in assignment
+    (= 100 (run-and-get-result "
+int main() {
+    int x;
+    int flag = 1;
+    x = flag ? 100 : 200;
+    return x;
+}"))))
+
+(deftest test-conditional-with-calls ()
+  "Test: ternary with function calls"
+  (check
+    ;; Select which function to call based on condition
+    (= 10 (run-and-get-result "
+int double_it(int x) { return x * 2; }
+int triple_it(int x) { return x * 3; }
+int main() { int flag = 1; return flag ? double_it(5) : triple_it(5); }"))
+    (= 15 (run-and-get-result "
+int double_it(int x) { return x * 2; }
+int triple_it(int x) { return x * 3; }
+int main() { int flag = 0; return flag ? double_it(5) : triple_it(5); }"))
+    ;; Function result as condition
+    (= 100 (run-and-get-result "
+int is_positive(int x) { return x > 0; }
+int main() { return is_positive(5) ? 100 : 200; }"))
+    (= 200 (run-and-get-result "
+int is_positive(int x) { return x > 0; }
+int main() { return is_positive(-5) ? 100 : 200; }"))))
+
+(deftest test-conditional-constant-fold ()
+  "Test: constant folding of ternary expressions"
+  (check
+    ;; All constant - should fold to 42
+    (= 42 (run-optimized "int main() { return 1 ? 42 : 99; }"))
+    ;; All constant - should fold to 99
+    (= 99 (run-optimized "int main() { return 0 ? 42 : 99; }"))
+    ;; Comparison folds to constant then ternary folds
+    (= 100 (run-optimized "int main() { return (2 > 1) ? 100 : 200; }"))
+    (= 200 (run-optimized "int main() { return (1 > 2) ? 100 : 200; }"))
+    ;; Nested constants fold
+    (= 30 (run-optimized "int main() { return 1 ? (1 ? 30 : 20) : 10; }"))
+    ;; Expressions in branches fold
+    (= 14 (run-optimized "int main() { return 1 ? (2 + 3 * 4) : (5 + 6); }"))))
+
+(deftest test-conditional-side-effects ()
+  "Test: ternary should only evaluate the selected branch"
+  (check
+    ;; Only true branch evaluated - this tests short-circuit behavior
+    ;; If false branch were evaluated, it would cause issues with the pointer
+    (= 10 (run-and-get-result "
+int main() {
+    int x = 10;
+    int *p = 0;
+    return 1 ? x : *p;
+}"))
+    ;; Only false branch evaluated
+    (= 20 (run-and-get-result "
+int main() {
+    int y = 20;
+    int *p = 0;
+    return 0 ? *p : y;
+}"))))
+
+(deftest test-conditional-mixed-types ()
+  "Test: ternary with different types in branches"
+  (check
+    ;; char and int
+    (= 65 (run-and-get-result "int main() { char c = 65; int i = 1000; return 1 ? c : i; }"))
+    (= 1000 (run-and-get-result "int main() { char c = 65; int i = 1000; return 0 ? c : i; }"))
+    ;; short and int
+    (= 500 (run-and-get-result "int main() { short s = 500; int i = 50000; return 1 ? s : i; }"))
+    (= 50000 (run-and-get-result "int main() { short s = 500; int i = 50000; return 0 ? s : i; }"))))
+
+(deftest test-phase14-conditional ()
+  "Run Phase 14 conditional operator tests"
+  (combine-results
+    (test-conditional-basic)
+    (test-conditional-with-vars)
+    (test-conditional-comparison)
+    (test-conditional-nested)
+    (test-conditional-in-expr)
+    (test-conditional-with-calls)
+    (test-conditional-constant-fold)
+    (test-conditional-side-effects)
+    (test-conditional-mixed-types)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -2225,7 +2382,8 @@ int main() { return foo(10, 20, 30); }"))))
     (test-phase10-constant-folding)
     (test-phase11-inlining)
     (test-phase12-reg-preservation)
-    (test-phase13-scope)))
+    (test-phase13-scope)
+    (test-phase14-conditional)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

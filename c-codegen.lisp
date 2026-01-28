@@ -1410,8 +1410,11 @@
 
     ;; Evaluate condition
     (generate-expression condition)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    ;; Test if condition is zero (use allocated temp to avoid clobbering caller's regs)
+    (let ((zero-reg (alloc-temp-reg)))
+      (emit `(Rx= 0 ,zero-reg))
+      (emit `(A-=Rx ,zero-reg))
+      (free-temp-reg zero-reg))
     (emit `(jz ,else-label))
 
     ;; Then expression
