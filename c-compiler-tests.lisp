@@ -2725,6 +2725,108 @@ int main() { return X * X * X; }" :max-cycles 50000))))
     (test-enum-edge-cases)
     (test-enum-constant-folding)))
 
+;;; ===========================================================================
+;;; Phase 16: C99 Features Tests
+;;; ===========================================================================
+
+(deftest test-c99-line-comments ()
+  "Test // style comments"
+  (combine-results
+    (check "// comment at end of line"
+           (= 42 (run-and-get-result "int main() { int x = 42; // this is a comment
+return x; }")))
+    (check "// comment with code after newline"
+           (= 5 (run-and-get-result "int main() {
+// int y = 100;
+int x = 5;
+return x; }")))
+    (check "multiple // comments"
+           (= 15 (run-and-get-result "int main() {
+int a = 5; // first
+int b = 10; // second
+return a + b; // result
+}")))))
+
+(deftest test-c99-mixed-declarations ()
+  "Test mixed declarations and code (C99)"
+  (combine-results
+    (check "declaration after statement"
+           (= 30 (run-and-get-result "int main() {
+int x = 10;
+x = x + 5;
+int y = 15;
+return x + y;
+}")))
+    (check "multiple interleaved declarations"
+           (= 60 (run-and-get-result "int main() {
+int a = 10;
+a = a * 2;
+int b = 20;
+b = b + a;
+int c = 20;
+return b + c;
+}")))
+    (check "declaration after if"
+           (= 42 (run-and-get-result "int main() {
+int x = 1;
+if (x) { x = 42; }
+int y = x;
+return y;
+}")))))
+
+(deftest test-c99-for-init-declaration ()
+  "Test for-loop init declarations (C99)"
+  (combine-results
+    (check "basic for-loop init declaration"
+           (= 10 (run-and-get-result "int main() {
+int sum = 0;
+for (int i = 0; i < 5; i = i + 1) {
+  sum = sum + i;
+}
+return sum;
+}" :max-cycles 50000)))
+    (check "for-loop var only visible in loop"
+           (= 0 (run-and-get-result "int main() {
+int i = 100;
+for (int i = 0; i < 3; i = i + 1) {
+  // inner i shadows outer
+}
+return i - 100;  // outer i unchanged
+}" :max-cycles 50000)))
+    (check "nested for-loops with init declarations"
+           (= 6 (run-and-get-result "int main() {
+int sum = 0;
+for (int i = 0; i < 3; i = i + 1) {
+  for (int j = 0; j < 2; j = j + 1) {
+    sum = sum + 1;
+  }
+}
+return sum;
+}" :max-cycles 100000)))
+    (check "for-loop init declaration with immediate return"
+           (= 0 (run-and-get-result "int main() {
+for (int i = 0; i < 5; i = i + 1) {
+  return i;
+}
+return -1;
+}" :max-cycles 10000)))))
+
+(deftest test-c99-string-literals ()
+  "Test string literal support (parsing)"
+  (combine-results
+    (check "string literal in variable"
+           (not (null (c-compiler:compile-c "int main() { char *s = \"hello\"; return 0; }" :annotate nil))))
+    (check "string literal with escape sequences"
+           (not (null (c-compiler:compile-c "int main() { char *s = \"hello\\nworld\"; return 0; }" :annotate nil))))))
+
+(deftest test-phase16-c99-features ()
+  "Run Phase 16 C99 feature tests"
+  (combine-results
+    (test-c99-line-comments)
+    (test-c99-mixed-declarations)
+    (test-c99-for-init-declaration)
+    (test-c99-string-literals)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -2742,7 +2844,8 @@ int main() { return X * X * X; }" :max-cycles 50000))))
     (test-phase12-reg-preservation)
     (test-phase13-scope)
     (test-phase14-conditional)
-    (test-phase15-enum)))
+    (test-phase15-enum)
+    (test-phase16-c99-features)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

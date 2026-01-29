@@ -501,6 +501,8 @@
 
 (defun generate-for (node)
   "Generate code for a for statement"
+  ;; Enter scope to match the scope entered during parsing (for init declarations)
+  (enter-scope)
   (let ((init (first (ast-node-children node)))
         (condition (second (ast-node-children node)))
         (update (third (ast-node-children node)))
@@ -540,7 +542,8 @@
       (generate-expression update))
 
     (emit `(j ,loop-label))
-    (emit-label end-label)))
+    (emit-label end-label))
+  (exit-scope))
 
 (defun generate-do-while (node)
   "Generate code for a do-while statement"
