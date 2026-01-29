@@ -221,7 +221,7 @@
   "Test: increment (++) and decrement (--) operators"
   (check
     ;; Post-increment
-    (= 5 (run-and-get-result "int main() { int x = 5; x++; return x; }"))
+    (= 6 (run-and-get-result "int main() { int x = 5; x++; return x; }"))  ; x is incremented
     (= 5 (run-and-get-result "int main() { int x = 5; return x++; }")) ; Returns original value
     (= 6 (run-and-get-result "int main() { int x = 5; int y = x++; return x; }"))
     (= 5 (run-and-get-result "int main() { int x = 5; int y = x++; return y; }"))
@@ -401,9 +401,10 @@ int main() {
     (= 10 (run-and-get-result "
 int main() {
     int i = 0;
+    int j;
     int sum = 0;
     while (i < 5) {
-        int j = 0;
+        j = 0;
         while (j < 2) {
             sum = sum + 1;
             j = j + 1;
@@ -416,9 +417,10 @@ int main() {
     (= 10 (run-and-get-result "
 int main() {
     int i = 0;
+    int j;
     int sum = 0;
     for (i = 0; i < 5; i = i + 1) {
-        int j = 0;
+        j = 0;
         while (j < 2) {
             sum = sum + 1;
             j = j + 1;

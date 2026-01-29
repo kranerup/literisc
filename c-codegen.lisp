@@ -825,6 +825,20 @@
        (generate-multiply size-reg)
        (free-temp-reg size-reg)))))
 
+(defun emit-unscale-for-pointer (elem-size)
+  "Unscale value in A by element size for pointer subtraction result"
+  (case elem-size
+    (1 nil)                     ; no scaling needed for char*
+    (2 (emit '(A=A>>1)))        ; / 2 for short*
+    (4 (emit '(A=A>>1))         ; / 4 for int*
+       (emit '(A=A>>1)))
+    (otherwise
+     ;; General case: use software divide
+     (let ((size-reg (alloc-temp-reg)))
+       (emit `(Rx= ,elem-size ,size-reg))
+       (generate-divide size-reg nil)
+       (free-temp-reg size-reg)))))
+
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
   ;; Check for pointer arithmetic
@@ -880,7 +894,10 @@
            (emit `(Rx=A ,right-reg))    ; save right
            (emit `(A=Rx ,left-reg))     ; A = left
            (emit `(A-=Rx ,right-reg))   ; A = left - right
-           (free-temp-reg right-reg)))
+           (free-temp-reg right-reg)
+           ;; For pointer - pointer, divide result by element size
+           (when (and left-elem-size right-elem-size)
+             (emit-unscale-for-pointer left-elem-size))))
 
       ((string= op "*")
        ;; Software multiply - result in A
@@ -1045,17 +1062,21 @@
       ((string= op "-")
        ;; Negate: 0 - x
        (generate-expression operand)
-       (emit '(Rx=A R0))
-       (emit '(A= 0))
-       (emit '(A-=Rx R0)))
+       (let ((temp (alloc-temp-reg)))
+         (emit `(Rx=A ,temp))
+         (emit '(A= 0))
+         (emit `(A-=Rx ,temp))
+         (free-temp-reg temp)))
 
       ((string= op "!")
        ;; Logical not: x == 0 ? 1 : 0
        (generate-expression operand)
        (let ((zero-label (gen-label "NOTZERO"))
-             (end-label (gen-label "NOTEND")))
-         (emit `(Rx= 0 R0))
-         (emit `(A-=Rx R0))
+             (end-label (gen-label "NOTEND"))
+             (temp (alloc-temp-reg)))
+         (emit `(Rx= 0 ,temp))
+         (emit `(A-=Rx ,temp))
+         (free-temp-reg temp)
          (emit `(jz ,zero-label))
          (emit '(A= 0))
          (emit `(j ,end-label))
@@ -1107,28 +1128,39 @@
 
 (defun generate-pre-inc-dec (operand delta)
   "Generate code for pre-increment/decrement"
-  ;; Load current value
-  (generate-expression operand)
-  ;; Add delta
-  (emit `(Rx= ,delta R0))
-  (emit '(A+=Rx R0))
-  ;; Store back and keep result
-  (generate-store-lvalue operand))
+  ;; Check if operand is a pointer (for scaled arithmetic)
+  (let* ((operand-type (get-expression-type operand))
+         (elem-size (pointer-element-size operand-type))
+         (actual-delta (if elem-size (* delta elem-size) delta)))
+    ;; Load current value
+    (generate-expression operand)
+    ;; Add scaled delta using allocated temp register
+    (let ((delta-reg (alloc-temp-reg)))
+      (emit `(Rx= ,actual-delta ,delta-reg))
+      (emit `(A+=Rx ,delta-reg))
+      (free-temp-reg delta-reg))
+    ;; Store back and keep result
+    (generate-store-lvalue operand)))
 
 (defun generate-post-op (node)
   "Generate code for post-increment/decrement"
-  (let ((op (ast-node-value node))
-        (operand (first (ast-node-children node))))
+  (let* ((op (ast-node-value node))
+         (operand (first (ast-node-children node)))
+         ;; Check if operand is a pointer (for scaled arithmetic)
+         (operand-type (get-expression-type operand))
+         (elem-size (pointer-element-size operand-type))
+         (delta (if (string= op "++") 1 -1))
+         (actual-delta (if elem-size (* delta elem-size) delta)))
     ;; Load current value
     (generate-expression operand)
     ;; Save original value
-    (let ((save-reg (alloc-temp-reg)))
+    (let ((save-reg (alloc-temp-reg))
+          (inc-reg (alloc-temp-reg)))
       (emit `(Rx=A ,save-reg))
-      ;; Compute new value
-      (if (string= op "++")
-          (emit `(Rx= 1 R0))
-          (emit `(Rx= -1 R0)))
-      (emit '(A+=Rx R0))
+      ;; Compute new value using allocated temp register with scaled delta
+      (emit `(Rx= ,actual-delta ,inc-reg))
+      (emit `(A+=Rx ,inc-reg))
+      (free-temp-reg inc-reg)
       ;; Store new value
       (generate-store-lvalue operand)
       ;; Return original value
