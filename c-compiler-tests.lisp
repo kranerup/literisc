@@ -292,6 +292,29 @@ int main() {
 }" :max-cycles 20000))
 ))
 
+(deftest test-compound-assignment ()
+  "Test: compound assignment operators"
+  (check
+    ;; +=
+    (= 8 (run-and-get-result "int main() { int x = 5; x += 3; return x; }"))
+    ;; -=
+    (= 2 (run-and-get-result "int main() { int x = 5; x -= 3; return x; }"))
+    ;; *=
+    (= 15 (run-and-get-result "int main() { int x = 5; x *= 3; return x; }"))
+    ;; /=
+    (= 2 (run-and-get-result "int main() { int x = 7; x /= 3; return x; }"))
+    ;; %=
+    (= 1 (run-and-get-result "int main() { int x = 7; x %= 3; return x; }"))
+    ;; &=
+    (= 1 (run-and-get-result "int main() { int x = 5; x &= 3; return x; }")) ; 101 & 011 = 001
+    ;; |=
+    (= 7 (run-and-get-result "int main() { int x = 5; x |= 3; return x; }")) ; 101 | 011 = 111
+    ;; ^=
+    (= 6 (run-and-get-result "int main() { int x = 5; x ^= 3; return x; }")) ; 101 ^ 011 = 110
+    ;; <<=
+    (= 20 (run-and-get-result "int main() { int x = 5; x <<= 2; return x; }")) ; 5 << 2 = 20
+    ;; >>=
+    (= 1 (run-and-get-result "int main() { int x = 5; x >>= 2; return x; }")))) ; 5 >> 2 = 1
 
 ;;; ===========================================================================
 ;;; Phase 3 Tests: Control Flow
@@ -491,7 +514,8 @@ int main() {
     (test-logical-chaining)
     (test-unary)
     (test-precedence)
-    (test-increment-decrement)))
+    (test-increment-decrement)
+    (test-compound-assignment)))
 
 (deftest test-phase3 ()
   "Run Phase 3 tests"
