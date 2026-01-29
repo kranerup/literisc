@@ -198,12 +198,100 @@
                                     :verbose nil))
     (= 5 (run-and-get-result "int main() { return -(-5); }"))))
 
+
 (deftest test-precedence ()
   "Test: operator precedence"
   (check
     (= 14 (run-and-get-result "int main() { return 2 + 3 * 4; }"))  ; 2 + 12
     (= 20 (run-and-get-result "int main() { return (2 + 3) * 4; }"))
     (= 7 (run-and-get-result "int main() { return 1 + 2 * 3; }"))))  ; 1 + 6
+
+(deftest test-increment-decrement ()
+  "Test: increment (++) and decrement (--) operators"
+  (check
+    ;; Post-increment
+    (= 5 (run-and-get-result "int main() { int x = 5; x++; return x; }"))
+    (= 5 (run-and-get-result "int main() { int x = 5; return x++; }")) ; Returns original value
+    (= 6 (run-and-get-result "int main() { int x = 5; int y = x++; return x; }"))
+    (= 5 (run-and-get-result "int main() { int x = 5; int y = x++; return y; }"))
+
+    ;; Pre-increment
+    (= 6 (run-and-get-result "int main() { int x = 5; ++x; return x; }"))
+    (= 6 (run-and-get-result "int main() { int x = 5; return ++x; }")) ; Returns new value
+    (= 6 (run-and-get-result "int main() { int x = 5; int y = ++x; return x; }"))
+    (= 6 (run-and-get-result "int main() { int x = 5; int y = ++x; return y; }"))
+
+    ;; Post-decrement
+    (= 4 (run-and-get-result "int main() { int x = 5; x--; return x; }"))
+    (= 5 (run-and-get-result "int main() { int x = 5; return x--; }"))
+    (= 4 (run-and-get-result "int main() { int x = 5; int y = x--; return x; }"))
+    (= 5 (run-and-get-result "int main() { int x = 5; int y = x--; return y; }"))
+
+    ;; Pre-decrement
+    (= 4 (run-and-get-result "int main() { int x = 5; --x; return x; }"))
+    (= 4 (run-and-get-result "int main() { int x = 5; return --x; }"))
+    (= 4 (run-and-get-result "int main() { int x = 5; int y = --x; return x; }"))
+    (= 4 (run-and-get-result "int main() { int x = 5; int y = --x; return y; }"))
+
+    ;; Combined operations
+    (= 8 (run-and-get-result "int main() { int a = 3; int b = 4; int x = a++ + ++b; return x; }")) ; x = 3 + 5 = 8. a=4, b=5
+    (= 4 (run-and-get-result "int main() { int a = 3; int b = 4; int x = a++ + ++b; return a; }"))
+    (= 5 (run-and-get-result "int main() { int a = 3; int b = 4; int x = a++ + ++b; return b; }"))
+
+    (= 8 (run-and-get-result "int main() { int a = 3; int b = 4; int x = ++a + b++; return x; }")) ; x = 4 + 4 = 8. a=4, b=5
+    (= 4 (run-and-get-result "int main() { int a = 3; int b = 4; int x = ++a + b++; return a; }"))
+    (= 5 (run-and-get-result "int main() { int a = 3; int b = 4; int x = ++a + b++; return b; }"))
+
+    ;; Pointer increment/decrement (int pointers)
+    (= 200 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = arr;
+  p++; // Should point to arr[1]
+  return *p;
+}" :max-cycles 20000))
+
+    (= 100 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = &arr[1];
+  p--; // Should point to arr[0]
+  return *p;
+}" :max-cycles 20000))
+
+    ;; Pointer pre-increment in expression
+    (= 200 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = arr;
+  return *(++p); // p becomes &arr[1], then dereferenced
+}" :max-cycles 20000))
+
+    ;; Pointer post-increment in expression
+    (= 100 (run-and-get-result "
+int main() {
+  int arr[3];
+  int *p;
+  arr[0] = 100;
+  arr[1] = 200;
+  arr[2] = 300;
+  p = arr;
+  return *(p++); // p is dereferenced first (arr[0]), then p becomes &arr[1]
+}" :max-cycles 20000))
+))
+
 
 ;;; ===========================================================================
 ;;; Phase 3 Tests: Control Flow
@@ -402,7 +490,8 @@ int main() {
     (test-logical)
     (test-logical-chaining)
     (test-unary)
-    (test-precedence)))
+    (test-precedence)
+    (test-increment-decrement)))
 
 (deftest test-phase3 ()
   "Run Phase 3 tests"
