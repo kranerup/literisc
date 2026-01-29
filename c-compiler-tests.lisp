@@ -206,6 +206,17 @@
     (= 20 (run-and-get-result "int main() { return (2 + 3) * 4; }"))
     (= 7 (run-and-get-result "int main() { return 1 + 2 * 3; }"))))  ; 1 + 6
 
+(deftest test-complex-expressions ()
+  "Test: complex expressions with nested subexpressions"
+  (check
+    ;; Nested arithmetic
+    (= 47 (run-and-get-result "int main() { return (1 + 2) * (3 + 4) + (5 + 6) + (7 + 8); }"))
+    ;; Mixed operators and parentheses
+    (= 31 (run-and-get-result "int main() { int x = 5; return (2 * 3) + (4 * 5) + x; }"))
+    ;; More complex nesting
+    (= 25 (run-and-get-result "int main() { int a = 3; int b = 4; return (a * a) + (b * b); }"))
+    ))
+
 (deftest test-increment-decrement ()
   "Test: increment (++) and decrement (--) operators"
   (check
@@ -370,6 +381,53 @@ int main() {
   return sum;
 }"))))  ; 0+1+2+3+4 = 10
 
+(deftest test-nested-loops ()
+  "Test: nested for and while loops"
+  (check
+    ;; Nested for loops
+    (= 45 (run-and-get-result "
+int main() {
+  int sum = 0;
+  int i;
+  int j;
+  for (i = 0; i < 10; i = i + 1) {
+    for (j = 0; j < i; j = j + 1) {
+      sum = sum + 1;
+    }
+  }
+  return sum;
+}" :max-cycles 50000)) ; 0+1+2+3+4+5+6+7+8+9 = 45
+    ;; Nested while loops
+    (= 10 (run-and-get-result "
+int main() {
+    int i = 0;
+    int sum = 0;
+    while (i < 5) {
+        int j = 0;
+        while (j < 2) {
+            sum = sum + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return sum;
+}" :max-cycles 50000))
+    ;; Mixed for and while loops
+    (= 10 (run-and-get-result "
+int main() {
+    int i = 0;
+    int sum = 0;
+    for (i = 0; i < 5; i = i + 1) {
+        int j = 0;
+        while (j < 2) {
+            sum = sum + 1;
+            j = j + 1;
+        }
+    }
+    return sum;
+}" :max-cycles 50000))
+    ))
+
 (deftest test-break ()
   "Test: break statement"
   (check
@@ -514,6 +572,7 @@ int main() {
     (test-logical-chaining)
     (test-unary)
     (test-precedence)
+    (test-complex-expressions)
     (test-increment-decrement)
     (test-compound-assignment)))
 
@@ -524,6 +583,7 @@ int main() {
     (test-if-else-chain)
     (test-while)
     (test-for)
+    (test-nested-loops)
     (test-break)
     (test-continue)))
 
