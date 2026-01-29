@@ -226,6 +226,7 @@
     (function (generate-function node))
     (decl-list (generate-global-decls node))
     (global-var (generate-global-var node))
+    (enum-decl nil)  ; Enum declarations are compile-time only, no code needed
     (otherwise
      (compiler-warning "Ignoring top-level ~a" (ast-node-type node)))))
 
@@ -747,7 +748,17 @@
          (free-temp-reg temp)
          ;; Apply sign extension for signed sub-word types
          (when var-type
-           (emit-promote-to-int var-type)))))))
+           (emit-promote-to-int var-type))))
+
+      (:enum-constant
+       ;; Enum constants are compile-time values stored in the offset field
+       (let ((value (sym-entry-offset sym)))
+         (if (and (>= value -8) (<= value 7))
+             (emit `(A= ,value))
+             (let ((temp (alloc-temp-reg)))
+               (emit `(Rx= ,value ,temp))
+               (emit `(A=Rx ,temp))
+               (free-temp-reg temp))))))))
 
 (defun generate-store-local (offset &optional var-type)
   "Generate code to store A to a local variable at offset with optional sized store"

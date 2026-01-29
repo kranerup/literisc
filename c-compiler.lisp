@@ -53,7 +53,8 @@
   pointer-level  ; 0 = not a pointer, 1 = *, 2 = **, etc.
   array-size     ; nil for non-arrays, integer for arrays
   size           ; 1, 2, or 4 bytes (nil defaults based on base type)
-  unsigned-p)    ; t for unsigned, nil for signed
+  unsigned-p     ; t for unsigned, nil for signed
+  enum-tag)      ; nil, :anonymous, or tag-name string for enum types
 
 ;;; Symbol table entry
 (defstruct sym-entry
@@ -87,7 +88,8 @@
   (need-mul-runtime nil) ; set to t when __mul runtime is needed
   (need-div-runtime nil) ; set to t when __div runtime is needed
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
-  (function-table (make-hash-table :test 'equal))) ; name -> function AST node for inlining
+  (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
+  (enum-types (make-hash-table :test 'equal))) ; tag-name -> list of (name . value) constants
 
 ;;; Global compiler state
 (defvar *state* nil)
@@ -402,6 +404,12 @@
                   :array-size nil
                   :size (type-desc-size base-type)
                   :unsigned-p (type-desc-unsigned-p base-type)))
+
+(defun make-enum-type (&optional tag-name)
+  "Create a type descriptor for an enum type"
+  (make-type-desc :base 'int :pointer-level 0 :array-size nil
+                  :size 4 :unsigned-p nil
+                  :enum-tag (or tag-name :anonymous)))
 
 (defun type-size (type)
   "Return the size in bytes of a type"

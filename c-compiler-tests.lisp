@@ -2563,6 +2563,166 @@ int main() {
     (test-conditional-side-effects)
     (test-conditional-mixed-types)))
 
+;;; ===========================================================================
+;;; Phase 15 Tests: Enum Types
+;;; ===========================================================================
+;;; Tests for C enum support - compile-time integer constants
+
+(deftest test-enum-basic ()
+  "Test: anonymous enum with default values"
+  (check
+    ;; Anonymous enum with auto-incrementing values starting at 0
+    (= 0 (run-and-get-result "
+enum { RED, GREEN, BLUE };
+int main() { return RED; }"))
+    (= 1 (run-and-get-result "
+enum { RED, GREEN, BLUE };
+int main() { return GREEN; }"))
+    (= 2 (run-and-get-result "
+enum { RED, GREEN, BLUE };
+int main() { return BLUE; }"))
+    ;; Sum of enum values
+    (= 3 (run-and-get-result "
+enum { A, B, C };
+int main() { return A + B + C; }"))))  ; 0 + 1 + 2 = 3
+
+(deftest test-enum-explicit-values ()
+  "Test: enum with explicit and auto-increment values"
+  (check
+    ;; Explicit values
+    (= 10 (run-and-get-result "
+enum { A = 10 };
+int main() { return A; }"))
+    ;; Mixed explicit and auto-increment
+    (= 21 (run-and-get-result "
+enum { A, B = 10, C };
+int main() { return A + B + C; }"))  ; 0 + 10 + 11 = 21
+    ;; Explicit values in order
+    (= 7 (run-and-get-result "
+enum { R = 1, G = 2, B = 4 };
+int main() { return R + G + B; }"))  ; 1 + 2 + 4 = 7
+    ;; Non-sequential explicit values
+    (= 115 (run-and-get-result "
+enum { SMALL = 10, MEDIUM = 50, LARGE = 100 };
+int main() { return LARGE + SMALL + 5; }"))))  ; 100 + 10 + 5 = 115
+
+(deftest test-enum-named ()
+  "Test: named enum type and enum variables"
+  (check
+    ;; Named enum with variable
+    (= 1 (run-and-get-result "
+enum Color { RED, GREEN, BLUE };
+int main() {
+    enum Color c;
+    c = GREEN;
+    return c;
+}"))
+    ;; Named enum initialized
+    (= 2 (run-and-get-result "
+enum Day { MON, TUE, WED, THU, FRI };
+int main() {
+    enum Day d = WED;
+    return d;
+}"))))
+
+(deftest test-enum-expressions ()
+  "Test: enum constants in expressions"
+  (check
+    ;; Arithmetic with enums
+    (= 15 (run-and-get-result "
+enum { A = 5, B = 10 };
+int main() { return A + B; }"))
+    ;; Comparison with enums
+    (= 1 (run-and-get-result "
+enum { LOW = 1, HIGH = 10 };
+int main() { return LOW < HIGH; }"))
+    ;; Enum as loop bound
+    (= 10 (run-and-get-result "
+enum { COUNT = 5 };
+int main() {
+    int sum = 0;
+    int i;
+    for (i = 0; i < COUNT; i = i + 1) {
+        sum = sum + i;
+    }
+    return sum;
+}" :max-cycles 50000))  ; 0+1+2+3+4 = 10
+    ;; Enum as array index
+    (= 30 (run-and-get-result "
+enum { FIRST, SECOND, THIRD };
+int main() {
+    int arr[3];
+    arr[FIRST] = 10;
+    arr[SECOND] = 20;
+    arr[THIRD] = 30;
+    return arr[THIRD];
+}" :max-cycles 20000))))
+
+(deftest test-enum-scope ()
+  "Test: enum constant scope (global visibility)"
+  (check
+    ;; Enum constants visible in functions
+    (= 42 (run-and-get-result "
+enum { ANSWER = 42 };
+int get_answer() { return ANSWER; }
+int main() { return get_answer(); }"))
+    ;; Enum defined after use point (forward reference not needed for constants)
+    (= 100 (run-and-get-result "
+enum { BASE = 100 };
+int compute(int x) { return BASE + x; }
+int main() { return compute(0); }"))))
+
+(deftest test-enum-edge-cases ()
+  "Test: edge cases for enum values"
+  (check
+    ;; Zero value
+    (= 0 (run-and-get-result "
+enum { ZERO = 0 };
+int main() { return ZERO; }"))
+    ;; Negative value
+    (result= -1 (run-and-get-result "
+enum { NEG = -1 };
+int main() { return NEG; }"))
+    ;; Large value
+    (= 1000 (run-and-get-result "
+enum { BIG = 1000 };
+int main() { return BIG; }"))
+    ;; Expression as initializer
+    (= 30 (run-and-get-result "
+enum { A = 10, B = A + 20 };
+int main() { return B; }"))
+    ;; Multiple expression initializers
+    (= 35 (run-and-get-result "
+enum { X = 5, Y = X * 2, Z = X + Y + 20 };
+int main() { return Z; }"))))  ; 5 + 10 + 20 = 35
+
+(deftest test-enum-constant-folding ()
+  "Test: enum constants get folded during optimization"
+  (check
+    ;; Simple folding
+    (= 30 (run-optimized "
+enum { A = 10, B = 20 };
+int main() { return A + B; }"))
+    ;; Folding in expressions
+    (= 1 (run-optimized "
+enum { LOW = 5, HIGH = 10 };
+int main() { return LOW < HIGH; }"))
+    ;; Nested expression folding
+    (= 125 (run-optimized "
+enum { X = 5 };
+int main() { return X * X * X; }" :max-cycles 50000))))
+
+(deftest test-phase15-enum ()
+  "Run Phase 15 enum tests"
+  (combine-results
+    (test-enum-basic)
+    (test-enum-explicit-values)
+    (test-enum-named)
+    (test-enum-expressions)
+    (test-enum-scope)
+    (test-enum-edge-cases)
+    (test-enum-constant-folding)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -2579,7 +2739,8 @@ int main() {
     (test-phase11-inlining)
     (test-phase12-reg-preservation)
     (test-phase13-scope)
-    (test-phase14-conditional)))
+    (test-phase14-conditional)
+    (test-phase15-enum)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

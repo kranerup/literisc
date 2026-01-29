@@ -142,7 +142,17 @@
     ;; Leaf nodes - no folding needed
     (literal node)
     (string-literal node)
-    (var-ref node)
+    (var-ref
+     ;; Check if var-ref is an enum constant - fold to literal
+     (let* ((name (ast-node-value node))
+            (sym (lookup-symbol name)))
+       (if (and sym (eq (sym-entry-storage sym) :enum-constant))
+           ;; Fold enum constant to literal
+           (make-constant-node (sym-entry-offset sym)
+                               (make-int-type)
+                               (ast-node-source-loc node))
+           ;; Not an enum constant - keep as var-ref
+           node)))
     (break node)
     (continue node)
     (empty node)

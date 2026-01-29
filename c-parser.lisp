@@ -122,13 +122,152 @@
   (gethash name (compiler-state-address-taken *state*)))
 
 ;;; ===========================================================================
+;;; Constant Expression Evaluation (for enum initializers)
+;;; ===========================================================================
+
+(defun evaluate-constant-expression (expr)
+  "Evaluate a constant expression at parse time. Returns the integer value or nil if not constant."
+  (when (null expr)
+    (return-from evaluate-constant-expression nil))
+  (unless (ast-node-p expr)
+    (return-from evaluate-constant-expression nil))
+
+  (case (ast-node-type expr)
+    ;; Literal number - direct value
+    (literal
+     (let ((val (ast-node-value expr)))
+       (when (integerp val)
+         val)))
+
+    ;; Variable reference - might be an enum constant
+    (var-ref
+     (let* ((name (ast-node-value expr))
+            (sym (lookup-symbol name)))
+       (when (and sym (eq (sym-entry-storage sym) :enum-constant))
+         (sym-entry-offset sym))))  ; offset stores the enum value
+
+    ;; Unary operators
+    (unary-op
+     (let* ((op (ast-node-value expr))
+            (operand (first (ast-node-children expr)))
+            (operand-val (evaluate-constant-expression operand)))
+       (when operand-val
+         (cond
+           ((string= op "-") (- operand-val))
+           ((string= op "+") operand-val)
+           ((string= op "~") (lognot operand-val))
+           ((string= op "!") (if (zerop operand-val) 1 0))
+           (t nil)))))
+
+    ;; Binary operators
+    (binary-op
+     (let* ((op (ast-node-value expr))
+            (left (first (ast-node-children expr)))
+            (right (second (ast-node-children expr)))
+            (left-val (evaluate-constant-expression left))
+            (right-val (evaluate-constant-expression right)))
+       (when (and left-val right-val)
+         (cond
+           ((string= op "+") (+ left-val right-val))
+           ((string= op "-") (- left-val right-val))
+           ((string= op "*") (* left-val right-val))
+           ((string= op "/") (when (/= right-val 0) (truncate left-val right-val)))
+           ((string= op "%") (when (/= right-val 0) (rem left-val right-val)))
+           ((string= op "&") (logand left-val right-val))
+           ((string= op "|") (logior left-val right-val))
+           ((string= op "^") (logxor left-val right-val))
+           ((string= op "<<") (ash left-val right-val))
+           ((string= op ">>") (ash left-val (- right-val)))
+           ((string= op "==") (if (= left-val right-val) 1 0))
+           ((string= op "!=") (if (/= left-val right-val) 1 0))
+           ((string= op "<") (if (< left-val right-val) 1 0))
+           ((string= op ">") (if (> left-val right-val) 1 0))
+           ((string= op "<=") (if (<= left-val right-val) 1 0))
+           ((string= op ">=") (if (>= left-val right-val) 1 0))
+           ((string= op "&&") (if (and (not (zerop left-val)) (not (zerop right-val))) 1 0))
+           ((string= op "||") (if (or (not (zerop left-val)) (not (zerop right-val))) 1 0))
+           (t nil)))))
+
+    ;; Ternary conditional
+    (ternary
+     (let* ((condition (first (ast-node-children expr)))
+            (then-expr (second (ast-node-children expr)))
+            (else-expr (third (ast-node-children expr)))
+            (cond-val (evaluate-constant-expression condition)))
+       (when cond-val
+         (if (not (zerop cond-val))
+             (evaluate-constant-expression then-expr)
+             (evaluate-constant-expression else-expr)))))
+
+    (otherwise nil)))
+
+;;; ===========================================================================
+;;; Enum Parsing
+;;; ===========================================================================
+
+(defun parse-enum-specifier ()
+  "Parse an enum specifier: enum [tag] [{ enumerator-list }]"
+  (expect-token 'keyword "enum")
+
+  (let ((tag-name nil)
+        (has-body nil))
+    ;; Optional tag name
+    (when (check-token 'identifier)
+      (setf tag-name (token-value (advance-token))))
+
+    ;; Optional body { ... }
+    (when (match-token 'punctuation "{")
+      (setf has-body t)
+      (let ((next-value 0)
+            (constants nil))
+        ;; Parse enumerators
+        (unless (check-token 'punctuation "}")
+          (loop
+            (let ((const-name (token-value (expect-token 'identifier))))
+              ;; Check for explicit value assignment
+              (when (match-token 'operator "=")
+                (let* ((value-expr (parse-conditional-expression))
+                       (value (evaluate-constant-expression value-expr)))
+                  (if value
+                      (setf next-value value)
+                      (compiler-error "Enum initializer must be a constant expression"))))
+
+              ;; Add enum constant to symbol table with :enum-constant storage
+              ;; The offset field stores the integer value
+              (add-symbol const-name (make-enum-type tag-name) :enum-constant next-value)
+              (push (cons const-name next-value) constants)
+
+              ;; Increment for next constant
+              (incf next-value)
+
+              ;; Continue or stop
+              (unless (match-token 'punctuation ",")
+                (return)))))
+
+        (expect-token 'punctuation "}")
+
+        ;; Register named enum in the registry
+        (when tag-name
+          (setf (gethash tag-name (compiler-state-enum-types *state*))
+                (nreverse constants)))))
+
+    ;; Return enum type (or error if just "enum" with nothing)
+    (unless (or tag-name has-body)
+      (compiler-error "Expected enum tag name or body"))
+
+    (make-enum-type tag-name)))
+
+;;; ===========================================================================
 ;;; Type Parsing
 ;;; ===========================================================================
 
 (defun parse-type-specifier ()
   "Parse a type specifier with modifiers (signed/unsigned, short/long)"
-  ;; Handle C99 fixed-width types first
+  ;; Handle enum first
   (cond
+    ((check-token 'keyword "enum")
+     (parse-enum-specifier))
+    ;; Handle C99 fixed-width types
     ((match-token 'keyword "int8_t")
      (make-int8-type nil))
     ((match-token 'keyword "uint8_t")
@@ -302,7 +441,8 @@
               (and next (eq (token-type next) 'keyword)
                    (member (token-value next)
                            '("int" "char" "void" "unsigned" "signed" "short" "long"
-                             "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
+                             "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                             "enum")
                            :test #'string=))))
        (advance-token) ; skip (
        (let ((cast-type (parse-type)))
@@ -448,7 +588,8 @@
        (eq (token-type tok) 'keyword)
        (member (token-value tok)
                '("int" "char" "void" "unsigned" "signed" "short" "long"
-                 "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
+                 "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                 "enum")
                :test #'string=)))
 
 (defun parse-compound-statement ()
@@ -717,13 +858,20 @@
   ;; Check for inline keyword
   (let ((is-inline (match-token 'keyword "inline")))
     ;; Parse type and name
-    (let* ((type-spec (parse-type))
-           (name (token-value (expect-token 'identifier))))
+    (let* ((type-spec (parse-type)))
 
-      ;; Function definition or declaration?
-      (if (check-token 'punctuation "(")
-          (parse-function-definition type-spec name is-inline)
-          (parse-global-declaration type-spec name)))))
+      ;; Check for standalone enum declaration (no variable name)
+      (when (match-token 'punctuation ";")
+        ;; Standalone enum definition - constants already added during parse-enum-specifier
+        (return-from parse-top-level
+          (make-node 'enum-decl :result-type type-spec)))
+
+      ;; Normal case: expect identifier for variable/function name
+      (let ((name (token-value (expect-token 'identifier))))
+        ;; Function definition or declaration?
+        (if (check-token 'punctuation "(")
+            (parse-function-definition type-spec name is-inline)
+            (parse-global-declaration type-spec name))))))
 
 (defun parse-program ()
   "Parse a complete program"
