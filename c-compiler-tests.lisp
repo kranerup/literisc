@@ -1395,6 +1395,28 @@ int main() {
   return p == 0;
 }"))))
 
+(deftest test-advanced-pointer-operations ()
+  "Test: advanced pointer operations like pointer subtraction and arrays of pointers"
+  (check
+    ;; Pointer subtraction (int)
+    (= 2 (run-and-get-result "int main() { int arr[5]; int *p = &arr[3]; int *q = &arr[1]; return p - q; }"))
+    (= 4 (run-and-get-result "int main() { int arr[5]; int *p = &arr[4]; int *q = &arr[0]; return p - q; }"))
+
+    ;; Pointer subtraction (char)
+    (= 2 (run-and-get-result "int main() { char arr[5]; char *p = &arr[3]; char *q = &arr[1]; return p - q; }"))
+
+    ;; Pointer subtraction (short)
+    (= 2 (run-and-get-result "int main() { short arr[5]; short *p = &arr[3]; short *q = &arr[1]; return p - q; }"))
+
+    ;; Array of pointers
+    (= 10 (run-and-get-result "int main() { int x=10, y=20; int* a[2]; a[0]=&x; a[1]=&y; return *a[0]; }"))
+    (= 20 (run-and-get-result "int main() { int x=10, y=20; int* a[2]; a[0]=&x; a[1]=&y; return *a[1]; }"))
+    (= 60 (run-and-get-result "int main() { int x=10, y=20, z=30; int* a[3]; a[0]=&x; a[1]=&y; a[2]=&z; return *a[0] + *a[1] + *a[2]; }"))
+    
+    ;; Modify through array of pointers
+    (= 50 (run-and-get-result "int main() { int x=10; int* a[1]; a[0]=&x; *a[0] = 50; return x; }"))
+))
+
 (deftest test-phase9-pointers ()
   "Run Phase 9 pointer tests"
   (combine-results
@@ -1409,7 +1431,8 @@ int main() {
     (test-array-as-param)
     (test-pointer-subscript)
     (test-double-pointer)
-    (test-pointer-null)))
+    (test-pointer-null)
+    (test-advanced-pointer-operations)))
 
 ;;; ===========================================================================
 ;;; Phase 10 Tests: Constant Folding Optimization
