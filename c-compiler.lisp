@@ -104,7 +104,8 @@
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
-  (struct-types (make-hash-table :test 'equal))) ; tag-name -> struct-def
+  (struct-types (make-hash-table :test 'equal))  ; tag-name -> struct-def
+  (peephole nil))                                ; enable peephole optimization
 
 ;;; Global compiler state
 (defvar *state* nil)
@@ -249,7 +250,11 @@
   "Return the generated code in correct order"
   ;; First emit any needed runtime library functions
   (emit-runtime-library)
-  (reverse (compiler-state-code *state*)))
+  (let ((code (reverse (compiler-state-code *state*))))
+    ;; Apply peephole optimization if enabled
+    (if (compiler-state-peephole *state*)
+        (peephole-optimize code)
+        code)))
 
 (defun emit-runtime-library ()
   "Emit runtime library functions if needed (for size-optimized mul/div/mod)"
@@ -497,10 +502,11 @@
       (push (subseq source start) lines))
     (nreverse lines)))
 
-(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t))
+(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t) (peephole nil))
   "Compile C source code to assembly S-expressions.
    :optimize-size t (default) uses runtime library calls for mul/div/mod to reduce code size.
-   :optimize-size nil inlines mul/div/mod loops for better performance."
+   :optimize-size nil inlines mul/div/mod loops for better performance.
+   :peephole t enables peephole optimization to eliminate redundant instructions."
   (let ((*state* (make-compiler-state))
         (*current-source-line* nil)
         (*current-source-context* nil))
@@ -509,6 +515,7 @@
     (setf (compiler-state-source-annotations *state*) annotate)
     (setf (compiler-state-optimize *state*) optimize)
     (setf (compiler-state-optimize-size *state*) optimize-size)
+    (setf (compiler-state-peephole *state*) peephole)
 
     ;; Lexical analysis
     (setf (compiler-state-tokens *state*) (tokenize source))
@@ -563,14 +570,14 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil) (optimize-size t))
+(defun compile-c-to-asm (source &key (verbose nil) (optimize-size t) (peephole nil))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize-size optimize-size)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize-size optimize-size :peephole peephole)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize-size t))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize-size t) (peephole nil))
   "Compile, assemble, and run a C program, returning the result"
-  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size :peephole peephole))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run the program
@@ -582,11 +589,11 @@
       (when verbose (format t "P0 = ~a~%" ret-val))
       ret-val)))
 
-(defun run-and-verify-registers (source &key (verbose nil) (max-cycles 10000) (optimize-size t))
+(defun run-and-verify-registers (source &key (verbose nil) (max-cycles 10000) (optimize-size t) (peephole nil))
   "Compile, assemble, run, and verify register preservation.
    Returns (values return-value violations-list).
    violations-list is nil if all callee-saved registers were properly preserved."
-  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size :peephole peephole))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run with verification

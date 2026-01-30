@@ -28,5 +28,6 @@
                (:file "c-lexer")
                (:file "c-parser")
                (:file "c-optimizer")
+               (:file "c-peephole")
                (:file "c-codegen")
                (:file "c-compiler-tests")))

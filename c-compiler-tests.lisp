@@ -26,10 +26,10 @@
             (string-downcase (substitute #\- #\Space test-name))
             (if optimize "-opt" ""))))
 
-(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil))
+(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil) (peephole nil))
   "Compile, run, and return the result in P0"
   (handler-case
-      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size)))
+      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size :peephole peephole)))
         ;; Save output if enabled
         (when *save-test-outputs*
           (let ((filename (make-test-output-filename)))
@@ -2071,13 +2071,13 @@ int main() {
 ;;; Phase 12 Tests: Register Preservation Verification
 ;;; ===========================================================================
 
-(defun run-and-check-registers (source &key (max-cycles 10000) (verbose nil) (optimize-size nil))
+(defun run-and-check-registers (source &key (max-cycles 10000) (verbose nil) (optimize-size nil) (peephole nil))
   "Run program with register verification, return (values result violations-p)
    where violations-p is nil if all registers were preserved correctly."
   (handler-case
       (multiple-value-bind (result violations)
           (run-and-verify-registers source :max-cycles max-cycles
-                                    :verbose verbose :optimize-size optimize-size)
+                                    :verbose verbose :optimize-size optimize-size :peephole peephole)
         (values result (null violations)))
     (error (e)
       (format t "Error during verification: ~a~%" e)
@@ -3105,6 +3105,106 @@ int main() {
     (test-struct-anonymous)
     (test-struct-in-function)))
 
+;;; ===========================================================================
+;;; Phase 19 Tests: Peephole Optimizer
+;;; ===========================================================================
+
+(deftest test-peephole-zero-test ()
+  "Test: zero-test pattern elimination"
+  (let ((code '((Rx= 0 R0) (A-=Rx R0) (jz LABEL))))
+    (check "zero-test elimination"
+           (equal '((jz LABEL)) (peephole-optimize code)))))
+
+(deftest test-peephole-roundtrip ()
+  "Test: redundant roundtrip removal"
+  (let ((code '((Rx=A R0) (A=Rx R0))))
+    (check "roundtrip removal"
+           (null (peephole-optimize code)))))
+
+(deftest test-peephole-consecutive-load ()
+  "Test: consecutive loads to same register"
+  (let ((code '((Rx= 5 R0) (Rx= 10 R0))))
+    (check "consecutive load"
+           (equal '((Rx= 10 R0)) (peephole-optimize code)))))
+
+(deftest test-peephole-jump-to-next ()
+  "Test: jump to next instruction elimination"
+  (let ((code '((j LABEL) (label LABEL))))
+    (check "jump to next"
+           (equal '((label LABEL)) (peephole-optimize code)))))
+
+(deftest test-peephole-useless-transfer ()
+  "Test: useless A transfer removal"
+  (let ((code '((A=Rx R0) (Rx=A R0))))
+    (check "useless transfer"
+           (equal '((A=Rx R0)) (peephole-optimize code)))))
+
+(deftest test-peephole-preserves-correctness ()
+  "Test: peephole optimization preserves program correctness"
+  (combine-results
+    ;; Basic arithmetic
+    (check "return literal"
+           (= 42 (run-and-get-result "int main() { return 42; }" :peephole t)))
+    (check "addition"
+           (= 15 (run-and-get-result "int main() { return 10 + 5; }" :peephole t)))
+    (check "subtraction"
+           (= 5 (run-and-get-result "int main() { return 10 - 5; }" :peephole t)))
+    (check "multiplication"
+           (= 50 (run-and-get-result "int main() { return 10 * 5; }" :peephole t)))
+    ;; Variables
+    (check "variables"
+           (= 30 (run-and-get-result "int main() { int x = 10; int y = 20; return x + y; }" :peephole t)))
+    ;; Conditionals
+    (check "if-else"
+           (= 1 (run-and-get-result "int main() { int x = 5; if (x > 0) return 1; else return 0; }" :peephole t)))
+    ;; Loops
+    (check "while loop"
+           (= 10 (run-and-get-result "
+int main() {
+    int sum = 0;
+    int i = 0;
+    while (i < 5) {
+        sum = sum + 2;
+        i = i + 1;
+    }
+    return sum;
+}" :peephole t)))
+    ;; Function calls
+    (check "function call"
+           (= 25 (run-and-get-result "
+int square(int x) { return x * x; }
+int main() { return square(5); }
+" :peephole t :max-cycles 20000))
+    ;; Pointers
+    (check "pointers"
+           (= 100 (run-and-get-result "
+int main() {
+    int x = 50;
+    int *p = &x;
+    *p = 100;
+    return x;
+}" :peephole t))))))
+
+(deftest test-peephole-code-reduction ()
+  "Test: peephole optimizer reduces code size"
+  (let* ((source "int main() { int x = 5; if (x > 0) return 1; return 0; }")
+         (code-without (compile-c source :annotate nil :peephole nil))
+         (code-with (compile-c source :annotate nil :peephole t)))
+    ;; Code with peephole should be same size or smaller
+    (check "code reduction"
+           (<= (length code-with) (length code-without)))))
+
+(deftest test-phase19-peephole ()
+  "Run Phase 19 peephole optimizer tests"
+  (combine-results
+    (test-peephole-zero-test)
+    (test-peephole-roundtrip)
+    (test-peephole-consecutive-load)
+    (test-peephole-jump-to-next)
+    (test-peephole-useless-transfer)
+    (test-peephole-preserves-correctness)
+    (test-peephole-code-reduction)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -3125,7 +3225,8 @@ int main() {
     (test-phase15-enum)
     (test-phase16-c99-features)
     (test-phase17-struct)
-    (test-phase18-strings)))
+    (test-phase18-strings)
+    (test-phase19-peephole)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
