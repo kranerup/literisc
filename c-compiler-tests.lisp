@@ -26,7 +26,7 @@
             (string-downcase (substitute #\- #\Space test-name))
             (if optimize "-opt" ""))))
 
-(defun run-and-get-result (source &key (verbose t) (max-cycles 10000) (optimize-size nil))
+(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil))
   "Compile, run, and return the result in P0"
   (handler-case
       (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size)))

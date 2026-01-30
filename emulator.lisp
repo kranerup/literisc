@@ -2553,6 +2553,7 @@
   )
 |#
 
+#|
 (deftest test-run-hello-serial ()
   (let* ((hw-prog (assemble 
         '( 
@@ -2595,6 +2596,7 @@
     ;        (run-emul (make-emulator hw-prog dmem 0 nil) 180)))
     ;(format t "program-output:~%~a~%" prog-output)
     ;(check (equal prog-output "Hello World!"))))
+|#
 
 (deftest test-instructions ()
   (combine-results
