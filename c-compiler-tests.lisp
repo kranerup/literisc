@@ -2827,6 +2827,139 @@ return -1;
     (test-c99-for-init-declaration)
     (test-c99-string-literals)))
 
+;;; ===========================================================================
+;;; Phase 17 Tests: Struct Types
+;;; ===========================================================================
+;;; Tests for C struct support - structured data types with member access
+
+(deftest test-struct-basic ()
+  "Test: basic struct member access"
+  (combine-results
+    (check "simple struct member access"
+           (= 10 (run-and-get-result "
+struct Point { int x; int y; };
+int main() { struct Point p; p.x = 10; return p.x; }")))
+    (check "multiple members"
+           (= 30 (run-and-get-result "
+struct Point { int x; int y; };
+int main() { struct Point p; p.x = 10; p.y = 20; return p.x + p.y; }")))
+    (check "member computation"
+           (= 25 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point p;
+    p.x = 3;
+    p.y = 4;
+    return p.x * p.x + p.y * p.y;
+}" :max-cycles 50000)))))
+
+(deftest test-struct-pointer ()
+  "Test: struct pointer access with ->"
+  (combine-results
+    (check "arrow operator basic"
+           (= 42 (run-and-get-result "
+struct Data { int value; };
+int main() { struct Data d; struct Data *p = &d; p->value = 42; return d.value; }")))
+    (check "arrow operator read"
+           (= 100 (run-and-get-result "
+struct Data { int value; };
+int main() { struct Data d; d.value = 100; struct Data *p = &d; return p->value; }")))
+    (check "arrow with multiple members"
+           (= 15 (run-and-get-result "
+struct Pair { int a; int b; };
+int main() {
+    struct Pair p;
+    struct Pair *ptr = &p;
+    ptr->a = 5;
+    ptr->b = 10;
+    return ptr->a + ptr->b;
+}")))))
+
+(deftest test-struct-sizeof ()
+  "Test: sizeof struct"
+  (combine-results
+    (check "sizeof two-int struct"
+           (= 8 (run-and-get-result "
+struct Point { int x; int y; };
+int main() { return sizeof(struct Point); }")))
+    (check "sizeof three-int struct"
+           (= 12 (run-and-get-result "
+struct Triple { int a; int b; int c; };
+int main() { return sizeof(struct Triple); }")))
+    (check "sizeof struct variable"
+           (= 8 (run-and-get-result "
+struct Point { int x; int y; };
+int main() { struct Point p; return sizeof(p); }")))))
+
+(deftest test-struct-mixed-types ()
+  "Test: struct with mixed type members"
+  (combine-results
+    (check "char and int members"
+           (= 261 (run-and-get-result "
+struct Mixed { char c; int i; };
+int main() { struct Mixed m; m.c = 5; m.i = 256; return m.c + m.i; }")))
+    (check "multiple char members"
+           (= 6 (run-and-get-result "
+struct Chars { char a; char b; char c; };
+int main() { struct Chars s; s.a = 1; s.b = 2; s.c = 3; return s.a + s.b + s.c; }")))
+    (check "int then char"
+           (= 110 (run-and-get-result "
+struct IC { int i; char c; };
+int main() { struct IC s; s.i = 100; s.c = 10; return s.i + s.c; }")))))
+
+(deftest test-struct-anonymous ()
+  "Test: anonymous struct"
+  (combine-results
+    (check "anonymous struct basic"
+           (= 15 (run-and-get-result "
+int main() { struct { int a; int b; } s; s.a = 5; s.b = 10; return s.a + s.b; }")))
+    (check "anonymous struct multiple vars"
+           (= 30 (run-and-get-result "
+int main() {
+    struct { int x; int y; } p1, p2;
+    p1.x = 10;
+    p1.y = 20;
+    return p1.x + p1.y;
+}")))))
+
+(deftest test-struct-in-function ()
+  "Test: struct usage with function calls"
+  (combine-results
+    (check "struct survives function call"
+           (= 110 (run-and-get-result "
+struct Data { int value; };
+int helper(int x) { return x + 10; }
+int main() {
+    struct Data d;
+    d.value = 100;
+    int temp = helper(5);
+    return d.value + temp - 5;
+}" :max-cycles 20000)))
+    (check "struct pointer to function"
+           (= 50 (run-and-get-result "
+struct Point { int x; int y; };
+int sum_coords(struct Point *p) { return p->x + p->y; }
+int main() {
+    struct Point pt;
+    pt.x = 20;
+    pt.y = 30;
+    return sum_coords(&pt);
+}" :max-cycles 20000)))))
+
+;; NOTE: Arrays of structs require additional work on element type handling
+;; and are deferred to a future enhancement. Basic struct functionality
+;; (member access, pointers, sizeof, mixed types, anonymous structs) works.
+
+(deftest test-phase17-struct ()
+  "Run Phase 17 struct tests"
+  (combine-results
+    (test-struct-basic)
+    (test-struct-pointer)
+    (test-struct-sizeof)
+    (test-struct-mixed-types)
+    (test-struct-anonymous)
+    (test-struct-in-function)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -2845,7 +2978,8 @@ return -1;
     (test-phase13-scope)
     (test-phase14-conditional)
     (test-phase15-enum)
-    (test-phase16-c99-features)))
+    (test-phase16-c99-features)
+    (test-phase17-struct)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

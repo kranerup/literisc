@@ -645,6 +645,7 @@
       (sizeof (generate-sizeof node))
       (post-op (generate-post-op node))
       (inline-expr (generate-inline-expr node))
+      (member (generate-member node))
       (otherwise
        (compiler-warning "Unknown expression type: ~a" (ast-node-type node))))))
 
@@ -804,6 +805,18 @@
        (let ((sym (lookup-symbol (ast-node-value node))))
          (when sym (sym-entry-type sym))))
       (literal nil)  ; integer literal, no pointer type
+      (subscript
+       ;; Array subscript - return element type
+       (get-subscript-element-type node))
+      (member
+       (let* ((member-name (ast-node-value node))
+              (base-expr (first (ast-node-children node)))
+              (access-type (ast-node-data node))
+              (base-type (get-expression-type base-expr))
+              (struct-type (if (eq access-type :pointer)
+                               (get-dereferenced-type base-type) base-type))
+              (member (lookup-struct-member struct-type member-name)))
+         (when member (struct-member-type member))))
       (otherwise (ast-node-result-type node)))))
 
 (defun pointer-element-size (type)
@@ -1268,6 +1281,20 @@
            (emit-store-sized elem-type value-reg)
            (emit `(M[A]=Rx ,value-reg)))  ; store
        (free-temp-reg value-reg)))
+    (member
+     ;; struct.member = value or ptr->member = value
+     (let ((value-reg (alloc-temp-reg)))
+       (emit `(Rx=A ,value-reg))
+       (generate-member-address node)
+       (let* ((member-name (ast-node-value node))
+              (base-expr (first (ast-node-children node)))
+              (access-type (ast-node-data node))
+              (base-type (get-expression-type base-expr))
+              (struct-type (if (eq access-type :pointer)
+                               (get-dereferenced-type base-type) base-type))
+              (member (lookup-struct-member struct-type member-name)))
+         (emit-store-sized (struct-member-type member) value-reg))
+       (free-temp-reg value-reg)))
     (otherwise
      (compiler-error "Cannot assign to ~a" (ast-node-type node)))))
 
@@ -1299,7 +1326,8 @@
                (make-type-desc :base (type-desc-base arr-type)
                                :pointer-level (max 0 (1- (type-desc-pointer-level arr-type)))
                                :size (type-desc-size arr-type)
-                               :unsigned-p (type-desc-unsigned-p arr-type)))))))
+                               :unsigned-p (type-desc-unsigned-p arr-type)
+                               :struct-tag (type-desc-struct-tag arr-type)))))))
       (otherwise nil))))
 
 (defun generate-assignment (node)
@@ -1445,6 +1473,83 @@
     ;; Add to base
     (emit `(A+=Rx ,base-reg))
     (free-temp-reg base-reg)))
+
+;;; ===========================================================================
+;;; Struct Member Access
+;;; ===========================================================================
+
+(defun get-dereferenced-type (type)
+  "Get the type that a pointer points to"
+  (when (and type (> (type-desc-pointer-level type) 0))
+    (make-type-desc :base (type-desc-base type)
+                    :pointer-level (1- (type-desc-pointer-level type))
+                    :size (type-desc-size type)
+                    :unsigned-p (type-desc-unsigned-p type)
+                    :struct-tag (type-desc-struct-tag type))))
+
+(defun generate-struct-address (node)
+  "Generate code to get address of a struct variable"
+  (case (ast-node-type node)
+    (var-ref
+     (let* ((name (ast-node-value node))
+            (sym (lookup-symbol name)))
+       (unless sym (compiler-error "Undefined variable: ~a" name))
+       (case (sym-entry-storage sym)
+         (:local
+          (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+                (temp (alloc-temp-reg)))
+            (emit `(A=Rx SP))
+            (emit `(Rx= ,offset ,temp))
+            (emit `(A+=Rx ,temp))
+            (free-temp-reg temp)))
+         (:global
+          (let ((label (intern (string-upcase name) :c-compiler)))
+            (emit `(Rx= ,label R0))
+            (emit `(A=Rx R0))))
+         (otherwise
+          (compiler-error "Cannot get address of struct in ~a storage"
+                          (sym-entry-storage sym))))))
+    (subscript (generate-subscript-address node))
+    (member (generate-member-address node))
+    (otherwise (compiler-error "Cannot get struct address of ~a" (ast-node-type node)))))
+
+(defun generate-member-address (node)
+  "Generate code to compute address of struct member"
+  (let* ((member-name (ast-node-value node))
+         (base-expr (first (ast-node-children node)))
+         (access-type (ast-node-data node))
+         (base-type (get-expression-type base-expr))
+         (struct-type (if (eq access-type :pointer)
+                          (get-dereferenced-type base-type) base-type))
+         (member (lookup-struct-member struct-type member-name)))
+    (unless member (compiler-error "Unknown struct member: ~a" member-name))
+    (if (eq access-type :pointer)
+        (generate-expression base-expr)
+        (generate-struct-address base-expr))
+    (let ((offset (struct-member-offset member)))
+      (when (> offset 0)
+        (let ((temp (alloc-temp-reg)))
+          (emit `(Rx= ,offset ,temp))
+          (emit `(A+=Rx ,temp))
+          (free-temp-reg temp))))))
+
+(defun generate-member (node)
+  "Generate code for struct member access"
+  (let* ((member-name (ast-node-value node))
+         (base-expr (first (ast-node-children node)))
+         (access-type (ast-node-data node))
+         (base-type (get-expression-type base-expr))
+         (struct-type (if (eq access-type :pointer)
+                          (get-dereferenced-type base-type) base-type))
+         (member (lookup-struct-member struct-type member-name)))
+    (unless member (compiler-error "Unknown struct member: ~a" member-name))
+    (generate-member-address node)
+    (let ((member-type (struct-member-type member))
+          (temp (alloc-temp-reg)))
+      (emit-load-sized member-type temp)
+      (emit `(A=Rx ,temp))
+      (free-temp-reg temp)
+      (emit-promote-to-int member-type))))
 
 (defun generate-ternary (node)
   "Generate code for ternary conditional"

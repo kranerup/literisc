@@ -49,12 +49,13 @@
 
 ;;; Type descriptor
 (defstruct type-desc
-  base           ; int, char, void
+  base           ; int, char, void, struct
   pointer-level  ; 0 = not a pointer, 1 = *, 2 = **, etc.
   array-size     ; nil for non-arrays, integer for arrays
   size           ; 1, 2, or 4 bytes (nil defaults based on base type)
   unsigned-p     ; t for unsigned, nil for signed
-  enum-tag)      ; nil, :anonymous, or tag-name string for enum types
+  enum-tag       ; nil, :anonymous, or tag-name string for enum types
+  struct-tag)    ; nil, :anonymous, or tag-name string for struct types
 
 ;;; Symbol table entry
 (defstruct sym-entry
@@ -64,6 +65,19 @@
   offset    ; stack offset for locals/params, or address for globals
   scope     ; scope level (0 = global)
   function) ; function name (nil for globals)
+
+;;; Struct member
+(defstruct struct-member
+  name          ; string: member name
+  type          ; type-desc: member type
+  offset)       ; integer: byte offset within struct
+
+;;; Struct definition
+(defstruct struct-def
+  tag           ; string or nil for anonymous
+  members       ; list of struct-member
+  size          ; total size in bytes (with padding)
+  alignment)    ; required alignment (max of member alignments)
 
 ;;; Compiler state
 (defstruct compiler-state
@@ -89,7 +103,8 @@
   (need-div-runtime nil) ; set to t when __div runtime is needed
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
-  (enum-types (make-hash-table :test 'equal))) ; tag-name -> list of (name . value) constants
+  (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
+  (struct-types (make-hash-table :test 'equal))) ; tag-name -> struct-def
 
 ;;; Global compiler state
 (defvar *state* nil)
@@ -411,11 +426,47 @@
                   :size 4 :unsigned-p nil
                   :enum-tag (or tag-name :anonymous)))
 
+(defun align-to (offset alignment)
+  "Align offset up to next multiple of alignment"
+  (let ((rem (mod offset alignment)))
+    (if (zerop rem) offset (+ offset (- alignment rem)))))
+
+(defun type-alignment (type)
+  "Return alignment requirement for a type (1, 2, or 4)"
+  (cond
+    ((> (type-desc-pointer-level type) 0) 4)
+    ((eq (type-desc-base type) 'struct)
+     (let ((def (gethash (type-desc-struct-tag type)
+                         (compiler-state-struct-types *state*))))
+       (if def (struct-def-alignment def) 4)))
+    (t (min 4 (type-size type)))))
+
+(defun make-struct-type (tag-name)
+  "Create a type descriptor for a struct type"
+  (let ((def (when tag-name
+               (gethash tag-name (compiler-state-struct-types *state*)))))
+    (make-type-desc :base 'struct :pointer-level 0 :array-size nil
+                    :size (if def (struct-def-size def) 0)
+                    :struct-tag (or tag-name :anonymous))))
+
+(defun lookup-struct-member (struct-type member-name)
+  "Look up a member in a struct type, returns struct-member or nil"
+  (let* ((tag (type-desc-struct-tag struct-type))
+         (def (gethash tag (compiler-state-struct-types *state*))))
+    (when def
+      (find member-name (struct-def-members def)
+            :key #'struct-member-name :test #'string=))))
+
 (defun type-size (type)
   "Return the size in bytes of a type"
   (cond
     ;; Pointers are always 4 bytes
     ((> (type-desc-pointer-level type) 0) 4)
+    ;; Struct types - look up size from definition
+    ((eq (type-desc-base type) 'struct)
+     (let ((def (gethash (type-desc-struct-tag type)
+                         (compiler-state-struct-types *state*))))
+       (if def (struct-def-size def) 0)))
     ;; Use explicit size if set
     ((type-desc-size type) (type-desc-size type))
     ;; Fall back to base type defaults

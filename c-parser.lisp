@@ -258,15 +258,75 @@
     (make-enum-type tag-name)))
 
 ;;; ===========================================================================
+;;; Struct Parsing
+;;; ===========================================================================
+
+(defun parse-struct-member-declaration (current-offset)
+  "Parse struct member declaration. Returns (member-list new-offset)"
+  (let ((member-type (parse-type))
+        (members nil)
+        (offset current-offset))
+    (loop
+      (let* ((name (token-value (expect-token 'identifier)))
+             (aligned-offset (align-to offset (type-alignment member-type)))
+             (member (make-struct-member :name name
+                                         :type member-type
+                                         :offset aligned-offset)))
+        (push member members)
+        (setf offset (+ aligned-offset (type-size member-type))))
+      (unless (match-token 'punctuation ",")
+        (return)))
+    (expect-token 'punctuation ";")
+    (values (nreverse members) offset)))
+
+(defun parse-struct-specifier ()
+  "Parse: struct [tag] [{ member-list }]"
+  (expect-token 'keyword "struct")
+  (let ((tag-name nil) (has-body nil))
+    ;; Optional tag name
+    (when (check-token 'identifier)
+      (setf tag-name (token-value (advance-token))))
+    ;; Optional body
+    (when (match-token 'punctuation "{")
+      (setf has-body t)
+      (let ((members nil) (current-offset 0) (max-align 1))
+        (loop until (check-token 'punctuation "}")
+              do (multiple-value-bind (member-list next-offset)
+                     (parse-struct-member-declaration current-offset)
+                   (dolist (m member-list)
+                     (setf max-align (max max-align
+                                          (type-alignment (struct-member-type m)))))
+                   (setf members (append members member-list))
+                   (setf current-offset next-offset)))
+        (expect-token 'punctuation "}")
+        (let ((def (make-struct-def :tag tag-name
+                                    :members members
+                                    :size (align-to current-offset max-align)
+                                    :alignment max-align)))
+          (when tag-name
+            (setf (gethash tag-name (compiler-state-struct-types *state*)) def))
+          ;; For anonymous structs, generate a unique tag
+          (unless tag-name
+            (let ((anon-tag (format nil "__anon_struct_~a"
+                                    (incf (compiler-state-label-counter *state*)))))
+              (setf (gethash anon-tag (compiler-state-struct-types *state*)) def)
+              (setf tag-name anon-tag))))))
+    (unless (or tag-name has-body)
+      (compiler-error "Expected struct tag name or body"))
+    (make-struct-type tag-name)))
+
+;;; ===========================================================================
 ;;; Type Parsing
 ;;; ===========================================================================
 
 (defun parse-type-specifier ()
   "Parse a type specifier with modifiers (signed/unsigned, short/long)"
-  ;; Handle enum first
+  ;; Handle enum and struct first
   (cond
     ((check-token 'keyword "enum")
      (parse-enum-specifier))
+    ((check-token 'keyword "struct")
+     (parse-struct-specifier))
     ;; Handle C99 fixed-width types
     ((match-token 'keyword "int8_t")
      (make-int8-type nil))
@@ -334,7 +394,8 @@
                     :pointer-level ptr-level
                     :array-size nil
                     :size (type-desc-size base-type)
-                    :unsigned-p (type-desc-unsigned-p base-type))))
+                    :unsigned-p (type-desc-unsigned-p base-type)
+                    :struct-tag (type-desc-struct-tag base-type))))
 
 ;;; ===========================================================================
 ;;; Expression Parsing (Precedence Climbing)
@@ -442,7 +503,7 @@
                    (member (token-value next)
                            '("int" "char" "void" "unsigned" "signed" "short" "long"
                              "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                             "enum")
+                             "enum" "struct")
                            :test #'string=))))
        (advance-token) ; skip (
        (let ((cast-type (parse-type)))
@@ -486,13 +547,19 @@
                                  :value op
                                  :children (list expr)))))
 
-        ;; Member access (. and ->)
-        ((or (match-token 'operator ".")
-             (match-token 'operator "->"))
+        ;; Member access (.)
+        ((check-token 'punctuation ".")
+         (advance-token)
          (let ((member-name (token-value (expect-token 'identifier))))
-           (setf expr (make-node 'member
-                                 :value member-name
-                                 :children (list expr)))))
+           (setf expr (make-node 'member :value member-name
+                                 :children (list expr) :data :direct))))
+
+        ;; Pointer member access (->)
+        ((check-token 'operator "->")
+         (advance-token)
+         (let ((member-name (token-value (expect-token 'identifier))))
+           (setf expr (make-node 'member :value member-name
+                                 :children (list expr) :data :pointer))))
 
         (t (return expr))))))
 
@@ -589,7 +656,7 @@
        (member (token-value tok)
                '("int" "char" "void" "unsigned" "signed" "short" "long"
                  "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                 "enum")
+                 "enum" "struct")
                :test #'string=)))
 
 (defun parse-compound-statement ()
@@ -700,7 +767,8 @@
                                          :pointer-level (type-desc-pointer-level var-type)
                                          :array-size array-size
                                          :size (type-desc-size var-type)
-                                         :unsigned-p (type-desc-unsigned-p var-type))))
+                                         :unsigned-p (type-desc-unsigned-p var-type)
+                                         :struct-tag (type-desc-struct-tag var-type))))
 
         ;; Check for initializer
         (let ((init nil))
@@ -712,6 +780,7 @@
           ;; and the variable doesn't have its address taken
           (let ((local-reg-count (compiler-state-local-reg-count *state*)))
             (if (and (not array-size)               ; Not an array
+                     (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
                      (< local-reg-count 4)          ; Have free local regs (R6-R9)
                      (not (is-address-taken name))) ; Address not taken
                 ;; Register allocation
