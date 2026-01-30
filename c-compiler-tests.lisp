@@ -2030,6 +2030,19 @@ int main() {
 }"))
 ))
 
+(deftest test-string-return-unsigned ()
+  "Test: returning string literal from function"
+  (check
+    (= (char-code #\W)
+       (run-and-get-result "
+uint8_t get_string() {
+  return \"World\";
+}
+uint8_t main() {
+  uint8_t *s = get_string();
+  return *s;
+}"))
+))
 (deftest test-string-passing ()
   "Test: passing string literal to function"
   (check
@@ -2051,6 +2064,7 @@ int main() {
    (test-string-literal-escapes)
    (test-string-literal-multiple)
    (test-string-return)
+   (test-string-return-unsigned)
    (test-string-passing)))
 
 ;;; ===========================================================================
