@@ -576,9 +576,11 @@
     ;; Run the program
     (lr-emulator:run-emul emul max-cycles verbose)
     ;; Return value is in P0 (R10)
-    (aref (lr-emulator::processor-state-r
-           (lr-emulator:emulated-system-processor emul))
-          10)))
+    (let ((ret-val (aref (lr-emulator::processor-state-r
+                           (lr-emulator:emulated-system-processor emul))
+                         10)))
+      (when verbose (format t "P0 = ~a~%" ret-val))
+      ret-val)))
 
 (defun run-and-verify-registers (source &key (verbose nil) (max-cycles 10000) (optimize-size t))
   "Compile, assemble, run, and verify register preservation.
