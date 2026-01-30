@@ -205,23 +205,10 @@
 ;;; Clear rules before redefining
 (setf *peephole-rules* nil)
 
-;;; Rule 1: Zero-test elimination
-;;; (Rx= 0 ?r) (A-=Rx ?r) (jz ?label) -> (jz ?label)
-;;; The compare with zero is redundant - A already has the value to test
-(push (make-peephole-rule
-       :name "zero-test"
-       :pattern '((Rx= 0 ?r) (A-=Rx ?r) (jz ?label))
-       :replacement (lambda (bindings)
-                      (list (list 'jz (getf bindings :label)))))
-      *peephole-rules*)
-
-;;; Rule 1b: Zero-test elimination for jnz
-(push (make-peephole-rule
-       :name "zero-test-nz"
-       :pattern '((Rx= 0 ?r) (A-=Rx ?r) (jnz ?label))
-       :replacement (lambda (bindings)
-                      (list (list 'jnz (getf bindings :label)))))
-      *peephole-rules*)
+;;; NOTE: Zero-test elimination rule was removed because it's incorrect.
+;;; The pattern (Rx= 0 ?r) (A-=Rx ?r) (jz ?label) is NOT redundant.
+;;; The A-=Rx instruction is required to SET THE FLAGS based on A's value.
+;;; JZ checks the zero flag, not the accumulator directly.
 
 ;;; Rule 2: Redundant register round-trip
 ;;; (Rx=A ?r) (A=Rx ?r) -> (remove both)

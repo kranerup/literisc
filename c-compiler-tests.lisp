@@ -3109,12 +3109,6 @@ int main() {
 ;;; Phase 19 Tests: Peephole Optimizer
 ;;; ===========================================================================
 
-(deftest test-peephole-zero-test ()
-  "Test: zero-test pattern elimination"
-  (let ((code '((Rx= 0 R0) (A-=Rx R0) (jz LABEL))))
-    (check "zero-test elimination"
-           (equal '((jz LABEL)) (peephole-optimize code)))))
-
 (deftest test-peephole-roundtrip ()
   "Test: redundant roundtrip removal"
   (let ((code '((Rx=A R0) (A=Rx R0))))
@@ -3197,7 +3191,6 @@ int main() {
 (deftest test-phase19-peephole ()
   "Run Phase 19 peephole optimizer tests"
   (combine-results
-    (test-peephole-zero-test)
     (test-peephole-roundtrip)
     (test-peephole-consecutive-load)
     (test-peephole-jump-to-next)
