@@ -1971,14 +1971,14 @@ int main() {
     (= (char-code #\Newline)
        (run-and-get-result "
 int main() {
-  char *s = \"\n\";
+  char *s = \"\\n\";
   return *s;
 }"))
     ;; Test tab
     (= (char-code #\Tab)
        (run-and-get-result "
 int main() {
-  char *s = \"\t\";
+  char *s = \"\\t\";
   return *s;
 }"))
     ;; Test quote
@@ -1999,7 +1999,7 @@ int main() {
     (= (char-code #\b)
        (run-and-get-result "
 int main() {
-  char *s = \"a\nb\tc\";
+  char *s = \"a\\nb\\tc\";
   return s[2];
 }"))
 ))

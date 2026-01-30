@@ -572,7 +572,7 @@
   "Compile, assemble, and run a C program, returning the result"
   (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
-         (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug verbose)))
+         (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run the program
     (lr-emulator:run-emul emul max-cycles verbose)
     ;; Return value is in P0 (R10)
@@ -588,7 +588,7 @@
    violations-list is nil if all callee-saved registers were properly preserved."
   (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
-         (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug verbose)))
+         (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run with verification
     (multiple-value-bind (reason verifier)
         (reg-verifier:run-emul-with-verification emul max-cycles verbose)
