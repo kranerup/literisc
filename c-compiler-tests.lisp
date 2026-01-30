@@ -26,7 +26,7 @@
             (string-downcase (substitute #\- #\Space test-name))
             (if optimize "-opt" ""))))
 
-(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil))
+(defun run-and-get-result (source &key (verbose t) (max-cycles 10000) (optimize-size nil))
   "Compile, run, and return the result in P0"
   (handler-case
       (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size)))
@@ -1923,6 +1923,137 @@ int main() {
     (test-inline-void-function)))
 
 ;;; ===========================================================================
+;;; Phase 17 Tests: String Literals
+;;; ===========================================================================
+
+(deftest test-string-literal-basic ()
+  "Test: basic string literals"
+  (check
+    ;; Return first character of a string
+    (= (char-code #\H)
+       (run-and-get-result "
+int main() {
+  char *s = \"Hello\";
+  return *s;
+}"))
+    ;; Return third character of a string
+    (= (char-code #\l)
+       (run-and-get-result "
+int main() {
+  char *s = \"Hello\";
+  return s[2];
+}"))
+    ;; Return the null terminator
+    (= 0
+       (run-and-get-result "
+int main() {
+  char *s = \"Hello\";
+  return s[5];
+}"))
+))
+
+(deftest test-string-literal-empty ()
+  "Test: empty string"
+  (check
+    ;; Return the null terminator of an empty string
+    (= 0
+       (run-and-get-result "
+int main() {
+  char *s = \"\";
+  return *s;
+}"))
+))
+
+(deftest test-string-literal-escapes ()
+  "Test: string literals with escape sequences"
+  (check
+    ;; Test newline
+    (= (char-code #\Newline)
+       (run-and-get-result "
+int main() {
+  char *s = \"\n\";
+  return *s;
+}"))
+    ;; Test tab
+    (= (char-code #\Tab)
+       (run-and-get-result "
+int main() {
+  char *s = \"\t\";
+  return *s;
+}"))
+    ;; Test quote
+    (= (char-code #\")
+       (run-and-get-result "
+int main() {
+  char *s = \"\\\"\";
+  return *s;
+}"))
+    ;; Test backslash
+    (= (char-code #\\)
+       (run-and-get-result "
+int main() {
+  char *s = \"\\\\\";
+  return *s;
+}"))
+    ;; Test mixed escapes
+    (= (char-code #\b)
+       (run-and-get-result "
+int main() {
+  char *s = \"a\nb\tc\";
+  return s[2];
+}"))
+))
+
+(deftest test-string-literal-multiple ()
+  "Test: multiple string literals"
+  (check
+    (= (char-code #\W)
+       (run-and-get-result "
+char main() {
+  char *s1 = \"Hello\";
+  char *s2 = \"World\";
+  return *s2;
+}"))
+))
+
+(deftest test-string-return ()
+  "Test: returning string literal from function"
+  (check
+    (= (char-code #\W)
+       (run-and-get-result "
+char* get_string() {
+  return \"World\";
+}
+int main() {
+  char *s = get_string();
+  return *s;
+}"))
+))
+
+(deftest test-string-passing ()
+  "Test: passing string literal to function"
+  (check
+    (= (char-code #\H)
+       (run-and-get-result "
+int puts(char *s) {
+  return *s;
+}
+int main() {
+  return puts(\"Hello\");
+}"))
+))
+
+(deftest test-phase18-strings ()
+  "Run Phase 18 string tests"
+  (combine-results
+   (test-string-literal-basic)
+   (test-string-literal-empty)
+   (test-string-literal-escapes)
+   (test-string-literal-multiple)
+   (test-string-return)
+   (test-string-passing)))
+
+;;; ===========================================================================
 ;;; Phase 12 Tests: Register Preservation Verification
 ;;; ===========================================================================
 
@@ -2979,7 +3110,8 @@ int main() {
     (test-phase14-conditional)
     (test-phase15-enum)
     (test-phase16-c99-features)
-    (test-phase17-struct)))
+    (test-phase17-struct)
+    (test-phase18-strings)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
