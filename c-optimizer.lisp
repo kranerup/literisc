@@ -624,9 +624,48 @@
                     :source-loc (ast-node-source-loc node)
                     :data (ast-node-data node)))))
 
+(defun extract-simple-inline-expr (body result-var)
+  "Check if body is a simple { result = expr; goto exit; } pattern.
+   If so, return the expression. Otherwise return nil.
+   Handles the case where the function body is a block containing
+   the transformed return block."
+  (when (and (ast-node-p body) (eq (ast-node-type body) 'block))
+    ;; The function body is a block. Check if it contains exactly one statement
+    ;; which is the transformed return (another block with assign + jump)
+    (let ((children (ast-node-children body)))
+      (cond
+        ;; Case 1: block with one child that is the transformed return block
+        ((and (= (length children) 1)
+              (ast-node-p (first children))
+              (eq (ast-node-type (first children)) 'block))
+         (extract-simple-inline-expr (first children) result-var))
+        ;; Case 2: block with expr-stmt + inline-return-jump directly
+        ((= (length children) 2)
+         (let ((first-stmt (first children))
+               (second-stmt (second children)))
+           (when (and (ast-node-p first-stmt)
+                      (eq (ast-node-type first-stmt) 'expr-stmt)
+                      (ast-node-p second-stmt)
+                      (eq (ast-node-type second-stmt) 'inline-return-jump))
+             (let ((assign (first (ast-node-children first-stmt))))
+               (when (and (ast-node-p assign)
+                          (eq (ast-node-type assign) 'assign)
+                          (string= (ast-node-value assign) "="))
+                 (let ((lhs (first (ast-node-children assign)))
+                       (rhs (second (ast-node-children assign))))
+                   ;; LHS should be var-ref to result-var
+                   (when (and (ast-node-p lhs)
+                              (eq (ast-node-type lhs) 'var-ref)
+                              (string= (ast-node-value lhs) result-var))
+                     ;; Return the RHS expression
+                     rhs)))))))
+        (t nil)))))
+
 (defun inline-call (call-node func-node depth)
   "Inline a function call, returning an inline-expr node.
-   Constant arguments are propagated directly into the body."
+   Constant arguments are propagated directly into the body.
+   Simple inlines (just returning an expression) are optimized to
+   avoid stack allocation."
   (let* ((suffix (gen-inline-suffix))
          (result-var (format nil "__inline_result~a" suffix))
          (exit-label (intern (format nil "INLINE_RET~a" suffix) :c-compiler))
@@ -636,7 +675,8 @@
          (param-nodes (ast-node-children params-node))
          (renames (make-hash-table :test 'equal))
          (const-bindings (make-hash-table :test 'equal))
-         (init-stmts nil))
+         (init-stmts nil)
+         (has-param-temps nil))  ; Track if we need parameter temp vars
 
     ;; Process parameters - constant args get propagated, others get temp vars
     (loop for param in param-nodes
@@ -649,19 +689,13 @@
                    (setf (gethash param-name const-bindings) (get-constant-value arg))
                    ;; Non-constant argument - create temp variable
                    (let ((temp-name (format nil "__inline_p~a~a" i suffix)))
+                     (setf has-param-temps t)
                      (setf (gethash param-name renames) temp-name)
                      (push (make-ast-node :type 'var-decl
                                           :value temp-name
                                           :children (list (inline-functions-in-node arg (1+ depth)))
                                           :result-type (ast-node-result-type param))
                            init-stmts)))))
-
-    ;; Create result variable declaration
-    (let ((result-decl (make-ast-node :type 'var-decl
-                                      :value result-var
-                                      :result-type (or (ast-node-result-type func-node)
-                                                       (make-int-type)))))
-      (push result-decl init-stmts))
 
     ;; Process the body:
     ;; 1. Substitute constants for constant parameters
@@ -675,6 +709,21 @@
            (inlined-body (inline-functions-in-node transformed-body (1+ depth)))
            ;; Run constant folding on the inlined body
            (folded-body (fold-constants inlined-body)))
+
+      ;; Try to simplify trivial inline expressions
+      ;; If no param temps needed and body is just { result = expr; goto exit; }
+      ;; we can return just the expression without stack allocation
+      (when (not has-param-temps)
+        (let ((simple-expr (extract-simple-inline-expr folded-body result-var)))
+          (when simple-expr
+            (return-from inline-call simple-expr))))
+
+      ;; Create result variable declaration (only for non-simple cases)
+      (let ((result-decl (make-ast-node :type 'var-decl
+                                        :value result-var
+                                        :result-type (or (ast-node-result-type func-node)
+                                                         (make-int-type)))))
+        (push result-decl init-stmts))
 
       ;; Create the inline expression node
       (make-ast-node :type 'inline-expr
