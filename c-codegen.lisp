@@ -128,47 +128,11 @@
 
 (defun emit-sign-extend-byte ()
   "Sign extend byte in A (bit 7 → bits 8-31)"
-  ;; Check if bit 7 is set: if (A & 0x80) A |= 0xFFFFFF00
-  (let ((done-label (gen-label "SEXTBDONE"))
-        (save-reg (alloc-temp-reg))
-        (mask-reg (alloc-temp-reg)))
-    (emit `(Rx=A ,save-reg))       ; save original value
-    (emit `(Rx= #x80 ,mask-reg))
-    (emit `(A&=Rx ,mask-reg))      ; A = A & 0x80
-    (emit `(Rx= 0 ,mask-reg))
-    (emit `(A-=Rx ,mask-reg))      ; test if zero
-    (emit `(jz ,done-label))       ; if bit 7 not set, done
-    ;; Sign bit is set, extend with 1s
-    (emit `(A=Rx ,save-reg))       ; restore original
-    (emit `(Rx= #xFFFFFF00 ,mask-reg))
-    (emit `(A\|=Rx ,mask-reg))     ; A |= 0xFFFFFF00
-    (emit `(Rx=A ,save-reg))       ; save result
-    (emit-label done-label)
-    (emit `(A=Rx ,save-reg))       ; A = result
-    (free-temp-reg mask-reg)
-    (free-temp-reg save-reg)))
+  (emit '(sex-a-b)))
 
 (defun emit-sign-extend-word ()
   "Sign extend word in A (bit 15 → bits 16-31)"
-  ;; Check if bit 15 is set: if (A & 0x8000) A |= 0xFFFF0000
-  (let ((done-label (gen-label "SEXTWDONE"))
-        (save-reg (alloc-temp-reg))
-        (mask-reg (alloc-temp-reg)))
-    (emit `(Rx=A ,save-reg))       ; save original value
-    (emit `(Rx= #x8000 ,mask-reg))
-    (emit `(A&=Rx ,mask-reg))      ; A = A & 0x8000
-    (emit `(Rx= 0 ,mask-reg))
-    (emit `(A-=Rx ,mask-reg))      ; test if zero
-    (emit `(jz ,done-label))       ; if bit 15 not set, done
-    ;; Sign bit is set, extend with 1s
-    (emit `(A=Rx ,save-reg))       ; restore original
-    (emit `(Rx= #xFFFF0000 ,mask-reg))
-    (emit `(A\|=Rx ,mask-reg))     ; A |= 0xFFFF0000
-    (emit `(Rx=A ,save-reg))       ; save result
-    (emit-label done-label)
-    (emit `(A=Rx ,save-reg))       ; A = result
-    (free-temp-reg mask-reg)
-    (free-temp-reg save-reg)))
+  (emit '(sex-a-w)))
 
 (defun emit-mask-to-size (type)
   "Mask value in A to appropriate size (for storing sub-word values)"
