@@ -274,9 +274,14 @@
 
 (defun contains-call (node struct-array-vars)
   "Check if AST node or children contain a function call.
-   Also detects implicit runtime calls like __MUL for struct array access."
+   Also detects implicit runtime calls like __MUL/__DIV/__MOD for
+   multiply/divide/modulo operations and struct array access."
   (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
+        ;; Check for binary ops that call runtime functions (*, /, %)
+        ;; These generate JSR __MUL/__DIV/__MOD when optimize-size is true
+        (and (eq (ast-node-type node) 'binary-op)
+             (member (ast-node-value node) '("*" "/" "%") :test #'string=))
         ;; Check for subscript of a known struct array
         (and (eq (ast-node-type node) 'subscript)
              (subscript-uses-struct-array node struct-array-vars))

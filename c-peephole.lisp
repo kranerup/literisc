@@ -212,10 +212,15 @@
 
 ;;; Rule 2: Redundant register round-trip
 ;;; (Rx=A ?r) (A=Rx ?r) -> (remove both)
+;;; NOTE: Must NOT apply to SP because (RX=A SP) updates the stack pointer!
 (push (make-peephole-rule
        :name "roundtrip"
        :pattern '((Rx=A ?r) (A=Rx ?r))
-       :replacement nil)
+       :replacement (lambda (bindings)
+                      ;; Don't optimize away if register is SP - stack pointer updates have side effects
+                      (if (eq (getf bindings :r) 'SP)
+                          (list (list 'Rx=A 'SP) (list 'A=Rx 'SP))
+                          nil)))
       *peephole-rules*)
 
 ;;; Rule 3: Consecutive loads to same register
