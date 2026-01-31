@@ -3318,6 +3318,403 @@ int main() {
     (test-typedef-unsigned)
     (test-typedef-cast)))
 
+;;; ===========================================================================
+;;; Phase 21 Tests: Register Pressure
+;;; ===========================================================================
+;;; Tests with many local variables and complex operations to stress
+;;; register allocation and ensure registers are properly saved/restored
+;;; across function calls and runtime library calls (__MUL, __DIV, __MOD)
+
+(deftest test-regpressure-many-locals ()
+  "Test: many local variables exceeding register capacity"
+  (combine-results
+    (check "5 locals basic"
+      (= 15 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5;
+    return a + b + c + d + e;
+}")))
+    (check "6 locals"
+      (= 21 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    return a + b + c + d + e + f;
+}")))
+    (check "8 locals"
+      (= 36 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;
+    return a + b + c + d + e + f + g + h;
+}")))
+    (check "10 locals with computation"
+      (= 110 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5;
+    int f = 6, g = 7, h = 8, i = 9, j = 10;
+    int sum = a + b + c + d + e + f + g + h + i + j;
+    return sum + sum;
+}" :max-cycles 20000)))))
+
+(deftest test-regpressure-locals-across-call ()
+  "Test: local variables preserved across function calls"
+  (combine-results
+    (check "5 locals across call"
+      (= 115 (run-and-get-result "
+int passthru(int x) { return x; }
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 15;
+    int r = passthru(100);
+    return a + b + c + d + e - r;
+}" :max-cycles 20000)))
+    (check "6 locals across call"
+      (= 21 (run-and-get-result "
+int zero() { return 0; }
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    int r = zero();
+    return a + b + c + d + e + f + r;
+}" :max-cycles 20000)))
+    (check "locals modified after call"
+      (= 35 (run-and-get-result "
+int add(int x, int y) { return x + y; }
+int main() {
+    int a = 5, b = 10, c = 15, d = 20, e = 25;
+    int r = add(a, b);
+    a = a + 1;
+    b = b + 1;
+    c = c + 1;
+    return r + a + b + c - d - e;
+}" :max-cycles 20000)))
+    (check "8 locals across multiple calls"
+      (= 136 (run-and-get-result "
+int inc(int x) { return x + 1; }
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;
+    a = inc(a);
+    b = inc(b);
+    c = inc(c);
+    d = inc(d);
+    e = inc(e);
+    f = inc(f);
+    g = inc(g);
+    h = inc(h);
+    return a + b + c + d + e + f + g + h + (a * b);
+}" :max-cycles 50000)))))
+
+(deftest test-regpressure-multiply ()
+  "Test: variables preserved across multiplication (uses __MUL runtime)"
+  (combine-results
+    (check "locals before and after multiply"
+      (= 115 (run-and-get-result "
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 5;
+    int product = a * b;
+    return c + d + e + product - product;
+}" :max-cycles 20000)))
+    (check "6 locals with multiply"
+      (= 221 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    int p1 = a * b;
+    int p2 = c * d;
+    int p3 = e * f;
+    return a + b + c + d + e + f + p1 + p2 + p3 + 100;
+}" :max-cycles 30000)))
+    (check "multiply chain with locals"
+      (= 155 (run-and-get-result "
+int main() {
+    int a = 5, b = 10, c = 15, d = 20, e = 25;
+    int x = a * 2;
+    int y = b * 3;
+    return x + y + c + d + e - a - b;
+}" :max-cycles 30000)))
+    (check "complex multiply expression"
+      (= 250 (run-and-get-result "
+int main() {
+    int a = 5, b = 10, c = 2, d = 3, e = 100;
+    int result = (a * b) + (c * d) + e + a + b + c + d + e;
+    return result;
+}" :max-cycles 30000)))))
+
+(deftest test-regpressure-divide ()
+  "Test: variables preserved across division (uses __DIV/__MOD runtime)"
+  (combine-results
+    (check "locals before and after divide"
+      (= 60 (run-and-get-result "
+int main() {
+    int a = 100, b = 20, c = 30, d = 10, e = 5;
+    int quotient = a / d;
+    return quotient + c + e + b - a + 95;
+}" :max-cycles 50000)))
+    (check "locals with modulo"
+      (= 17 (run-and-get-result "
+int main() {
+    int a = 17, b = 5, c = 10, d = 3, e = 7;
+    int rem = a % b;
+    return rem + c + d + e - c - d - e + a - a;
+}" :max-cycles 50000)))
+    (check "divide and modulo together"
+      (= 27 (run-and-get-result "
+int main() {
+    int a = 100, b = 7, c = 10, d = 20, e = 30;
+    int q = a / b;
+    int r = a % b;
+    return q + r + c - d + e - c - d;
+}" :max-cycles 100000)))
+    (check "multiple divisions"
+      (= 15 (run-and-get-result "
+int main() {
+    int a = 100, b = 50, c = 25, d = 5, e = 2;
+    int r1 = a / d;
+    int r2 = b / d;
+    int r3 = c / d;
+    return r1 - r2 + r3 - e - e - e - e - e;
+}" :max-cycles 100000)))))
+
+(deftest test-regpressure-nested-calls ()
+  "Test: deeply nested function calls with many locals"
+  (combine-results
+    (check "nested calls preserve outer locals"
+      (= 210 (run-and-get-result "
+int inner(int x) { return x * 2; }
+int outer(int x) { return inner(x) + 10; }
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 50;
+    int r = outer(a);
+    return a + b + c + d + e + r;
+}" :max-cycles 30000)))
+    (check "multiple nested calls"
+      (= 90 (run-and-get-result "
+int f1(int x) { return x + 1; }
+int f2(int x) { return f1(x) + 2; }
+int f3(int x) { return f2(x) + 3; }
+int main() {
+    int a = 10, b = 20, c = 30, d = 4, e = 5;
+    int r = f3(d);
+    return a + b + c + r + e;
+}" :max-cycles 50000)))
+    (check "locals across recursive-like depth"
+      (= 171 (run-and-get-result "
+int add1(int x) { return x + 1; }
+int add2(int x) { return add1(add1(x)); }
+int add4(int x) { return add2(add2(x)); }
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 100;
+    int r = add4(f);
+    return a + b + c + d + e + f + r - f - f;
+}" :max-cycles 100000)))))
+
+(deftest test-regpressure-struct-array ()
+  "Test: struct arrays with non-power-of-2 sizes (require __MUL for indexing)"
+  (combine-results
+    (check "3-int struct array access"
+      (= 60 (run-and-get-result "
+struct Triple { int a; int b; int c; };
+int main() {
+    struct Triple arr[3];
+    int x = 10, y = 20, z = 30;
+    arr[0].a = x;
+    arr[1].b = y;
+    arr[2].c = z;
+    return arr[0].a + arr[1].b + arr[2].c + x - y + z - z;
+}" :max-cycles 100000)))
+    (check "struct array with locals"
+      (= 115 (run-and-get-result "
+struct Data { int x; int y; int z; };
+int main() {
+    int a = 5, b = 10, c = 15, d = 20, e = 25;
+    struct Data arr[2];
+    arr[0].x = a;
+    arr[0].y = b;
+    arr[1].x = c;
+    arr[1].y = d;
+    return a + b + c + d + e + arr[0].x + arr[1].y - a - c - d;
+}" :max-cycles 100000)))
+    (check "struct array in loop"
+      (= 30 (run-and-get-result "
+struct Pair { int x; int y; int z; };
+int main() {
+    struct Pair arr[3];
+    int i = 0;
+    int sum = 0;
+    arr[0].x = 1; arr[0].y = 2; arr[0].z = 3;
+    arr[1].x = 4; arr[1].y = 5; arr[1].z = 6;
+    arr[2].x = 7; arr[2].y = 8; arr[2].z = -6;
+    while (i < 3) {
+        sum = sum + arr[i].x + arr[i].y + arr[i].z;
+        i = i + 1;
+    }
+    return sum;
+}" :max-cycles 200000)))))
+
+(deftest test-regpressure-complex-expr ()
+  "Test: complex expressions requiring many intermediate registers"
+  (combine-results
+    (check "deeply nested arithmetic"
+      (= 45 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5;
+    return ((a + b) + (c + d)) + ((a + c) + (b + d)) + ((a + e) + (b + c)) + d;
+}")))
+    (check "mixed operations"
+      (= 47 (run-and-get-result "
+int main() {
+    int a = 10, b = 5, c = 3, d = 2, e = 7;
+    return (a * b) - (c * d) + e + (a - b) - (c + d) + e;
+}" :max-cycles 30000)))
+    (check "ternary with many locals"
+      (= 30 (run-and-get-result "
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 50;
+    int x = (a < b) ? c : d;
+    int y = (c < d) ? a : e;
+    return x + y - a;
+}")))
+    (check "chained comparisons"
+      (= 6 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    int r1 = (a < b);
+    int r2 = (b < c);
+    int r3 = (c < d);
+    int r4 = (d < e);
+    int r5 = (e < f);
+    int r6 = (a < f);
+    return r1 + r2 + r3 + r4 + r5 + r6;
+}")))))
+
+(deftest test-regpressure-pointers-and-locals ()
+  "Test: pointer operations with many locals"
+  (combine-results
+    (check "address-of with many locals"
+      (= 150 (run-and-get-result "
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 50;
+    int *p = &c;
+    *p = 100;
+    return a + b + c + d - e;
+}")))
+    (check "multiple pointers"
+      (= 115 (run-and-get-result "
+int main() {
+    int a = 10, b = 20, c = 30, d = 40, e = 15;
+    int *pa = &a;
+    int *pb = &b;
+    int *pc = &c;
+    *pa = *pa + 5;
+    *pb = *pb + 5;
+    return *pa + *pb + *pc + d + e - d - e;
+}")))
+    (check "pointer arithmetic with locals"
+      (= 60 (run-and-get-result "
+int main() {
+    int arr[5];
+    int a = 10, b = 20, c = 30;
+    arr[0] = a;
+    arr[1] = b;
+    arr[2] = c;
+    int *p = arr;
+    return *p + *(p + 1) + *(p + 2);
+}")))))
+
+(deftest test-regpressure-loops-with-locals ()
+  "Test: loops with many loop-external locals"
+  (combine-results
+    (check "while loop with 6 external locals"
+      (= 221 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    int sum = 0;
+    int i = 0;
+    while (i < 10) {
+        sum = sum + a + b + c + d + e + f - 20;
+        i = i + 1;
+    }
+    return sum + a + b + c + d + e + f;
+}" :max-cycles 100000)))
+    (check "for loop preserves outer locals"
+      (= 105 (run-and-get-result "
+int main() {
+    int a = 100, b = 1, c = 2, d = 3, e = 4;
+    int sum = 0;
+    for (int i = 0; i < 5; i = i + 1) {
+        sum = sum + b - b + 1;
+    }
+    return a + sum + c - c + d - d + e - e;
+}" :max-cycles 50000)))
+    (check "nested loops with many locals"
+      (= 121 (run-and-get-result "
+int main() {
+    int a = 1, b = 2, c = 3, d = 4, e = 100;
+    int sum = 0;
+    for (int i = 0; i < 3; i = i + 1) {
+        for (int j = 0; j < 3; j = j + 1) {
+            sum = sum + a + b - a;
+        }
+    }
+    return sum + a + c + d + e;
+}" :max-cycles 100000)))))
+
+(deftest test-regpressure-mixed-operations ()
+  "Test: mixed multiply/divide/function calls with many locals"
+  (combine-results
+    (check "multiply then call"
+      (= 70 (run-and-get-result "
+int identity(int x) { return x; }
+int main() {
+    int a = 5, b = 10, c = 15, d = 20, e = 25;
+    int prod = a * b;
+    int r = identity(prod);
+    return r + c - d + e;
+}" :max-cycles 50000)))
+    (check "call then multiply"
+      (= 70 (run-and-get-result "
+int double_it(int x) { return x + x; }
+int main() {
+    int a = 5, b = 10, c = 15, d = 20, e = 25;
+    int doubled = double_it(a);
+    int prod = doubled * b;
+    return prod + c + d + e - c - d - e - prod + c + d;
+}" :max-cycles 50000)))
+    (check "interleaved mul/div/call"
+      (= 37 (run-and-get-result "
+int add5(int x) { return x + 5; }
+int main() {
+    int a = 10, b = 2, c = 3, d = 4, e = 5;
+    int m = a * b;
+    int q = m / c;
+    int r = add5(q);
+    int m2 = r * d;
+    return m2 + e - d - c - b - a + e;
+}" :max-cycles 100000)))
+    (check "all operations with 8 locals"
+      (= 93 (run-and-get-result "
+int inc(int x) { return x + 1; }
+int main() {
+    int a = 2, b = 3, c = 4, d = 5, e = 6, f = 7, g = 8, h = 9;
+    int m1 = a * b;
+    int m2 = c * d;
+    int sum = m1 + m2;
+    int q = sum / e;
+    int r = sum % f;
+    int final = inc(q) + inc(r);
+    return final + g + h + a + b + c + d + e + f - sum;
+}" :max-cycles 200000)))))
+
+(deftest test-phase21-regpressure ()
+  "Run Phase 21 register pressure tests"
+  (combine-results
+    (test-regpressure-many-locals)
+    (test-regpressure-locals-across-call)
+    (test-regpressure-multiply)
+    (test-regpressure-divide)
+    (test-regpressure-nested-calls)
+    (test-regpressure-struct-array)
+    (test-regpressure-complex-expr)
+    (test-regpressure-pointers-and-locals)
+    (test-regpressure-loops-with-locals)
+    (test-regpressure-mixed-operations)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -3340,7 +3737,8 @@ int main() {
     (test-phase17-struct)
     (test-phase18-strings)
     (test-phase19-peephole)
-    (test-phase20-typedef)))
+    (test-phase20-typedef)
+    (test-phase21-regpressure)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
