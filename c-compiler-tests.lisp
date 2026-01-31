@@ -3243,6 +3243,81 @@ int main() {
     (test-peephole-preserves-correctness)
     (test-peephole-code-reduction)))
 
+;;; ===========================================================================
+;;; Phase 20 Tests: Typedef Support
+;;; ===========================================================================
+;;; Tests for typedef - type aliases
+
+(deftest test-typedef-simple ()
+  "Test: simple typedef"
+  (combine-results
+    (check "simple typedef"
+      (= 42 (run-and-get-result "
+        typedef int MyInt;
+        int main() { MyInt x = 42; return x; }")))
+    (check "typedef with arithmetic"
+      (= 30 (run-and-get-result "
+        typedef int Number;
+        int main() { Number a = 10; Number b = 20; return a + b; }")))))
+
+(deftest test-typedef-pointer ()
+  "Test: pointer typedef"
+  (combine-results
+    (check "pointer typedef"
+      (= 10 (run-and-get-result "
+        typedef int* IntPtr;
+        int main() { int x = 10; IntPtr p = &x; return *p; }")))
+    (check "pointer typedef write"
+      (= 50 (run-and-get-result "
+        typedef int* IntPtr;
+        int main() { int x = 10; IntPtr p = &x; *p = 50; return x; }")))))
+
+(deftest test-typedef-struct ()
+  "Test: struct typedef"
+  (combine-results
+    (check "struct typedef"
+      (= 30 (run-and-get-result "
+        typedef struct { int x; int y; } Point;
+        int main() { Point p; p.x = 10; p.y = 20; return p.x + p.y; }")))
+    (check "named struct typedef"
+      (= 15 (run-and-get-result "
+        struct Pair { int a; int b; };
+        typedef struct Pair Pair;
+        int main() { Pair p; p.a = 5; p.b = 10; return p.a + p.b; }")))))
+
+(deftest test-typedef-unsigned ()
+  "Test: unsigned typedef"
+  (combine-results
+    (check "unsigned char typedef"
+      (= 255 (run-and-get-result "
+        typedef unsigned char Byte;
+        int main() { Byte b = 255; return b; }")))
+    (check "unsigned int typedef"
+      (= 100 (run-and-get-result "
+        typedef unsigned int UInt;
+        int main() { UInt x = 100; return x; }")))))
+
+(deftest test-typedef-cast ()
+  "Test: typedef in cast"
+  (combine-results
+    (check "typedef in cast expression"
+      (= 255 (run-and-get-result "
+        typedef unsigned char Byte;
+        int main() { int x = 511; return (Byte)x; }")))
+    (check "typedef cast to int"
+      (= 65 (run-and-get-result "
+        typedef int MyInt;
+        int main() { char c = 65; return (MyInt)c; }")))))
+
+(deftest test-phase20-typedef ()
+  "Run Phase 20 typedef tests"
+  (combine-results
+    (test-typedef-simple)
+    (test-typedef-pointer)
+    (test-typedef-struct)
+    (test-typedef-unsigned)
+    (test-typedef-cast)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -3264,7 +3339,8 @@ int main() {
     (test-phase16-c99-features)
     (test-phase17-struct)
     (test-phase18-strings)
-    (test-phase19-peephole)))
+    (test-phase19-peephole)
+    (test-phase20-typedef)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

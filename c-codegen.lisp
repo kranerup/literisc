@@ -191,6 +191,7 @@
     (decl-list (generate-global-decls node))
     (global-var (generate-global-var node))
     (enum-decl nil)  ; Enum declarations are compile-time only, no code needed
+    (typedef-decl nil)  ; Typedef declarations are compile-time only, no code needed
     (otherwise
      (compiler-warning "Ignoring top-level ~a" (ast-node-type node)))))
 

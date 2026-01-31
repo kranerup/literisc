@@ -319,6 +319,36 @@
 ;;; Type Parsing
 ;;; ===========================================================================
 
+(defun parse-typedef-declaration ()
+  "Parse: typedef existing-type new-name;"
+  (expect-token 'keyword "typedef")
+  (let ((base-type (parse-type-specifier))
+        (ptr-level 0))
+    ;; Parse pointer stars
+    (loop while (match-token 'operator "*")
+          do (incf ptr-level))
+    ;; Get typedef name
+    (let ((typedef-name (token-value (expect-token 'identifier)))
+          (array-size nil))
+      ;; Check for array typedef
+      (when (match-token 'punctuation "[")
+        (when (check-token 'number)
+          (setf array-size (token-value (advance-token))))
+        (expect-token 'punctuation "]"))
+      ;; Create and register typedef
+      (let ((typedef-type (make-type-desc
+                            :base (type-desc-base base-type)
+                            :pointer-level ptr-level
+                            :array-size array-size
+                            :size (type-desc-size base-type)
+                            :unsigned-p (type-desc-unsigned-p base-type)
+                            :enum-tag (type-desc-enum-tag base-type)
+                            :struct-tag (type-desc-struct-tag base-type))))
+        (setf (gethash typedef-name (compiler-state-typedef-types *state*))
+              typedef-type)
+        (expect-token 'punctuation ";")
+        (make-node 'typedef-decl :value typedef-name :result-type typedef-type)))))
+
 (defun parse-type-specifier ()
   "Parse a type specifier with modifiers (signed/unsigned, short/long)"
   ;; Handle enum and struct first
@@ -342,6 +372,14 @@
      (make-int32-type t))
     ((match-token 'keyword "void")
      (make-void-type))
+    ;; Check for typedef names (identifiers in typedef-types hash table)
+    ((and (check-token 'identifier)
+          (gethash (token-value (current-token))
+                   (compiler-state-typedef-types *state*)))
+     (let* ((typedef-name (token-value (advance-token)))
+            (typedef-type (gethash typedef-name
+                                   (compiler-state-typedef-types *state*))))
+       (copy-type-desc typedef-type)))
     (t
      ;; Parse type with possible modifiers
      (let ((is-unsigned nil)
@@ -499,12 +537,17 @@
       ;; Cast expression: (type) expr
       ((and (check-token 'punctuation "(")
             (let ((next (peek-token 1)))
-              (and next (eq (token-type next) 'keyword)
-                   (member (token-value next)
-                           '("int" "char" "void" "unsigned" "signed" "short" "long"
-                             "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                             "enum" "struct")
-                           :test #'string=))))
+              (and next
+                   (or (and (eq (token-type next) 'keyword)
+                            (member (token-value next)
+                                    '("int" "char" "void" "unsigned" "signed" "short" "long"
+                                      "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                                      "enum" "struct")
+                                    :test #'string=))
+                       ;; Typedef names are identifiers in typedef-types
+                       (and (eq (token-type next) 'identifier)
+                            (gethash (token-value next)
+                                     (compiler-state-typedef-types *state*)))))))
        (advance-token) ; skip (
        (let ((cast-type (parse-type)))
          (expect-token 'punctuation ")")
@@ -652,12 +695,16 @@
 (defun is-type-token (tok)
   "Check if token starts a type declaration"
   (and tok
-       (eq (token-type tok) 'keyword)
-       (member (token-value tok)
-               '("int" "char" "void" "unsigned" "signed" "short" "long"
-                 "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                 "enum" "struct")
-               :test #'string=)))
+       (or (and (eq (token-type tok) 'keyword)
+                (member (token-value tok)
+                        '("int" "char" "void" "unsigned" "signed" "short" "long"
+                          "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                          "enum" "struct")
+                        :test #'string=))
+           ;; Typedef names are identifiers
+           (and (eq (token-type tok) 'identifier)
+                (gethash (token-value tok)
+                         (compiler-state-typedef-types *state*))))))
 
 (defun parse-compound-statement ()
   "Parse a compound statement (block)"
@@ -924,6 +971,9 @@
 
 (defun parse-top-level ()
   "Parse a top-level declaration or function definition"
+  ;; Check for typedef first
+  (when (check-token 'keyword "typedef")
+    (return-from parse-top-level (parse-typedef-declaration)))
   ;; Check for inline keyword
   (let ((is-inline (match-token 'keyword "inline")))
     ;; Parse type and name
