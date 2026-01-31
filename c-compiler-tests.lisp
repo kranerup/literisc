@@ -3091,9 +3091,53 @@ int main() {
     return sum_coords(&pt);
 }" :max-cycles 20000)))))
 
-;; NOTE: Arrays of structs require additional work on element type handling
-;; and are deferred to a future enhancement. Basic struct functionality
-;; (member access, pointers, sizeof, mixed types, anonymous structs) works.
+(deftest test-struct-array ()
+  "Test: arrays of structs"
+  (combine-results
+    (check "basic struct array access"
+           (= 42 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point pts[2];
+    pts[0].x = 42;
+    return pts[0].x;
+}" :max-cycles 20000)))
+    (check "struct array multiple elements"
+           (= 35 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point pts[3];
+    pts[0].x = 10;
+    pts[1].x = 25;
+    return pts[0].x + pts[1].x;
+}" :max-cycles 20000)))
+    (check "struct array member y access"
+           (= 99 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point pts[2];
+    pts[0].y = 99;
+    return pts[0].y;
+}" :max-cycles 20000)))
+    (check "struct array indexing with variable"
+           (= 77 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point pts[3];
+    int i = 1;
+    pts[i].x = 77;
+    return pts[1].x;
+}" :max-cycles 20000)))
+    (check "struct array with function call"
+           (= 60 (run-and-get-result "
+struct Point { int x; int y; };
+int get_sum(struct Point *p) { return p->x + p->y; }
+int main() {
+    struct Point pts[2];
+    pts[0].x = 25;
+    pts[0].y = 35;
+    return get_sum(&pts[0]);
+}" :max-cycles 20000)))))
 
 (deftest test-phase17-struct ()
   "Run Phase 17 struct tests"
@@ -3103,7 +3147,8 @@ int main() {
     (test-struct-sizeof)
     (test-struct-mixed-types)
     (test-struct-anonymous)
-    (test-struct-in-function)))
+    (test-struct-in-function)
+    (test-struct-array)))
 
 ;;; ===========================================================================
 ;;; Phase 19 Tests: Peephole Optimizer

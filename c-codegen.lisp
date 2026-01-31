@@ -281,14 +281,55 @@
     (exit-scope)))
 
 (defun is-leaf-function (body)
-  "Check if function body contains no function calls"
-  (not (contains-call body)))
+  "Check if function body contains no function calls (including implicit __MUL calls)"
+  ;; First collect struct array variable names from declarations
+  (let ((struct-array-vars (collect-struct-array-vars body)))
+    (not (contains-call body struct-array-vars))))
 
-(defun contains-call (node)
-  "Check if AST node or children contain a function call"
+(defun collect-struct-array-vars (node)
+  "Collect names of local variables that are arrays of structs needing __MUL"
+  (let ((result nil))
+    (labels ((collect (n)
+               (when (ast-node-p n)
+                 (when (eq (ast-node-type n) 'var-decl)
+                   (let ((var-type (ast-node-result-type n)))
+                     (when (and var-type
+                                (eq (type-desc-base var-type) 'struct)
+                                (type-desc-array-size var-type))
+                       ;; This is a struct array
+                       (let* ((tag (type-desc-struct-tag var-type))
+                              (struct-def (gethash tag (compiler-state-struct-types *state*))))
+                         (when (and struct-def
+                                    (not (member (struct-def-size struct-def) '(1 2 4))))
+                           (push (ast-node-value n) result))))))
+                 (dolist (child (ast-node-children n))
+                   (collect child)))))
+      (collect node))
+    result))
+
+(defun contains-call (node struct-array-vars)
+  "Check if AST node or children contain a function call.
+   Also detects implicit runtime calls like __MUL for struct array access."
   (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
-        (some #'contains-call (ast-node-children node)))))
+        ;; Check for subscript of a known struct array
+        (and (eq (ast-node-type node) 'subscript)
+             (subscript-uses-struct-array node struct-array-vars))
+        ;; Check for member access where base is struct array subscript
+        (and (eq (ast-node-type node) 'member)
+             (let ((base (first (ast-node-children node))))
+               (and base
+                    (eq (ast-node-type base) 'subscript)
+                    (subscript-uses-struct-array base struct-array-vars))))
+        (some (lambda (child) (contains-call child struct-array-vars))
+              (ast-node-children node)))))
+
+(defun subscript-uses-struct-array (subscript-node struct-array-vars)
+  "Check if a subscript node accesses one of the known struct arrays"
+  (let ((array-node (first (ast-node-children subscript-node))))
+    (and array-node
+         (eq (ast-node-type array-node) 'var-ref)
+         (member (ast-node-value array-node) struct-array-vars :test #'string=))))
 
 (defun ends-with-return-p (node)
   "Check if a statement or block ends with a return statement"
@@ -855,19 +896,36 @@
        (generate-divide size-reg nil)
        (free-temp-reg size-reg)))))
 
+(defun expression-uses-mul-p (node)
+  "Check if expression contains struct array access that will call __MUL"
+  (when (ast-node-p node)
+    (or (and (eq (ast-node-type node) 'subscript)
+             (let ((elem-type (get-subscript-element-type node)))
+               (and elem-type
+                    (not (member (type-size elem-type) '(1 2 4))))))
+        (and (eq (ast-node-type node) 'member)
+             (let ((base (first (ast-node-children node))))
+               (and base (expression-uses-mul-p base))))
+        (some #'expression-uses-mul-p (ast-node-children node)))))
+
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
   ;; Check for pointer arithmetic
   (let* ((left-type (get-expression-type left))
          (right-type (get-expression-type right))
          (left-elem-size (pointer-element-size left-type))
-         (right-elem-size (pointer-element-size right-type)))
+         (right-elem-size (pointer-element-size right-type))
+         ;; If right operand uses __MUL, use a safe register for left
+         (right-uses-mul (expression-uses-mul-p right)))
 
     ;; Generate left operand
     (generate-expression left)
 
-    ;; Save left result
-    (let ((left-reg (alloc-temp-reg)))
+    ;; Save left result - use safe register if right uses __MUL
+    ;; Use second unused local reg since first is for subscript base
+    (let ((left-reg (if right-uses-mul
+                        (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
+                        (alloc-temp-reg))))
       (emit `(Rx=A ,left-reg))
 
       ;; Generate right operand
@@ -988,7 +1046,9 @@
 
       (t (compiler-warning "Unknown binary operator: ~a" op)))
 
-    (free-temp-reg left-reg))))
+    ;; Only free if it was a temp reg (not a safe local reg)
+    (unless right-uses-mul
+      (free-temp-reg left-reg)))))
 
 (defun generate-comparison (left-reg jump-type)
   "Generate code for comparison, result 0 or 1 in A"
@@ -1273,28 +1333,44 @@
          (free-temp-reg value-reg))))
     (subscript
      ;; arr[i] = value - get element type
-     (let ((value-reg (alloc-temp-reg))
-           (elem-type (get-subscript-element-type node)))
+     (let* ((elem-type (get-subscript-element-type node))
+            (elem-size (if elem-type (type-size elem-type) 4))
+            (needs-multiply (not (member elem-size '(1 2 4))))
+            ;; Use second unused local reg for value if we need multiply
+            ;; (since multiply clobbers R0-R5, first unused local reg used for base)
+            (value-reg (if needs-multiply
+                           (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
+                           (alloc-temp-reg))))
        (emit `(Rx=A ,value-reg))  ; save value
-       (generate-subscript-address node)  ; get address
+       (generate-subscript-address node)  ; get address (may call __MUL)
        (if (and elem-type (< (type-size elem-type) 4))
            (emit-store-sized elem-type value-reg)
            (emit `(M[A]=Rx ,value-reg)))  ; store
-       (free-temp-reg value-reg)))
+       (unless needs-multiply
+         (free-temp-reg value-reg))))
     (member
      ;; struct.member = value or ptr->member = value
-     (let ((value-reg (alloc-temp-reg)))
+     ;; Check if base expression is a struct array subscript that needs __MUL
+     (let* ((base-expr (first (ast-node-children node)))
+            (needs-safe-reg (and (eq (ast-node-type base-expr) 'subscript)
+                                 (let ((elem-type (get-subscript-element-type base-expr)))
+                                   (and elem-type
+                                        (not (member (type-size elem-type) '(1 2 4)))))))
+            ;; Use second unused local reg if we need multiply (first is for base)
+            (value-reg (if needs-safe-reg
+                           (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
+                           (alloc-temp-reg))))
        (emit `(Rx=A ,value-reg))
        (generate-member-address node)
        (let* ((member-name (ast-node-value node))
-              (base-expr (first (ast-node-children node)))
               (access-type (ast-node-data node))
               (base-type (get-expression-type base-expr))
               (struct-type (if (eq access-type :pointer)
                                (get-dereferenced-type base-type) base-type))
               (member (lookup-struct-member struct-type member-name)))
          (emit-store-sized (struct-member-type member) value-reg))
-       (free-temp-reg value-reg)))
+       (unless needs-safe-reg
+         (free-temp-reg value-reg))))
     (otherwise
      (compiler-error "Cannot assign to ~a" (ast-node-type node)))))
 
@@ -1450,29 +1526,40 @@
          (index (second (ast-node-children node)))
          (elem-type (get-subscript-element-type node))
          (elem-size (if elem-type (type-size elem-type) 4))
-         (base-reg (alloc-temp-reg)))
-    ;; Get array base address
-    (generate-expression array)
-    (emit `(Rx=A ,base-reg))  ; save base
-
-    ;; Get index
-    (generate-expression index)
-    ;; Multiply by element size
-    (case elem-size
-      (1 nil)                     ; no shift needed for byte
-      (2 (emit '(A=A<<1)))        ; * 2 for short
-      (4 (emit '(A=A<<1))         ; * 4 for int/pointer
-         (emit '(A=A<<1)))
-      (otherwise
-       ;; General case: use software multiply
-       (let ((size-reg (alloc-temp-reg)))
-         (emit `(Rx= ,elem-size ,size-reg))
-         (generate-multiply size-reg)
-         (free-temp-reg size-reg))))
-
-    ;; Add to base
-    (emit `(A+=Rx ,base-reg))
-    (free-temp-reg base-reg)))
+         (needs-multiply (not (member elem-size '(1 2 4)))))
+    ;; For non-power-of-2 sizes (e.g., structs), we need to call __MUL
+    ;; or inline multiply. Both can clobber R0-R5 (inline uses temp regs).
+    ;; Use the first unused local register (R6+) to preserve base address.
+    (if needs-multiply
+        ;; Struct array case: get base first, save to safe reg, then compute offset
+        (let ((base-save-reg (get-local-reg *local-reg-count*)))  ; R6 or higher
+          ;; Step 1: Get array base address and save to safe register
+          (generate-expression array)
+          (emit `(Rx=A ,base-save-reg))  ; save base (safe from multiply)
+          ;; Step 2: Compute index * elem_size (may call __MUL or inline, clobbers R0-R5)
+          (generate-expression index)
+          (let ((size-reg (alloc-temp-reg)))
+            (emit `(Rx= ,elem-size ,size-reg))
+            (generate-multiply size-reg)
+            (free-temp-reg size-reg))
+          ;; Step 3: Add base (in safe reg) to offset (in A)
+          (emit `(A+=Rx ,base-save-reg))) ; A = offset + base
+        ;; Simple case: no function call, use registers directly
+        (let ((base-reg (alloc-temp-reg)))
+          ;; Get array base address
+          (generate-expression array)
+          (emit `(Rx=A ,base-reg))  ; save base
+          ;; Get index
+          (generate-expression index)
+          ;; Multiply by element size using shifts
+          (case elem-size
+            (1 nil)                     ; no shift needed for byte
+            (2 (emit '(A=A<<1)))        ; * 2 for short
+            (4 (emit '(A=A<<1))         ; * 4 for int/pointer
+               (emit '(A=A<<1))))
+          ;; Add to base
+          (emit `(A+=Rx ,base-reg))
+          (free-temp-reg base-reg)))))
 
 ;;; ===========================================================================
 ;;; Struct Member Access
