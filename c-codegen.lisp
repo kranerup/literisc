@@ -885,6 +885,17 @@
 
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
+  ;; Handle shifts specially - they can optimize for constant counts
+  (when (or (string= op "<<") (string= op ">>"))
+    (generate-expression left)
+    (let ((left-reg (alloc-temp-reg)))
+      (emit `(Rx=A ,left-reg))
+      (if (string= op "<<")
+          (generate-shift-left left-reg right)
+          (generate-shift-right left-reg right))
+      (free-temp-reg left-reg)
+      (return-from generate-arithmetic-op)))
+
   ;; Check for pointer arithmetic
   (let* ((left-type (get-expression-type left))
          (right-type (get-expression-type right))
@@ -970,10 +981,10 @@
        (emit `(A^=Rx ,left-reg)))
 
       ((string= op "<<")
-       (generate-shift-left left-reg))
+       (generate-shift-left left-reg right))
 
       ((string= op ">>")
-       (generate-shift-right left-reg))
+       (generate-shift-right left-reg right))
 
       ;; Comparison operators
       ((string= op "==")
@@ -1920,67 +1931,165 @@
     (free-temp-reg divisor-reg)
     (free-temp-reg dividend-reg)))
 
-(defun generate-shift-left (left-reg)
-  "Generate left shift: A = left-reg << A"
+;;; Threshold for inline vs loop shift (in terms of instructions)
+;;; Below this, use inline shifts. At or above, use loop (if optimize-size) or inline (if not)
+(defparameter *shift-inline-threshold* 4)
+
+(defun generate-shift-left (left-reg right-node)
+  "Generate left shift: result = left-reg << right-node.
+   Optimizes constant shift counts: small counts are inline,
+   large counts use loops when optimizing for size."
+  ;; Check if shift count is constant
+  (if (and (ast-node-p right-node)
+           (eq (ast-node-type right-node) 'literal)
+           (integerp (ast-node-value right-node)))
+      ;; Constant shift count
+      (let ((count (ast-node-value right-node)))
+        (cond
+          ;; Zero shift - just return value
+          ((= count 0)
+           (emit `(A=Rx ,left-reg)))
+          ;; Shift by 32 or more - result is 0
+          ((>= count 32)
+           (emit '(A= 0)))
+          ;; Small shift - inline
+          ((< count *shift-inline-threshold*)
+           (emit `(A=Rx ,left-reg))
+           (dotimes (i count)
+             (emit '(A=A<<1))))
+          ;; Large shift - use loop if optimizing for size, inline otherwise
+          ((compiler-state-optimize-size *state*)
+           (generate-shift-left-loop left-reg count))
+          (t
+           ;; Inline for speed
+           (emit `(A=Rx ,left-reg))
+           (dotimes (i count)
+             (emit '(A=A<<1))))))
+      ;; Variable shift count - must use loop
+      (progn
+        (generate-expression right-node)
+        (generate-shift-left-loop-variable left-reg))))
+
+(defun generate-shift-left-loop (left-reg count)
+  "Generate left shift loop for constant count"
   (let ((loop-label (gen-label "SHLLOOP"))
         (end-label (gen-label "SHLEND")))
-
-    ;; A = shift count, left-reg = value
-    (emit '(Rx=A R2))           ; R2 = count
-    (emit `(A=Rx ,left-reg))    ; A = value
-
+    (emit `(Rx= ,count R2))       ; R2 = count
+    (emit `(A=Rx ,left-reg))      ; A = value
     (emit-label loop-label)
-    ;; Check if count is zero
-    (emit '(Rx=A R1))           ; save value
+    (emit '(Rx=A R1))             ; save value
     (emit '(A=Rx R2))
     (emit '(Rx= 0 R0))
     (emit '(A-=Rx R0))
     (emit `(jz ,end-label))
-
-    ;; Decrement count
     (emit '(A=Rx R2))
     (emit '(Rx= -1 R0))
     (emit '(A+=Rx R0))
     (emit '(Rx=A R2))
-
-    ;; Shift value left
     (emit '(A=Rx R1))
     (emit '(A=A<<1))
-
     (emit `(j ,loop-label))
-
     (emit-label end-label)
     (emit '(A=Rx R1))))
 
-(defun generate-shift-right (left-reg)
-  "Generate right shift: A = left-reg >> A"
-  (let ((loop-label (gen-label "SHRLOOP"))
-        (end-label (gen-label "SHREND")))
-
-    ;; A = shift count, left-reg = value
-    (emit '(Rx=A R2))           ; R2 = count
-    (emit `(A=Rx ,left-reg))    ; A = value
-
+(defun generate-shift-left-loop-variable (left-reg)
+  "Generate left shift loop for variable count (count already in A)"
+  (let ((loop-label (gen-label "SHLLOOP"))
+        (end-label (gen-label "SHLEND")))
+    (emit '(Rx=A R2))             ; R2 = count
+    (emit `(A=Rx ,left-reg))      ; A = value
     (emit-label loop-label)
-    ;; Check if count is zero
-    (emit '(Rx=A R1))           ; save value
+    (emit '(Rx=A R1))             ; save value
     (emit '(A=Rx R2))
     (emit '(Rx= 0 R0))
     (emit '(A-=Rx R0))
     (emit `(jz ,end-label))
-
-    ;; Decrement count
     (emit '(A=Rx R2))
     (emit '(Rx= -1 R0))
     (emit '(A+=Rx R0))
     (emit '(Rx=A R2))
+    (emit '(A=Rx R1))
+    (emit '(A=A<<1))
+    (emit `(j ,loop-label))
+    (emit-label end-label)
+    (emit '(A=Rx R1))))
 
-    ;; Shift value right
+(defun generate-shift-right (left-reg right-node)
+  "Generate right shift: result = left-reg >> right-node.
+   Optimizes constant shift counts: small counts are inline,
+   large counts use loops when optimizing for size."
+  ;; Check if shift count is constant
+  (if (and (ast-node-p right-node)
+           (eq (ast-node-type right-node) 'literal)
+           (integerp (ast-node-value right-node)))
+      ;; Constant shift count
+      (let ((count (ast-node-value right-node)))
+        (cond
+          ;; Zero shift - just return value
+          ((= count 0)
+           (emit `(A=Rx ,left-reg)))
+          ;; Shift by 32 or more - result is 0 (for unsigned) or sign-extended
+          ((>= count 32)
+           (emit '(A= 0)))
+          ;; Small shift - inline
+          ((< count *shift-inline-threshold*)
+           (emit `(A=Rx ,left-reg))
+           (dotimes (i count)
+             (emit '(A=A>>1))))
+          ;; Large shift - use loop if optimizing for size, inline otherwise
+          ((compiler-state-optimize-size *state*)
+           (generate-shift-right-loop left-reg count))
+          (t
+           ;; Inline for speed
+           (emit `(A=Rx ,left-reg))
+           (dotimes (i count)
+             (emit '(A=A>>1))))))
+      ;; Variable shift count - must use loop
+      (progn
+        (generate-expression right-node)
+        (generate-shift-right-loop-variable left-reg))))
+
+(defun generate-shift-right-loop (left-reg count)
+  "Generate right shift loop for constant count"
+  (let ((loop-label (gen-label "SHRLOOP"))
+        (end-label (gen-label "SHREND")))
+    (emit `(Rx= ,count R2))       ; R2 = count
+    (emit `(A=Rx ,left-reg))      ; A = value
+    (emit-label loop-label)
+    (emit '(Rx=A R1))             ; save value
+    (emit '(A=Rx R2))
+    (emit '(Rx= 0 R0))
+    (emit '(A-=Rx R0))
+    (emit `(jz ,end-label))
+    (emit '(A=Rx R2))
+    (emit '(Rx= -1 R0))
+    (emit '(A+=Rx R0))
+    (emit '(Rx=A R2))
     (emit '(A=Rx R1))
     (emit '(A=A>>1))
-
     (emit `(j ,loop-label))
+    (emit-label end-label)
+    (emit '(A=Rx R1))))
 
+(defun generate-shift-right-loop-variable (left-reg)
+  "Generate right shift loop for variable count (count already in A)"
+  (let ((loop-label (gen-label "SHRLOOP"))
+        (end-label (gen-label "SHREND")))
+    (emit '(Rx=A R2))             ; R2 = count
+    (emit `(A=Rx ,left-reg))      ; A = value
+    (emit-label loop-label)
+    (emit '(Rx=A R1))             ; save value
+    (emit '(A=Rx R2))
+    (emit '(Rx= 0 R0))
+    (emit '(A-=Rx R0))
+    (emit `(jz ,end-label))
+    (emit '(A=Rx R2))
+    (emit '(Rx= -1 R0))
+    (emit '(A+=Rx R0))
+    (emit '(Rx=A R2))
+    (emit '(A=Rx R1))
+    (emit '(A=A>>1))
+    (emit `(j ,loop-label))
     (emit-label end-label)
     (emit '(A=Rx R1))))
 
