@@ -103,6 +103,7 @@
   (need-div-runtime nil) ; set to t when __div runtime is needed
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
+  (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
   (struct-types (make-hash-table :test 'equal))  ; tag-name -> struct-def
   (typedef-types (make-hash-table :test 'equal)) ; typedef-name -> type-desc

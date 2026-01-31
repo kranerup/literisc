@@ -201,6 +201,11 @@
 
 (defun generate-function (node)
   "Generate code for a function"
+  (let* ((name (ast-node-value node)))
+    ;; Skip dead functions (fully inlined with no remaining calls)
+    (when (gethash name (compiler-state-dead-functions *state*))
+      (return-from generate-function nil)))
+
   (let* ((name (ast-node-value node))
          (params (first (ast-node-children node)))
          (body (second (ast-node-children node)))

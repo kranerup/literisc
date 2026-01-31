@@ -595,8 +595,38 @@
                     :source-loc (ast-node-source-loc node)
                     :data (ast-node-data node)))))
 
+(defun substitute-constants-in-node (node const-bindings)
+  "Substitute constant values for variable references in an AST node.
+   const-bindings is a hash table mapping variable names to constant values."
+  (when (null node)
+    (return-from substitute-constants-in-node nil))
+  (unless (ast-node-p node)
+    (return-from substitute-constants-in-node node))
+
+  (case (ast-node-type node)
+    ;; Variable reference - check if it's a constant
+    (var-ref
+     (let ((const-val (gethash (ast-node-value node) const-bindings)))
+       (if const-val
+           ;; Replace with constant literal
+           (make-constant-node const-val
+                               (or (ast-node-result-type node) (make-int-type))
+                               (ast-node-source-loc node))
+           node)))
+
+    ;; Recursively process children for other nodes
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (substitute-constants-in-node c const-bindings))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
 (defun inline-call (call-node func-node depth)
-  "Inline a function call, returning an inline-expr node"
+  "Inline a function call, returning an inline-expr node.
+   Constant arguments are propagated directly into the body."
   (let* ((suffix (gen-inline-suffix))
          (result-var (format nil "__inline_result~a" suffix))
          (exit-label (intern (format nil "INLINE_RET~a" suffix) :c-compiler))
@@ -605,23 +635,26 @@
          (body (second (ast-node-children func-node)))
          (param-nodes (ast-node-children params-node))
          (renames (make-hash-table :test 'equal))
+         (const-bindings (make-hash-table :test 'equal))
          (init-stmts nil))
 
-    ;; Create parameter initializations
+    ;; Process parameters - constant args get propagated, others get temp vars
     (loop for param in param-nodes
           for arg in args
           for i from 0
-          when (ast-node-value param) ; param might have no name in declaration
-          do (let* ((param-name (ast-node-value param))
-                    (temp-name (format nil "__inline_p~a~a" i suffix)))
-               ;; Map parameter name to temp name
-               (setf (gethash param-name renames) temp-name)
-               ;; Create: type temp = arg;
-               (push (make-ast-node :type 'var-decl
-                                    :value temp-name
-                                    :children (list (inline-functions-in-node arg (1+ depth)))
-                                    :result-type (ast-node-result-type param))
-                     init-stmts)))
+          when (ast-node-value param)
+          do (let ((param-name (ast-node-value param)))
+               (if (is-constant-node arg)
+                   ;; Constant argument - propagate directly
+                   (setf (gethash param-name const-bindings) (get-constant-value arg))
+                   ;; Non-constant argument - create temp variable
+                   (let ((temp-name (format nil "__inline_p~a~a" i suffix)))
+                     (setf (gethash param-name renames) temp-name)
+                     (push (make-ast-node :type 'var-decl
+                                          :value temp-name
+                                          :children (list (inline-functions-in-node arg (1+ depth)))
+                                          :result-type (ast-node-result-type param))
+                           init-stmts)))))
 
     ;; Create result variable declaration
     (let ((result-decl (make-ast-node :type 'var-decl
@@ -630,12 +663,18 @@
                                                        (make-int-type)))))
       (push result-decl init-stmts))
 
-    ;; Rename local variables in body to avoid conflicts
-    (let* ((renamed-body (rename-variables-in-node body renames suffix))
-           ;; Transform returns to assignments + jumps
+    ;; Process the body:
+    ;; 1. Substitute constants for constant parameters
+    ;; 2. Rename remaining variables
+    ;; 3. Transform returns
+    ;; 4. Inline nested calls
+    ;; 5. Fold constants in the result
+    (let* ((const-subst-body (substitute-constants-in-node body const-bindings))
+           (renamed-body (rename-variables-in-node const-subst-body renames suffix))
            (transformed-body (transform-returns renamed-body result-var exit-label))
-           ;; Further inline any calls in the body
-           (inlined-body (inline-functions-in-node transformed-body (1+ depth))))
+           (inlined-body (inline-functions-in-node transformed-body (1+ depth)))
+           ;; Run constant folding on the inlined body
+           (folded-body (fold-constants inlined-body)))
 
       ;; Create the inline expression node
       (make-ast-node :type 'inline-expr
@@ -644,8 +683,8 @@
                                 ;; Initialization block
                                 (make-ast-node :type 'decl-list
                                                :children (nreverse init-stmts))
-                                ;; Inlined body
-                                inlined-body
+                                ;; Inlined body (with constants folded)
+                                folded-body
                                 ;; Exit label
                                 (make-ast-node :type 'inline-return-label
                                                :value exit-label))
@@ -688,9 +727,28 @@
                     :source-loc (ast-node-source-loc node)
                     :data (ast-node-data node)))))
 
+(defun collect-remaining-calls (node)
+  "Collect all function names that are still called (not inlined) in the AST.
+   Returns a hash table of called function names."
+  (let ((called (make-hash-table :test 'equal)))
+    (labels ((walk (n)
+               (when (and n (ast-node-p n))
+                 (when (eq (ast-node-type n) 'call)
+                   ;; Found a call node - extract function name
+                   (let ((func-expr (first (ast-node-children n))))
+                     (when (and (ast-node-p func-expr)
+                                (eq (ast-node-type func-expr) 'var-ref))
+                       (setf (gethash (ast-node-value func-expr) called) t))))
+                 ;; Recurse into children
+                 (dolist (child (ast-node-children n))
+                   (walk child)))))
+      (walk node))
+    called))
+
 (defun inline-functions (ast)
   "Main entry point for function inlining optimization.
-   Transforms the AST by inlining eligible function calls."
+   Transforms the AST by inlining eligible function calls.
+   Also marks fully-inlined functions as dead for elimination."
   (when (null ast)
     (return-from inline-functions nil))
 
@@ -700,22 +758,43 @@
   ;; Detect recursive functions first
   (setf *recursive-functions* (detect-recursive-functions ast))
 
-  ;; Process each top-level declaration
-  (make-ast-node :type 'program
-                 :children (mapcar (lambda (child)
-                                     (if (and (ast-node-p child)
-                                              (eq (ast-node-type child) 'function))
-                                         ;; Inline calls within function bodies
-                                         (let* ((name (ast-node-value child))
-                                                (body (second (ast-node-children child)))
-                                                (new-body (inline-functions-in-node body 0)))
-                                           (make-ast-node :type 'function
-                                                          :value name
-                                                          :children (list (first (ast-node-children child))
-                                                                          new-body)
-                                                          :result-type (ast-node-result-type child)
-                                                          :source-loc (ast-node-source-loc child)
-                                                          :data (ast-node-data child)))
-                                         child))
-                                   (ast-node-children ast))
-                 :source-loc (ast-node-source-loc ast)))
+  ;; Collect all defined function names (except main)
+  (let ((defined-functions (make-hash-table :test 'equal)))
+    (dolist (child (ast-node-children ast))
+      (when (and (ast-node-p child)
+                 (eq (ast-node-type child) 'function))
+        (let ((name (ast-node-value child)))
+          (unless (string= name "main")
+            (setf (gethash name defined-functions) t)))))
+
+    ;; Process each top-level declaration (inline calls)
+    (let ((result-ast
+            (make-ast-node :type 'program
+                           :children (mapcar (lambda (child)
+                                               (if (and (ast-node-p child)
+                                                        (eq (ast-node-type child) 'function))
+                                                   ;; Inline calls within function bodies
+                                                   (let* ((name (ast-node-value child))
+                                                          (body (second (ast-node-children child)))
+                                                          (new-body (inline-functions-in-node body 0)))
+                                                     (make-ast-node :type 'function
+                                                                    :value name
+                                                                    :children (list (first (ast-node-children child))
+                                                                                    new-body)
+                                                                    :result-type (ast-node-result-type child)
+                                                                    :source-loc (ast-node-source-loc child)
+                                                                    :data (ast-node-data child)))
+                                                   child))
+                                             (ast-node-children ast))
+                           :source-loc (ast-node-source-loc ast))))
+
+      ;; After inlining, find which functions are still called
+      (let ((remaining-calls (collect-remaining-calls result-ast)))
+        ;; Mark functions with no remaining calls as dead
+        (maphash (lambda (func-name defined-p)
+                   (declare (ignore defined-p))
+                   (unless (gethash func-name remaining-calls)
+                     (setf (gethash func-name (compiler-state-dead-functions *state*)) t)))
+                 defined-functions))
+
+      result-ast)))
