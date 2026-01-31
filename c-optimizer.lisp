@@ -411,19 +411,21 @@
                        :source-loc (ast-node-source-loc node)))))
 
 (defun fold-sizeof (node)
-  "Fold sizeof to a constant"
-  (let* ((operand (first (ast-node-children node)))
-         (size (cond
-                 ;; sizeof(type) - type-desc passed directly
-                 ((type-desc-p operand)
-                  (type-size operand))
-                 ;; sizeof(expression) with result-type
-                 ((and (ast-node-p operand)
-                       (ast-node-result-type operand))
-                  (type-size (ast-node-result-type operand)))
-                 ;; Default to int size
-                 (t 4))))
-    (make-constant-node size (make-int-type) (ast-node-source-loc node))))
+  "Fold sizeof to a constant.
+   Only folds when we can determine the size statically (type-desc or expression with result-type).
+   For var-ref without type info, leaves it for code generation to handle."
+  (let* ((operand (first (ast-node-children node))))
+    (cond
+      ;; sizeof(type) - type-desc passed directly
+      ((type-desc-p operand)
+       (make-constant-node (type-size operand) (make-int-type) (ast-node-source-loc node)))
+      ;; sizeof(expression) with result-type set
+      ((and (ast-node-p operand)
+            (ast-node-result-type operand))
+       (make-constant-node (type-size (ast-node-result-type operand))
+                           (make-int-type) (ast-node-source-loc node)))
+      ;; Can't determine size at compile time (e.g., var-ref) - leave for codegen
+      (t node))))
 
 ;;; ===========================================================================
 ;;; Function Inlining

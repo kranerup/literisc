@@ -536,18 +536,19 @@
         (format t "~%AST (before optimization):~%")
         (print-ast ast))
 
-      ;; Apply optimizations if enabled
+      ;; Apply optimizations
       (when optimize
-        ;; Function inlining first (before constant folding)
+        ;; Function inlining only when full optimization is enabled
         (setf ast (inline-functions ast))
         (when verbose
           (format t "~%AST (after inlining):~%")
-          (print-ast ast))
-        ;; Then constant folding
-        (setf ast (fold-constants ast))
-        (when verbose
-          (format t "~%AST (after constant folding):~%")
           (print-ast ast)))
+
+      ;; Constant folding always runs (it's always beneficial)
+      (setf ast (fold-constants ast))
+      (when verbose
+        (format t "~%AST (after constant folding):~%")
+        (print-ast ast))
 
       ;; Code generation
       (generate-program ast)
@@ -573,14 +574,14 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil) (optimize-size t) (peephole nil))
+(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize-size optimize-size :peephole peephole)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize-size t) (peephole nil))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil))
   "Compile, assemble, and run a C program, returning the result"
-  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size :peephole peephole))
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole))
          (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run the program
