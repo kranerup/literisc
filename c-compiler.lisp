@@ -275,10 +275,8 @@
   (emit '(:comment "======== runtime: __mul ========"))
   (emit '(:comment "P0 = P0 * P1 (shift-and-add multiply)"))
   (emit '(label __MUL))
-  ;; Save caller's return address (SRP) in R4 (callee-saved)
-  (emit '(A=Rx SRP))
-  (emit '(Rx=A R4))
-  ;; Use R0-R3 as temp registers (caller-saved)
+  ;; Save callee-saved registers (leaf function, no push-srp needed)
+  (emit '(push-r R3))
   ;; R0 = multiplier (P1), R1 = multiplicand (P0), R2 = result, R3 = temp
   (emit '(A=Rx P1))           ; A = multiplier
   (emit '(Rx=A R0))           ; R0 = multiplier
@@ -316,8 +314,9 @@
   (emit '(label __MUL_END))
   (emit '(A=Rx R2))           ; A = result
   (emit '(Rx=A P0))           ; P0 = result
-  ;; Restore caller's return address and return
-  (emit '(A=Rx R4))
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R3))
+  (emit '(A=Rx SRP))
   (emit '(j-A)))
 
 (defun emit-div-runtime ()
@@ -325,9 +324,8 @@
   (emit '(:comment "======== runtime: __div ========"))
   (emit '(:comment "P0 = P0 / P1 (repeated subtraction)"))
   (emit '(label __DIV))
-  ;; Save caller's return address in R4
-  (emit '(A=Rx SRP))
-  (emit '(Rx=A R4))
+  ;; Save callee-saved registers (leaf function, no push-srp needed)
+  (emit '(push-r R3))
   ;; R0 = dividend (will become remainder), R1 = divisor, R2 = quotient, R3 = temp
   (emit '(A=Rx P0))           ; A = dividend
   (emit '(Rx=A R0))           ; R0 = dividend
@@ -350,8 +348,9 @@
   (emit '(label __DIV_END))
   (emit '(A=Rx R2))           ; A = quotient
   (emit '(Rx=A P0))           ; P0 = quotient
-  ;; Restore caller's return address and return
-  (emit '(A=Rx R4))
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R3))
+  (emit '(A=Rx SRP))
   (emit '(j-A)))
 
 (defun emit-mod-runtime ()
@@ -359,9 +358,8 @@
   (emit '(:comment "======== runtime: __mod ========"))
   (emit '(:comment "P0 = P0 % P1 (repeated subtraction)"))
   (emit '(label __MOD))
-  ;; Save caller's return address in R4
-  (emit '(A=Rx SRP))
-  (emit '(Rx=A R4))
+  ;; Save callee-saved registers (leaf function, no push-srp needed)
+  (emit '(push-r R1))
   ;; R0 = dividend (will become remainder), R1 = divisor
   (emit '(A=Rx P0))           ; A = dividend
   (emit '(Rx=A R0))           ; R0 = dividend (becomes remainder)
@@ -378,8 +376,9 @@
   (emit '(label __MOD_END))
   (emit '(A=Rx R0))           ; A = remainder
   (emit '(Rx=A P0))           ; P0 = remainder
-  ;; Restore caller's return address and return
-  (emit '(A=Rx R4))
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R1))
+  (emit '(A=Rx SRP))
   (emit '(j-A)))
 
 ;;; ===========================================================================

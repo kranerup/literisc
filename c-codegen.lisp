@@ -27,9 +27,14 @@
 ;;; Track local register usage for current function
 (defvar *local-reg-count* 0)  ; how many of R6-R9 are used
 
+;;; Track maximum temp register index used in current function (for PUSH/POP)
+(defvar *max-temp-reg-index* -1)
+
 (defun init-registers ()
   "Initialize register allocation state"
-  (setf *reg-in-use* (make-array 6 :initial-element nil)))  ; Only 6 temp regs now
+  (setf *reg-in-use* (make-array 6 :initial-element nil))
+  (setf *max-temp-reg-index* -1)
+  (setf *pushed-reg-bytes* 0))
 
 (defun alloc-temp-reg ()
   "Allocate a temporary register"
@@ -37,6 +42,9 @@
         when (not (aref *reg-in-use* i))
         do (progn
              (setf (aref *reg-in-use* i) t)
+             ;; Track maximum register used for PUSH/POP
+             (when (> i *max-temp-reg-index*)
+               (setf *max-temp-reg-index* i))
              (return-from alloc-temp-reg (nth i *temp-regs*))))
   (compiler-error "Out of temporary registers"))
 
@@ -69,6 +77,7 @@
 (defvar *current-param-count* 0) ; number of parameters in current function
 (defvar *param-save-offset* 0)  ; offset where saved params start on stack
 (defvar *skip-final-return-jump* nil) ; when t, generate-return skips the jump
+(defvar *pushed-reg-bytes* 0)   ; bytes pushed by push-r for callee-saved regs
 
 ;;; ===========================================================================
 ;;; Sized Memory Access Helpers
@@ -158,8 +167,18 @@
 
 (defun generate-program (ast)
   "Generate code for a complete program"
+  ;; Reset all codegen state
   (init-registers)
   (setf *string-literals* nil)
+  (setf *break-label* nil)
+  (setf *continue-label* nil)
+  (setf *function-end-label* nil)
+  (setf *frame-size* 0)
+  (setf *is-leaf-function* t)
+  (setf *current-param-count* 0)
+  (setf *param-save-offset* 0)
+  (setf *skip-final-return-jump* nil)
+  (setf *local-reg-count* 0)
 
   ;; First pass: collect string literals
   (collect-strings ast)
@@ -200,7 +219,12 @@
 ;;; ===========================================================================
 
 (defun generate-function (node)
-  "Generate code for a function"
+  "Generate code for a function.
+   Uses the calling convention from README.md:
+   - PUSH-SRP for non-leaf functions
+   - PUSH Rn to save R0..Rn (callee-saved registers)
+   - POP Rn to restore
+   - POP-A; J-A for non-leaf return, A=Rx SRP; J-A for leaf"
   (let* ((name (ast-node-value node)))
     ;; Skip dead functions (fully inlined with no remaining calls)
     (when (gethash name (compiler-state-dead-functions *state*))
@@ -221,31 +245,66 @@
     ;; Set current function for symbol lookup
     (setf (compiler-state-current-function *state*) name)
 
-    ;; Enter function scope (matches parsing which has parameter scope at level 1)
+    ;; Enter function scope
     (enter-scope)
 
     (init-registers)
 
-    ;; Function header annotation
-    (emit-comment (format nil "======== function ~a ========" name))
-    (emit-comment (format nil "frame-size: ~a, params: ~a, local-regs: ~a, leaf: ~a"
-                          *frame-size* *current-param-count* *local-reg-count*
-                          (if *is-leaf-function* "yes" "no")))
+    ;; Pre-compute pushed register bytes for stack param offset calculation
+    ;; Conservative estimate: always save all 6 temp regs (R0-R5), plus local regs if used
+    ;; This ensures stack parameter offsets are correct during body generation
+    (let ((estimated-max-reg (if (> *local-reg-count* 0)
+                                  (+ 5 *local-reg-count*)  ; R5 + locals
+                                  5)))                     ; R5 (all temp regs)
+      (setf *pushed-reg-bytes* (* 4 (1+ estimated-max-reg))))
 
-    ;; Function label
-    (emit `(label ,func-label))
+    ;; Generate body first to determine actual register usage
+    ;; Save current code output, generate body, then prepend prologue
+    (let ((saved-code (compiler-state-code *state*)))
+      (setf (compiler-state-code *state*) nil)
 
-    ;; Prologue
-    (generate-prologue params)
+      ;; Register parameters in symbol table for body generation
+      (register-parameters params)
 
-    ;; Body - if it ends with return, skip the final jump
-    (if body-ends-with-return
-        (generate-body-with-final-return body)
-        (generate-statement body))
+      ;; Generate body
+      (if body-ends-with-return
+          (generate-body-with-final-return body)
+          (generate-statement body))
 
-    ;; Epilogue (also target for return statements)
-    (emit-label *function-end-label*)
-    (generate-epilogue)
+      ;; Epilogue label (target for return statements)
+      (emit-label *function-end-label*)
+
+      ;; Now we know actual max register used
+      ;; But we must push at least what we estimated for correct stack offsets
+      (let* ((body-code (nreverse (compiler-state-code *state*)))
+             (actual-max-reg *max-temp-reg-index*)
+             ;; Use the larger of actual and estimated to match offset calculation
+             (max-reg (max actual-max-reg
+                           (if (> *local-reg-count* 0)
+                               (+ 5 *local-reg-count*)
+                               5))))
+
+        ;; Restore original code and emit function
+        (setf (compiler-state-code *state*) saved-code)
+
+        ;; Function header annotation
+        (emit-comment (format nil "======== function ~a ========" name))
+        (emit-comment (format nil "frame-size: ~a, params: ~a, max-reg: ~a, leaf: ~a"
+                              *frame-size* *current-param-count* max-reg
+                              (if *is-leaf-function* "yes" "no")))
+
+        ;; Function label
+        (emit `(label ,func-label))
+
+        ;; Prologue with proper PUSH instructions
+        (generate-prologue-new max-reg)
+
+        ;; Append body code
+        (dolist (instr body-code)
+          (push instr (compiler-state-code *state*)))
+
+        ;; Epilogue with proper POP instructions
+        (generate-epilogue-new max-reg)))
 
     ;; Exit function scope
     (exit-scope)))
@@ -411,6 +470,99 @@
       (progn
         (emit '(pop-a))
         (emit '(j-a)))))
+
+;;; ---------------------------------------------------------------------------
+;;; New Calling Convention (uses PUSH/POP for efficiency)
+;;; ---------------------------------------------------------------------------
+
+(defun register-parameters (params-node)
+  "Register function parameters in the symbol table for code generation.
+   For leaf functions, params stay in P0-P3.
+   For non-leaf functions, params are saved to stack and accessed from there."
+  (loop for param in (ast-node-children params-node)
+        for idx from 0
+        when (ast-node-value param)
+        do (add-symbol (ast-node-value param)
+                       (ast-node-result-type param)
+                       :parameter
+                       idx)))
+
+(defun compute-highest-save-reg (max-temp-idx)
+  "Compute the highest register that needs to be saved with PUSH.
+   Returns the register symbol (R0-R9) or nil if no saves needed."
+  (let ((highest-idx max-temp-idx))
+    ;; If local registers (R6-R9) are used, need to save up to the highest one
+    (when (> *local-reg-count* 0)
+      (setf highest-idx (max highest-idx (+ 5 *local-reg-count*))))
+    ;; Return register symbol or nil
+    (when (>= highest-idx 0)
+      (intern (format nil "R~d" highest-idx) :c-compiler))))
+
+(defun generate-prologue-new (max-temp-idx)
+  "Generate function prologue using efficient PUSH instructions.
+   Convention:
+   - Non-leaf: PUSH-SRP, then PUSH Rn for callee-saved regs
+   - Leaf: PUSH Rn for callee-saved regs (if any used)
+   Then allocate stack frame for locals + saved params (non-leaf)."
+  (let ((save-reg (intern (format nil "R~d" max-temp-idx) :c-compiler))
+        (param-count *current-param-count*))
+
+    ;; Update pushed-reg-bytes to match what we're actually pushing
+    (setf *pushed-reg-bytes* (* 4 (1+ max-temp-idx)))
+
+    ;; 1. Save return address for non-leaf functions
+    (unless *is-leaf-function*
+      (emit '(push-srp)))
+
+    ;; 2. Save callee-saved registers with single PUSH instruction
+    (emit `(push-r ,save-reg))
+
+    ;; 3. Allocate stack frame for locals + param save area (non-leaf only)
+    (let* ((save-param-space (if *is-leaf-function* 0
+                                 (* 4 (min param-count 4))))
+           (total-frame (+ *frame-size* save-param-space)))
+      (setf *param-save-offset* *frame-size*)  ; Params start after locals
+      (when (> total-frame 0)
+        (emit `(A=Rx SP))
+        (emit `(Rx= ,(- total-frame) R0))
+        (emit `(A+=Rx R0))
+        (emit `(Rx=A SP)))
+
+      ;; 4. Save parameters P0-P3 to stack for non-leaf functions
+      ;; (They get clobbered by nested calls)
+      (unless *is-leaf-function*
+        (loop for i from 0 below (min param-count 4)
+              for offset = (+ *param-save-offset* (* i 4))
+              do (progn
+                   (emit `(A=Rx SP))
+                   (emit `(M[A+n]=Rx ,offset ,(nth i *param-regs*)))))))))
+
+(defun generate-epilogue-new (max-temp-idx)
+  "Generate function epilogue using efficient POP instructions."
+  (let ((save-reg (intern (format nil "R~d" max-temp-idx) :c-compiler))
+        (param-count *current-param-count*))
+
+    ;; 1. Deallocate stack frame (locals + saved params for non-leaf)
+    (let* ((save-param-space (if *is-leaf-function* 0
+                                 (* 4 (min param-count 4))))
+           (total-frame (+ *frame-size* save-param-space)))
+      (when (> total-frame 0)
+        (emit `(A=Rx SP))
+        (emit `(Rx= ,total-frame R0))
+        (emit `(A+=Rx R0))
+        (emit `(Rx=A SP))))
+
+    ;; 2. Restore callee-saved registers with single POP instruction
+    (emit `(pop-r ,save-reg))
+
+    ;; 3. Return
+    (if *is-leaf-function*
+        (progn
+          (emit '(A=Rx SRP))
+          (emit '(j-a)))
+        (progn
+          (emit '(pop-a))
+          (emit '(j-a))))))
 
 ;;; ===========================================================================
 ;;; Statement Generation
@@ -714,10 +866,15 @@
            (t
             (let* ((save-param-space (if *is-leaf-function* 0
                                          (* 4 (min *current-param-count* 4))))
-                   (save-local-reg-space (if *is-leaf-function* 0
-                                             (* 4 *local-reg-count*)))
                    (temp (alloc-temp-reg)))
-              (let ((offset (+ *frame-size* save-param-space save-local-reg-space
+              ;; Stack layout from callee perspective:
+              ;; [stack params]  <- pushed by caller before JSR
+              ;; [saved SRP]     <- pushed by push-srp (non-leaf only)
+              ;; [saved regs]    <- pushed by push-r (size = *pushed-reg-bytes*)
+              ;; [locals+saved P0-P3] <- allocated by SP adjustment
+              ;; SP ->
+              (let ((offset (+ *frame-size* save-param-space
+                               *pushed-reg-bytes*
                                (if *is-leaf-function* 0 4)  ; saved SRP
                                (* (- idx 4) 4))))
                 (emit `(A=Rx SP))
