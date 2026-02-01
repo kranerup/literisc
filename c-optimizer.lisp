@@ -678,24 +678,33 @@
          (init-stmts nil)
          (has-param-temps nil))  ; Track if we need parameter temp vars
 
-    ;; Process parameters - constant args get propagated, others get temp vars
+    ;; Process parameters - constant args get propagated, var-refs get renamed,
+    ;; complex expressions get temp vars
     (loop for param in param-nodes
           for arg in args
           for i from 0
           when (ast-node-value param)
           do (let ((param-name (ast-node-value param)))
-               (if (is-constant-node arg)
-                   ;; Constant argument - propagate directly
-                   (setf (gethash param-name const-bindings) (get-constant-value arg))
-                   ;; Non-constant argument - create temp variable
-                   (let ((temp-name (format nil "__inline_p~a~a" i suffix)))
-                     (setf has-param-temps t)
-                     (setf (gethash param-name renames) temp-name)
-                     (push (make-ast-node :type 'var-decl
-                                          :value temp-name
-                                          :children (list (inline-functions-in-node arg (1+ depth)))
-                                          :result-type (ast-node-result-type param))
-                           init-stmts)))))
+               (cond
+                 ;; Constant argument - propagate directly
+                 ((is-constant-node arg)
+                  (setf (gethash param-name const-bindings) (get-constant-value arg)))
+                 ;; Simple var-ref argument - rename parameter to argument variable
+                 ;; This avoids creating unnecessary temp variables for simple cases
+                 ((and (ast-node-p arg)
+                       (eq (ast-node-type arg) 'var-ref)
+                       (ast-node-value arg))
+                  (setf (gethash param-name renames) (ast-node-value arg)))
+                 ;; Complex expression - create temp variable to evaluate once
+                 (t
+                  (let ((temp-name (format nil "__inline_p~a~a" i suffix)))
+                    (setf has-param-temps t)
+                    (setf (gethash param-name renames) temp-name)
+                    (push (make-ast-node :type 'var-decl
+                                         :value temp-name
+                                         :children (list (inline-functions-in-node arg (1+ depth)))
+                                         :result-type (ast-node-result-type param))
+                          init-stmts))))))
 
     ;; Process the body:
     ;; 1. Substitute constants for constant parameters

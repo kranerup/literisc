@@ -274,5 +274,31 @@
 ;;; This is complex and depends on proving no intervening modifications
 ;;; Skipping for now - would need data flow analysis
 
+;;; Rule 10: Immediate load through temp register
+;;; (Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2) -> (Rx= ?v ?r2)
+;;; When loading an immediate to a temp, moving to A, then to target,
+;;; we can just load directly to target
+(push (make-peephole-rule
+       :name "immediate-through-temp"
+       :pattern '((Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2))
+       :replacement (lambda (bindings)
+                      (list (list 'Rx= (getf bindings :v) (getf bindings :r2)))))
+      *peephole-rules*)
+
+;;; Rule 11: Small immediate load through temp register
+;;; (A= ?v) (Rx=A ?r) -> (Rx= ?v ?r)
+;;; When A= is used for small immediates (-128 to 127), we can load directly
+(push (make-peephole-rule
+       :name "small-immediate-through-A"
+       :pattern '((A= ?v) (Rx=A ?r))
+       :replacement (lambda (bindings)
+                      (let ((val (getf bindings :v))
+                            (reg (getf bindings :r)))
+                        ;; Don't optimize if target is SP (side effects)
+                        (if (eq reg 'SP)
+                            (list (list 'A= val) (list 'Rx=A reg))
+                            (list (list 'Rx= val reg))))))
+      *peephole-rules*)
+
 ;;; Reverse the rules list so higher-priority rules are tried first
 (setf *peephole-rules* (nreverse *peephole-rules*))

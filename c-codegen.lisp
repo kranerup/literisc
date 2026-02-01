@@ -30,6 +30,9 @@
 ;;; Track maximum temp register index used in current function (for PUSH/POP)
 (defvar *max-temp-reg-index* -1)
 
+;;; Bytes pushed by push-r for callee-saved regs (used for stack param offset)
+(defvar *pushed-reg-bytes* 0)
+
 (defun init-registers ()
   "Initialize register allocation state"
   (setf *reg-in-use* (make-array 6 :initial-element nil))
@@ -77,7 +80,6 @@
 (defvar *current-param-count* 0) ; number of parameters in current function
 (defvar *param-save-offset* 0)  ; offset where saved params start on stack
 (defvar *skip-final-return-jump* nil) ; when t, generate-return skips the jump
-(defvar *pushed-reg-bytes* 0)   ; bytes pushed by push-r for callee-saved regs
 
 ;;; ===========================================================================
 ;;; Sized Memory Access Helpers
@@ -251,38 +253,49 @@
     (init-registers)
 
     ;; Pre-compute pushed register bytes for stack param offset calculation
-    ;; Conservative estimate: always save all 6 temp regs (R0-R5), plus local regs if used
-    ;; This ensures stack parameter offsets are correct during body generation
-    (let ((estimated-max-reg (if (> *local-reg-count* 0)
-                                  (+ 5 *local-reg-count*)  ; R5 + locals
-                                  5)))                     ; R5 (all temp regs)
-      (setf *pushed-reg-bytes* (* 4 (1+ estimated-max-reg))))
+    ;; Only need conservative estimate when there are stack parameters (>4 params)
+    ;; For <=4 params, we can use actual register usage after body generation
+    (let ((has-stack-params (> *current-param-count* 4)))
+      (when has-stack-params
+        (let ((estimated-max-reg (if (> *local-reg-count* 0)
+                                      (+ 5 *local-reg-count*)  ; R5 + locals
+                                      5)))                     ; R5 (all temp regs)
+          (setf *pushed-reg-bytes* (* 4 (1+ estimated-max-reg)))))
 
-    ;; Generate body first to determine actual register usage
-    ;; Save current code output, generate body, then prepend prologue
-    (let ((saved-code (compiler-state-code *state*)))
-      (setf (compiler-state-code *state*) nil)
+      ;; Generate body first to determine actual register usage
+      ;; Save current code output, generate body, then prepend prologue
+      (let ((saved-code (compiler-state-code *state*)))
+        (setf (compiler-state-code *state*) nil)
 
-      ;; Register parameters in symbol table for body generation
-      (register-parameters params)
+        ;; Register parameters in symbol table for body generation
+        (register-parameters params)
 
-      ;; Generate body
-      (if body-ends-with-return
-          (generate-body-with-final-return body)
-          (generate-statement body))
+        ;; Generate body
+        (if body-ends-with-return
+            (generate-body-with-final-return body)
+            (generate-statement body))
 
-      ;; Epilogue label (target for return statements)
-      (emit-label *function-end-label*)
+        ;; Epilogue label (target for return statements)
+        (emit-label *function-end-label*)
 
-      ;; Now we know actual max register used
-      ;; But we must push at least what we estimated for correct stack offsets
-      (let* ((body-code (nreverse (compiler-state-code *state*)))
-             (actual-max-reg *max-temp-reg-index*)
-             ;; Use the larger of actual and estimated to match offset calculation
-             (max-reg (max actual-max-reg
-                           (if (> *local-reg-count* 0)
-                               (+ 5 *local-reg-count*)
-                               5))))
+        ;; Now we know actual max register used
+        ;; For functions with stack params, use conservative estimate for correct offsets
+        ;; For functions without stack params, use actual register usage
+        ;; Note: If local registers (R6-R9) are used, must save up to highest local reg
+        (let* ((body-code (nreverse (compiler-state-code *state*)))
+               (actual-max-reg *max-temp-reg-index*)
+               ;; If locals use R6-R9, we must save those too
+               (max-local-reg (if (> *local-reg-count* 0)
+                                   (+ 5 *local-reg-count*)  ; R6 is index 6, etc.
+                                   -1))
+               (max-reg (if has-stack-params
+                            ;; Must use conservative estimate to match offset calculation
+                            (max actual-max-reg
+                                 (if (> *local-reg-count* 0)
+                                     (+ 5 *local-reg-count*)
+                                     5))
+                            ;; No stack params - use actual register usage, including locals
+                            (max actual-max-reg max-local-reg))))
 
         ;; Restore original code and emit function
         (setf (compiler-state-code *state*) saved-code)
@@ -304,7 +317,7 @@
           (push instr (compiler-state-code *state*)))
 
         ;; Epilogue with proper POP instructions
-        (generate-epilogue-new max-reg)))
+        (generate-epilogue-new max-reg))))
 
     ;; Exit function scope
     (exit-scope)))
@@ -504,18 +517,22 @@
    - Non-leaf: PUSH-SRP, then PUSH Rn for callee-saved regs
    - Leaf: PUSH Rn for callee-saved regs (if any used)
    Then allocate stack frame for locals + saved params (non-leaf)."
-  (let ((save-reg (intern (format nil "R~d" max-temp-idx) :c-compiler))
+  (let ((save-reg (when (>= max-temp-idx 0)
+                    (intern (format nil "R~d" max-temp-idx) :c-compiler)))
         (param-count *current-param-count*))
 
     ;; Update pushed-reg-bytes to match what we're actually pushing
-    (setf *pushed-reg-bytes* (* 4 (1+ max-temp-idx)))
+    (setf *pushed-reg-bytes* (if (>= max-temp-idx 0)
+                                  (* 4 (1+ max-temp-idx))
+                                  0))
 
     ;; 1. Save return address for non-leaf functions
     (unless *is-leaf-function*
       (emit '(push-srp)))
 
-    ;; 2. Save callee-saved registers with single PUSH instruction
-    (emit `(push-r ,save-reg))
+    ;; 2. Save callee-saved registers with single PUSH instruction (if any used)
+    (when save-reg
+      (emit `(push-r ,save-reg)))
 
     ;; 3. Allocate stack frame for locals + param save area (non-leaf only)
     (let* ((save-param-space (if *is-leaf-function* 0
@@ -539,7 +556,8 @@
 
 (defun generate-epilogue-new (max-temp-idx)
   "Generate function epilogue using efficient POP instructions."
-  (let ((save-reg (intern (format nil "R~d" max-temp-idx) :c-compiler))
+  (let ((save-reg (when (>= max-temp-idx 0)
+                    (intern (format nil "R~d" max-temp-idx) :c-compiler)))
         (param-count *current-param-count*))
 
     ;; 1. Deallocate stack frame (locals + saved params for non-leaf)
@@ -552,8 +570,9 @@
         (emit `(A+=Rx R0))
         (emit `(Rx=A SP))))
 
-    ;; 2. Restore callee-saved registers with single POP instruction
-    (emit `(pop-r ,save-reg))
+    ;; 2. Restore callee-saved registers with single POP instruction (if any saved)
+    (when save-reg
+      (emit `(pop-r ,save-reg)))
 
     ;; 3. Return
     (if *is-leaf-function*
@@ -1040,6 +1059,18 @@
                (and base (expression-uses-mul-p base))))
         (some #'expression-uses-mul-p (ast-node-children node)))))
 
+(defun get-var-local-register (node)
+  "If node is a var-ref in a local register (R6-R9), return that register.
+   Local registers are safe to use directly since they won't be clobbered
+   during expression evaluation. Returns nil otherwise."
+  (when (and (ast-node-p node)
+             (eq (ast-node-type node) 'var-ref))
+    (let* ((name (ast-node-value node))
+           (sym (lookup-symbol name)))
+      (when (and sym (eq (sym-entry-storage sym) :register))
+        ;; offset is the register index (0-3), get-local-reg converts to R6-R9
+        (get-local-reg (sym-entry-offset sym))))))
+
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
   ;; Handle shifts specially - they can optimize for constant counts
@@ -1059,17 +1090,30 @@
          (left-elem-size (pointer-element-size left-type))
          (right-elem-size (pointer-element-size right-type))
          ;; If right operand uses __MUL, use a safe register for left
-         (right-uses-mul (expression-uses-mul-p right)))
+         (right-uses-mul (expression-uses-mul-p right))
+         ;; Check if left is already in a local register (R6-R9) that we can reuse
+         ;; BUT: operators > and <= write to left-reg, so can't use local reg directly
+         (writes-to-left-reg (or (string= op ">") (string= op "<=")))
+         (existing-left-reg (and (not writes-to-left-reg)
+                                  (get-var-local-register left)))
+         ;; Flag whether we need to free the left-reg later
+         (need-free-left nil))
 
-    ;; Generate left operand
-    (generate-expression left)
-
-    ;; Save left result - use safe register if right uses __MUL
-    ;; Use second unused local reg since first is for subscript base
-    (let ((left-reg (if right-uses-mul
-                        (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
-                        (alloc-temp-reg))))
-      (emit `(Rx=A ,left-reg))
+    ;; Generate left operand (skip if already in local register)
+    (let ((left-reg
+           (cond
+             ;; Left is already in a local register - use it directly
+             (existing-left-reg
+              existing-left-reg)
+             ;; Need to evaluate and save to register
+             (t
+              (generate-expression left)
+              (let ((reg (if right-uses-mul
+                             (get-local-reg (1+ *local-reg-count*))
+                             (alloc-temp-reg))))
+                (emit `(Rx=A ,reg))
+                (setf need-free-left (not right-uses-mul))
+                reg)))))
 
       ;; Generate right operand
       (generate-expression right)
@@ -1189,9 +1233,9 @@
 
       (t (compiler-warning "Unknown binary operator: ~a" op)))
 
-    ;; Only free if it was a temp reg (not a safe local reg)
-    (unless right-uses-mul
-      (free-temp-reg left-reg)))))
+      ;; Only free if it was an allocated temp reg
+      (when need-free-left
+        (free-temp-reg left-reg)))))
 
 (defun generate-comparison (left-reg jump-type)
   "Generate code for comparison, result 0 or 1 in A"
@@ -1613,40 +1657,31 @@
                  (push temp arg-temps)))
       (setf arg-temps (nreverse arg-temps))
 
-      ;; Save caller-saved registers (excluding the arg temps we just allocated)
-      (let ((saved-regs (remove-if (lambda (r) (member r arg-temps))
-                                   (save-temp-regs))))
-        (dolist (reg saved-regs)
-          (emit `(push-r ,reg)))
+      ;; Move evaluated args from temp regs to P0-P3
+      ;; Note: R0-R9 are callee-saved, so no need to save caller's temp regs
+      (loop for i from 0 below (min arg-count 4)
+            for temp in arg-temps
+            do (progn
+                 (emit `(A=Rx ,temp))
+                 (emit `(Rx=A ,(nth i *param-regs*)))))
 
-        ;; Move evaluated args from temp regs to P0-P3
-        (loop for i from 0 below (min arg-count 4)
-              for temp in arg-temps
-              do (progn
-                   (emit `(A=Rx ,temp))
-                   (emit `(Rx=A ,(nth i *param-regs*)))))
+      ;; Call function
+      (emit `(jsr ,func-label))
 
-        ;; Call function
-        (emit `(jsr ,func-label))
+      ;; Clean up stack arguments
+      (when (> arg-count 4)
+        (let ((stack-args (* 4 (- arg-count 4))))
+          (emit `(A=Rx SP))
+          (emit `(Rx= ,stack-args R0))
+          (emit '(A+=Rx R0))
+          (emit '(Rx=A SP))))
 
-        ;; Clean up stack arguments
-        (when (> arg-count 4)
-          (let ((stack-args (* 4 (- arg-count 4))))
-            (emit `(A=Rx SP))
-            (emit `(Rx= ,stack-args R0))
-            (emit '(A+=Rx R0))
-            (emit '(Rx=A SP))))
+      ;; Free the arg temps
+      (dolist (temp arg-temps)
+        (free-temp-reg temp))
 
-        ;; Restore caller-saved registers (reverse order)
-        (dolist (reg (reverse saved-regs))
-          (emit `(pop-r ,reg)))
-
-        ;; Free the arg temps
-        (dolist (temp arg-temps)
-          (free-temp-reg temp))
-
-        ;; Result is in P0, move to A
-        (emit '(A=Rx P0))))))
+      ;; Result is in P0, move to A
+      (emit '(A=Rx P0)))))
 
 (defun generate-subscript (node)
   "Generate code for array subscript with sized load"
