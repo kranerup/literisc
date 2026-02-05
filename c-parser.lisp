@@ -828,7 +828,7 @@
           (let ((local-reg-count (compiler-state-local-reg-count *state*)))
             (if (and (not array-size)               ; Not an array
                      (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
-                     (< local-reg-count 4)          ; Have free local regs (R6-R9)
+                     t          ; Have free local regs (R6-R9)
                      (not (is-address-taken name))) ; Address not taken
                 ;; Register allocation
                 (progn

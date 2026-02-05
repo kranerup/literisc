@@ -6,66 +6,112 @@
 (in-package :c-compiler)
 
 ;;; ===========================================================================
-;;; Register Allocation
+;;; Virtual Register Allocation
 ;;; ===========================================================================
 
-;;; Register usage:
-;;; R0-R5  : Temporaries / scratch (for expression evaluation)
-;;; R6-R9  : Local variable registers (when register-allocated)
+;;; Register usage (after allocation):
+;;; R0-R9  : Allocated contiguously from R0 upward for temps and locals
 ;;; P0-P3  : Parameters (R10-R13), P0 is also return value
 ;;; SRP    : Subroutine return pointer (R14)
 ;;; SP     : Stack pointer (R15)
 ;;; A      : Accumulator - primary computation register
+;;;
+;;; During code generation, we use virtual registers V0, V1, V2, ...
+;;; These are mapped to physical registers R0, R1, R2, ... by the allocator.
 
-(defparameter *temp-regs* '(R0 R1 R2 R3 R4 R5))  ; 6 regs for temps
-(defparameter *local-regs* '(R6 R7 R8 R9))        ; 4 regs for locals
 (defparameter *param-regs* '(P0 P1 P2 P3))
 
-;;; Track which temp registers are in use
-(defvar *reg-in-use* nil)
+;;; Virtual register counter for current function
+(defvar *vreg-counter* 0)
 
-;;; Track local register usage for current function
-(defvar *local-reg-count* 0)  ; how many of R6-R9 are used
+;;; Map from local variable index to virtual register
+;;; (replaces fixed R6-R9 allocation)
+(defvar *local-vreg-map* nil)
 
-;;; Track maximum temp register index used in current function (for PUSH/POP)
+;;; Track local register usage for current function (for compatibility)
+(defvar *local-reg-count* 0)
+
+;;; Track maximum physical register index after allocation (for PUSH/POP)
 (defvar *max-temp-reg-index* -1)
 
 ;;; Bytes pushed by push-r for callee-saved regs (used for stack param offset)
 (defvar *pushed-reg-bytes* 0)
 
+;;; Flag to enable/disable virtual register allocation
+;;; When nil, use old physical register allocation for compatibility
+(defvar *use-virtual-regs* t)
+
+;;; Old physical register lists (for fallback mode)
+(defparameter *temp-regs* '(R0 R1 R2 R3 R4 R5))
+(defparameter *local-regs* '(R6 R7 R8 R9))
+(defvar *reg-in-use* nil)
+
 (defun init-registers ()
   "Initialize register allocation state"
-  (setf *reg-in-use* (make-array 6 :initial-element nil))
+  (setf *vreg-counter* 0)
+  (setf *local-vreg-map* (make-hash-table :test 'eql))
   (setf *max-temp-reg-index* -1)
-  (setf *pushed-reg-bytes* 0))
+  (setf *pushed-reg-bytes* 0)
+  ;; Also init old-style tracking for fallback
+  (setf *reg-in-use* (make-array 6 :initial-element nil)))
 
 (defun alloc-temp-reg ()
-  "Allocate a temporary register"
-  (loop for i from 0 below 6
-        when (not (aref *reg-in-use* i))
-        do (progn
-             (setf (aref *reg-in-use* i) t)
-             ;; Track maximum register used for PUSH/POP
-             (when (> i *max-temp-reg-index*)
-               (setf *max-temp-reg-index* i))
-             (return-from alloc-temp-reg (nth i *temp-regs*))))
-  (compiler-error "Out of temporary registers"))
+  "Allocate a temporary register (returns virtual register V0, V1, ...)"
+  (if *use-virtual-regs*
+      ;; Virtual register mode: return V0, V1, V2, ...
+      (prog1 (make-vreg *vreg-counter*)
+        (incf *vreg-counter*))
+      ;; Fallback to physical register mode
+      (loop for i from 0 below 6
+            when (not (aref *reg-in-use* i))
+            do (progn
+                 (setf (aref *reg-in-use* i) t)
+                 (when (> i *max-temp-reg-index*)
+                   (setf *max-temp-reg-index* i))
+                 (return-from alloc-temp-reg (nth i *temp-regs*)))
+            finally (compiler-error "Out of temporary registers"))))
 
 (defun free-temp-reg (reg)
-  "Free a temporary register"
-  (let ((idx (position reg *temp-regs*)))
-    (when idx
-      (setf (aref *reg-in-use* idx) nil))))
+  "Free a temporary register (no-op for virtual registers)"
+  (unless *use-virtual-regs*
+    ;; Only needed in physical register mode
+    (let ((idx (position reg *temp-regs*)))
+      (when idx
+        (setf (aref *reg-in-use* idx) nil)))))
 
 (defun save-temp-regs ()
-  "Return list of temp registers currently in use"
-  (loop for i from 0 below 6
-        when (aref *reg-in-use* i)
-        collect (nth i *temp-regs*)))
+  "Return list of temp registers currently in use (for physical mode only)"
+  (unless *use-virtual-regs*
+    (loop for i from 0 below 6
+          when (aref *reg-in-use* i)
+          collect (nth i *temp-regs*))))
 
 (defun get-local-reg (index)
-  "Get local register by index (0-3 -> R6-R9)"
-  (nth index *local-regs*))
+  "Get register for local variable by index.
+   In virtual mode: returns a virtual register (allocated lazily).
+   In physical mode: returns R6-R9."
+  (if *use-virtual-regs*
+      ;; Virtual register mode: allocate a vreg for this local index
+      (let ((existing (gethash index *local-vreg-map*)))
+        (or existing
+            (let ((vreg (make-vreg *vreg-counter*)))
+              (incf *vreg-counter*)
+              (setf (gethash index *local-vreg-map*) vreg)
+              vreg)))
+      ;; Physical register mode
+      (nth index *local-regs*)))
+
+;;; ===========================================================================
+;;; Code Generation Helpers
+;;; ===========================================================================
+
+(defun emit-test-zero ()
+  "Emit code to test if A is zero (result in flags for jz/jnz).
+   Uses a temp register to hold 0, properly handling virtual registers."
+  (let ((temp (alloc-temp-reg)))
+    (emit `(Rx= 0 ,temp))
+    (emit `(A-=Rx ,temp))
+    (free-temp-reg temp)))
 
 ;;; ===========================================================================
 ;;; Code Generation Context
@@ -226,7 +272,12 @@
    - PUSH-SRP for non-leaf functions
    - PUSH Rn to save R0..Rn (callee-saved registers)
    - POP Rn to restore
-   - POP-A; J-A for non-leaf return, A=Rx SRP; J-A for leaf"
+   - POP-A; J-A for non-leaf return, A=Rx SRP; J-A for leaf
+
+   With virtual register allocation enabled (*use-virtual-regs* t):
+   - Code is generated with virtual registers V0, V1, V2, ...
+   - Register allocator maps them to physical registers R0, R1, R2, ...
+   - This ensures contiguous allocation from R0 upward, minimizing PUSH/POP overhead"
   (let* ((name (ast-node-value node)))
     ;; Skip dead functions (fully inlined with no remaining calls)
     (when (gethash name (compiler-state-dead-functions *state*))
@@ -270,7 +321,7 @@
         ;; Register parameters in symbol table for body generation
         (register-parameters params)
 
-        ;; Generate body
+        ;; Generate body (with virtual registers if enabled)
         (if body-ends-with-return
             (generate-body-with-final-return body)
             (generate-statement body))
@@ -278,46 +329,98 @@
         ;; Epilogue label (target for return statements)
         (emit-label *function-end-label*)
 
-        ;; Now we know actual max register used
-        ;; For functions with stack params, use conservative estimate for correct offsets
-        ;; For functions without stack params, use actual register usage
-        ;; Note: If local registers (R6-R9) are used, must save up to highest local reg
-        (let* ((body-code (nreverse (compiler-state-code *state*)))
-               (actual-max-reg *max-temp-reg-index*)
-               ;; If locals use R6-R9, we must save those too
-               (max-local-reg (if (> *local-reg-count* 0)
-                                   (+ 5 *local-reg-count*)  ; R6 is index 6, etc.
-                                   -1))
-               (max-reg (if has-stack-params
-                            ;; Must use conservative estimate to match offset calculation
-                            (max actual-max-reg
-                                 (if (> *local-reg-count* 0)
-                                     (+ 5 *local-reg-count*)
-                                     5))
-                            ;; No stack params - use actual register usage, including locals
-                            (max actual-max-reg max-local-reg))))
+        ;; Get generated body code
+        (let* ((body-code-raw (nreverse (compiler-state-code *state*)))
+               ;; Run register allocation if using virtual registers
+               (body-code nil)
+               (max-reg -1)
+               (need-regenerate nil))
 
-        ;; Restore original code and emit function
-        (setf (compiler-state-code *state*) saved-code)
+          (if *use-virtual-regs*
+              ;; Virtual register mode: try allocator, fall back if spilling needed
+              (handler-case
+                  (multiple-value-bind (allocated-code allocated-max-reg spill-count)
+                      (allocate-registers body-code-raw)
+                    (let ((spill-size (* spill-count 4)))
+                      (incf *frame-size* spill-size))
+                    (setf body-code allocated-code)
+                    (setf max-reg allocated-max-reg))
+                (spill-needed ()
+                  ;; Fall back to regenerating without virtual registers
+                  (setf need-regenerate t)))
+              ;; Physical register mode: use old-style tracking
+              (let ((actual-max-reg *max-temp-reg-index*)
+                    (max-local-reg (if (> *local-reg-count* 0)
+                                       (+ 5 *local-reg-count*)
+                                       -1)))
+                (setf body-code body-code-raw)
+                (setf max-reg (if has-stack-params
+                                  (max actual-max-reg
+                                       (if (> *local-reg-count* 0)
+                                           (+ 5 *local-reg-count*)
+                                           5))
+                                  (max actual-max-reg max-local-reg)))))
 
-        ;; Function header annotation
-        (emit-comment (format nil "======== function ~a ========" name))
-        (emit-comment (format nil "frame-size: ~a, params: ~a, max-reg: ~a, leaf: ~a"
-                              *frame-size* *current-param-count* max-reg
-                              (if *is-leaf-function* "yes" "no")))
+          ;; If spilling was needed, regenerate body without virtual registers
+          (when need-regenerate
+            (setf (compiler-state-code *state*) nil)
+            (init-registers)
+            (let ((*use-virtual-regs* nil))
+              ;; Clear local vreg map and counter
+              (setf *local-vreg-map* (make-hash-table :test 'eql))
+              (setf *vreg-counter* 0)
+              ;; Re-register parameters without virtual registers
+              (exit-scope)
+              (enter-scope)
+              (register-parameters params)
+              ;; Regenerate body
+              (if body-ends-with-return
+                  (generate-body-with-final-return body)
+                  (generate-statement body))
+              ;; Epilogue label
+              (emit-label *function-end-label*)
+              ;; Get regenerated code
+              (setf body-code (nreverse (compiler-state-code *state*)))
+              ;; Calculate max-reg using old-style tracking
+              (let ((actual-max-reg *max-temp-reg-index*)
+                    (max-local-reg (if (> *local-reg-count* 0)
+                                       (+ 5 *local-reg-count*)
+                                       -1)))
+                (setf max-reg (if has-stack-params
+                                  (max actual-max-reg
+                                       (if (> *local-reg-count* 0)
+                                           (+ 5 *local-reg-count*)
+                                           5))
+                                  (max actual-max-reg max-local-reg))))))
 
-        ;; Function label
-        (emit `(label ,func-label))
+          ;; Restore original code and emit function
+          (setf (compiler-state-code *state*) saved-code)
 
-        ;; Prologue with proper PUSH instructions
-        (generate-prologue-new max-reg)
+          ;; Update pushed-reg-bytes for stack param offset calculation
+          (setf *pushed-reg-bytes* (if (>= max-reg 0)
+                                       (* 4 (1+ max-reg))
+                                       0))
 
-        ;; Append body code
-        (dolist (instr body-code)
-          (push instr (compiler-state-code *state*)))
+          ;; Function header annotation
+          (emit-comment (format nil "======== function ~a ========" name))
+          (emit-comment (format nil "frame-size: ~a, params: ~a, max-reg: ~a, leaf: ~a, vreg: ~a, spills: ~a"
+                                *frame-size* *current-param-count* max-reg
+                                (if *is-leaf-function* "yes" "no")
+                                (if *use-virtual-regs* "yes" "no")
+                                (floor *frame-size* 4)))
 
-        ;; Epilogue with proper POP instructions
-        (generate-epilogue-new max-reg))))
+          ;; Function label
+          (emit `(label ,func-label))
+
+          ;; Prologue with proper PUSH instructions
+          (generate-prologue-new max-reg)
+
+          ;; Append body code (now with physical registers)
+          (dolist (instr body-code)
+            (push instr (compiler-state-code *state*)))
+
+          ;; Epilogue with proper POP instructions
+          (generate-epilogue-new max-reg))))
 
     ;; Exit function scope
     (exit-scope)))
@@ -643,8 +746,7 @@
     (generate-expression condition)
 
     ;; Test condition in A
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (if else-branch
         (emit `(jz ,else-label))
         (emit `(jz ,end-label)))
@@ -676,8 +778,7 @@
 
     ;; Condition
     (generate-expression condition)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jz ,end-label))
 
     ;; Body
@@ -714,8 +815,7 @@
     ;; Condition
     (when condition
       (generate-expression condition)
-      (emit `(Rx= 0 R0))
-      (emit `(A-=Rx R0))
+      (emit-test-zero)
       (emit `(jz ,end-label)))
 
     ;; Body
@@ -751,8 +851,7 @@
 
     ;; Condition
     (generate-expression condition)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jnz ,loop-label))
 
     (emit-label end-label)))
@@ -1108,11 +1207,14 @@
              ;; Need to evaluate and save to register
              (t
               (generate-expression left)
-              (let ((reg (if right-uses-mul
+              ;; In virtual register mode, just allocate a vreg - the calling
+              ;; convention ensures registers are preserved across calls.
+              ;; In physical mode, use a local reg for values live across calls.
+              (let ((reg (if (and (not *use-virtual-regs*) right-uses-mul)
                              (get-local-reg (1+ *local-reg-count*))
                              (alloc-temp-reg))))
                 (emit `(Rx=A ,reg))
-                (setf need-free-left (not right-uses-mul))
+                (setf need-free-left (or *use-virtual-regs* (not right-uses-mul)))
                 reg)))))
 
       ;; Generate right operand
@@ -1269,14 +1371,12 @@
 
     ;; Evaluate left
     (generate-expression left)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jz ,false-label))
 
     ;; Left was true, evaluate right
     (generate-expression right)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jz ,false-label))
 
     ;; Both true
@@ -1296,14 +1396,12 @@
 
     ;; Evaluate left
     (generate-expression left)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jnz ,true-label))
 
     ;; Left was false, evaluate right
     (generate-expression right)
-    (emit `(Rx= 0 R0))
-    (emit `(A-=Rx R0))
+    (emit-test-zero)
     (emit `(jnz ,true-label))
 
     ;; Both false
@@ -1523,29 +1621,31 @@
      (let* ((elem-type (get-subscript-element-type node))
             (elem-size (if elem-type (type-size elem-type) 4))
             (needs-multiply (not (member elem-size '(1 2 4))))
-            ;; Use second unused local reg for value if we need multiply
-            ;; (since multiply clobbers R0-R5, first unused local reg used for base)
-            (value-reg (if needs-multiply
-                           (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
+            ;; In virtual mode, just use alloc-temp-reg - calling convention preserves regs.
+            ;; In physical mode, use local reg for values live across __MUL calls.
+            (value-reg (if (and (not *use-virtual-regs*) needs-multiply)
+                           (get-local-reg (1+ *local-reg-count*))
                            (alloc-temp-reg))))
        (emit `(Rx=A ,value-reg))  ; save value
        (generate-subscript-address node)  ; get address (may call __MUL)
        (if (and elem-type (< (type-size elem-type) 4))
            (emit-store-sized elem-type value-reg)
            (emit `(M[A]=Rx ,value-reg)))  ; store
-       (unless needs-multiply
+       (when (or *use-virtual-regs* (not needs-multiply))
          (free-temp-reg value-reg))))
     (member
      ;; struct.member = value or ptr->member = value
      ;; Check if base expression is a struct array subscript that needs __MUL
      (let* ((base-expr (first (ast-node-children node)))
-            (needs-safe-reg (and (eq (ast-node-type base-expr) 'subscript)
+            (needs-safe-reg (and (not *use-virtual-regs*)
+                                 (eq (ast-node-type base-expr) 'subscript)
                                  (let ((elem-type (get-subscript-element-type base-expr)))
                                    (and elem-type
                                         (not (member (type-size elem-type) '(1 2 4)))))))
-            ;; Use second unused local reg if we need multiply (first is for base)
+            ;; In virtual mode, just use alloc-temp-reg.
+            ;; In physical mode, use local reg for values live across __MUL calls.
             (value-reg (if needs-safe-reg
-                           (get-local-reg (1+ *local-reg-count*))  ; second unused local reg
+                           (get-local-reg (1+ *local-reg-count*))
                            (alloc-temp-reg))))
        (emit `(Rx=A ,value-reg))
        (generate-member-address node)
@@ -1556,7 +1656,7 @@
                                (get-dereferenced-type base-type) base-type))
               (member (lookup-struct-member struct-type member-name)))
          (emit-store-sized (struct-member-type member) value-reg))
-       (unless needs-safe-reg
+       (when (or *use-virtual-regs* (not needs-safe-reg))
          (free-temp-reg value-reg))))
     (otherwise
      (compiler-error "Cannot assign to ~a" (ast-node-type node)))))
@@ -1707,10 +1807,13 @@
          (needs-multiply (not (member elem-size '(1 2 4)))))
     ;; For non-power-of-2 sizes (e.g., structs), we need to call __MUL
     ;; or inline multiply. Both can clobber R0-R5 (inline uses temp regs).
-    ;; Use the first unused local register (R6+) to preserve base address.
+    ;; In physical mode, use local register (R6+) to preserve base address.
+    ;; In virtual mode, just use alloc-temp-reg - calling convention preserves regs.
     (if needs-multiply
         ;; Struct array case: get base first, save to safe reg, then compute offset
-        (let ((base-save-reg (get-local-reg *local-reg-count*)))  ; R6 or higher
+        (let ((base-save-reg (if *use-virtual-regs*
+                                 (alloc-temp-reg)
+                                 (get-local-reg *local-reg-count*))))
           ;; Step 1: Get array base address and save to safe register
           (generate-expression array)
           (emit `(Rx=A ,base-save-reg))  ; save base (safe from multiply)
@@ -1721,7 +1824,9 @@
             (generate-multiply size-reg)
             (free-temp-reg size-reg))
           ;; Step 3: Add base (in safe reg) to offset (in A)
-          (emit `(A+=Rx ,base-save-reg))) ; A = offset + base
+          (emit `(A+=Rx ,base-save-reg))
+          (when *use-virtual-regs*
+            (free-temp-reg base-save-reg)))
         ;; Simple case: no function call, use registers directly
         (let ((base-reg (alloc-temp-reg)))
           ;; Get array base address
@@ -2165,46 +2270,58 @@
 (defun generate-shift-left-loop (left-reg count)
   "Generate left shift loop for constant count"
   (let ((loop-label (gen-label "SHLLOOP"))
-        (end-label (gen-label "SHLEND")))
-    (emit `(Rx= ,count R2))       ; R2 = count
-    (emit `(A=Rx ,left-reg))      ; A = value
+        (end-label (gen-label "SHLEND"))
+        (temp-val (alloc-temp-reg))
+        (temp-count (alloc-temp-reg))
+        (temp-const (alloc-temp-reg)))
+    (emit `(Rx= ,count ,temp-count))       ; temp-count = count
+    (emit `(A=Rx ,left-reg))               ; A = value
     (emit-label loop-label)
-    (emit '(Rx=A R1))             ; save value
-    (emit '(A=Rx R2))
-    (emit '(Rx= 0 R0))
-    (emit '(A-=Rx R0))
+    (emit `(Rx=A ,temp-val))               ; save value
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= 0 ,temp-const))
+    (emit `(A-=Rx ,temp-const))
     (emit `(jz ,end-label))
-    (emit '(A=Rx R2))
-    (emit '(Rx= -1 R0))
-    (emit '(A+=Rx R0))
-    (emit '(Rx=A R2))
-    (emit '(A=Rx R1))
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= -1 ,temp-const))
+    (emit `(A+=Rx ,temp-const))
+    (emit `(Rx=A ,temp-count))
+    (emit `(A=Rx ,temp-val))
     (emit '(A=A<<1))
     (emit `(j ,loop-label))
     (emit-label end-label)
-    (emit '(A=Rx R1))))
+    (emit `(A=Rx ,temp-val))
+    (free-temp-reg temp-const)
+    (free-temp-reg temp-count)
+    (free-temp-reg temp-val)))
 
 (defun generate-shift-left-loop-variable (left-reg)
   "Generate left shift loop for variable count (count already in A)"
   (let ((loop-label (gen-label "SHLLOOP"))
-        (end-label (gen-label "SHLEND")))
-    (emit '(Rx=A R2))             ; R2 = count
-    (emit `(A=Rx ,left-reg))      ; A = value
+        (end-label (gen-label "SHLEND"))
+        (temp-val (alloc-temp-reg))
+        (temp-count (alloc-temp-reg))
+        (temp-const (alloc-temp-reg)))
+    (emit `(Rx=A ,temp-count))             ; temp-count = count
+    (emit `(A=Rx ,left-reg))               ; A = value
     (emit-label loop-label)
-    (emit '(Rx=A R1))             ; save value
-    (emit '(A=Rx R2))
-    (emit '(Rx= 0 R0))
-    (emit '(A-=Rx R0))
+    (emit `(Rx=A ,temp-val))               ; save value
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= 0 ,temp-const))
+    (emit `(A-=Rx ,temp-const))
     (emit `(jz ,end-label))
-    (emit '(A=Rx R2))
-    (emit '(Rx= -1 R0))
-    (emit '(A+=Rx R0))
-    (emit '(Rx=A R2))
-    (emit '(A=Rx R1))
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= -1 ,temp-const))
+    (emit `(A+=Rx ,temp-const))
+    (emit `(Rx=A ,temp-count))
+    (emit `(A=Rx ,temp-val))
     (emit '(A=A<<1))
     (emit `(j ,loop-label))
     (emit-label end-label)
-    (emit '(A=Rx R1))))
+    (emit `(A=Rx ,temp-val))
+    (free-temp-reg temp-const)
+    (free-temp-reg temp-count)
+    (free-temp-reg temp-val)))
 
 (defun generate-shift-right (left-reg right-node)
   "Generate right shift: result = left-reg >> right-node.
@@ -2244,46 +2361,58 @@
 (defun generate-shift-right-loop (left-reg count)
   "Generate right shift loop for constant count"
   (let ((loop-label (gen-label "SHRLOOP"))
-        (end-label (gen-label "SHREND")))
-    (emit `(Rx= ,count R2))       ; R2 = count
-    (emit `(A=Rx ,left-reg))      ; A = value
+        (end-label (gen-label "SHREND"))
+        (temp-val (alloc-temp-reg))
+        (temp-count (alloc-temp-reg))
+        (temp-const (alloc-temp-reg)))
+    (emit `(Rx= ,count ,temp-count))       ; temp-count = count
+    (emit `(A=Rx ,left-reg))               ; A = value
     (emit-label loop-label)
-    (emit '(Rx=A R1))             ; save value
-    (emit '(A=Rx R2))
-    (emit '(Rx= 0 R0))
-    (emit '(A-=Rx R0))
+    (emit `(Rx=A ,temp-val))               ; save value
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= 0 ,temp-const))
+    (emit `(A-=Rx ,temp-const))
     (emit `(jz ,end-label))
-    (emit '(A=Rx R2))
-    (emit '(Rx= -1 R0))
-    (emit '(A+=Rx R0))
-    (emit '(Rx=A R2))
-    (emit '(A=Rx R1))
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= -1 ,temp-const))
+    (emit `(A+=Rx ,temp-const))
+    (emit `(Rx=A ,temp-count))
+    (emit `(A=Rx ,temp-val))
     (emit '(A=A>>1))
     (emit `(j ,loop-label))
     (emit-label end-label)
-    (emit '(A=Rx R1))))
+    (emit `(A=Rx ,temp-val))
+    (free-temp-reg temp-const)
+    (free-temp-reg temp-count)
+    (free-temp-reg temp-val)))
 
 (defun generate-shift-right-loop-variable (left-reg)
   "Generate right shift loop for variable count (count already in A)"
   (let ((loop-label (gen-label "SHRLOOP"))
-        (end-label (gen-label "SHREND")))
-    (emit '(Rx=A R2))             ; R2 = count
-    (emit `(A=Rx ,left-reg))      ; A = value
+        (end-label (gen-label "SHREND"))
+        (temp-val (alloc-temp-reg))
+        (temp-count (alloc-temp-reg))
+        (temp-const (alloc-temp-reg)))
+    (emit `(Rx=A ,temp-count))             ; temp-count = count
+    (emit `(A=Rx ,left-reg))               ; A = value
     (emit-label loop-label)
-    (emit '(Rx=A R1))             ; save value
-    (emit '(A=Rx R2))
-    (emit '(Rx= 0 R0))
-    (emit '(A-=Rx R0))
+    (emit `(Rx=A ,temp-val))               ; save value
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= 0 ,temp-const))
+    (emit `(A-=Rx ,temp-const))
     (emit `(jz ,end-label))
-    (emit '(A=Rx R2))
-    (emit '(Rx= -1 R0))
-    (emit '(A+=Rx R0))
-    (emit '(Rx=A R2))
-    (emit '(A=Rx R1))
+    (emit `(A=Rx ,temp-count))
+    (emit `(Rx= -1 ,temp-const))
+    (emit `(A+=Rx ,temp-const))
+    (emit `(Rx=A ,temp-count))
+    (emit `(A=Rx ,temp-val))
     (emit '(A=A>>1))
     (emit `(j ,loop-label))
     (emit-label end-label)
-    (emit '(A=Rx R1))))
+    (emit `(A=Rx ,temp-val))
+    (free-temp-reg temp-const)
+    (free-temp-reg temp-count)
+    (free-temp-reg temp-val)))
 
 ;;; ===========================================================================
 ;;; Global Variable Generation
