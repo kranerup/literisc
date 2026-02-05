@@ -140,7 +140,10 @@
 ;;; Linear Scan Register Allocator
 ;;; ===========================================================================
 
-(defparameter *num-allocatable-regs* 14)  ; R0-R15 available for allocation, reserve R0/R1 for spills
+(defparameter *num-allocatable-regs* 8)  ; R2-R9 available for allocation
+                                          ; R0/R1 reserved for spill scratch
+                                          ; R10-R13 (P0-P3) are parameter regs
+                                          ; R14 (SRP) and R15 (SP) are reserved
 
 (defun linear-scan-allocate (intervals)
   "Allocate physical registers using linear scan algorithm.
@@ -204,33 +207,33 @@
 
 (defun get-instr-vreg-usage (instr)
   "Analyze an instruction and return which vregs are read and written.
-   Returns a property list like (:reads (V1 V2) :writes (V3))."
+   Returns a property list like (:reads (V1 V2) :writes (V3)).
+   Uses string-based opcode matching to classify instructions:
+   - Opcodes starting with RX= (e.g. Rx=A, Rx=M[A+n]) write to the register (last arg).
+   - Opcodes ending with =RX (e.g. A=Rx, A+=Rx, M[A+n]=Rx) read from the register (last arg).
+   - All other instructions are scanned generically for vregs (treated as reads)."
   (let ((reads nil)
         (writes nil))
     (when (consp instr)
-      (case (car instr)
-        ;; Rx=A Rn -> write
-        ((Rx=A Rx=) (when (vreg-p (caddr instr)) (push (caddr instr) writes)))
-        ;; A=Rx Rn -> read
-        ((A=Rx) (when (vreg-p (cadr instr)) (push (cadr instr) reads)))
-        ;; A+=Rx Rn, A-=Rx Rn, etc -> read
-        ((A+=Rx A-=Rx A&=Rx A|=Rx A^=Rx) (when (vreg-p (cadr instr)) (push (cadr instr) reads)))
-        ;; M[A]=Rx Rn -> read
-        ((M[A]=Rx) (when (vreg-p (cadr instr)) (push (cadr instr) reads)))
-        ;; Rx=M[A] Rn -> write
-        ((Rx=M[A]) (when (vreg-p (cadr instr)) (push (cadr instr) writes)))
-        ;; M[A+n]=Rx offset Rn -> read
-        ((M[A+n]=Rx M[A+n].b=Rx M[A+n].w=Rx) (when (vreg-p (caddr instr)) (push (caddr instr) reads)))
-        ;; Rx=M[A+n] offset Rn -> write
-        ((Rx=M[A+n] Rx=M[A+n].b Rx=M[A+n].w) (when (vreg-p (caddr instr)) (push (caddr instr) writes)))
-        ;; push-r/pop-r can have a vreg, which is both read and written in a sense
-        ;; but they are handled by the max-reg tracking, not allocation.
-        ;; For now, we assume they won't have vregs that need spilling.
-        (otherwise
-         ;; Generic scan for other instructions
-         (labels ((scan (x)
-                    (when (vreg-p x) (pushnew x reads))))
-           (mapc #'scan (cdr instr))))))
+      (let* ((op (car instr))
+             (opname (when (symbolp op) (symbol-name op)))
+             (oplen (when opname (length opname))))
+        (cond
+          ;; Rx=... instructions: write to register (last element)
+          ((and opname (>= oplen 3) (string= opname "RX=" :end1 3))
+           (let ((reg (car (last (cdr instr)))))
+             (when (vreg-p reg)
+               (push reg writes))))
+          ;; ...=Rx instructions: read from register (last element)
+          ((and opname (>= oplen 3) (string= opname "=RX" :start1 (- oplen 3)))
+           (let ((reg (car (last (cdr instr)))))
+             (when (vreg-p reg)
+               (push reg reads))))
+          ;; Everything else: generic scan for vregs (treat as reads)
+          (t
+           (labels ((scan (x)
+                      (when (vreg-p x) (pushnew x reads))))
+             (mapc #'scan (cdr instr)))))))
     (list :reads (nreverse reads) :writes (nreverse writes))))
 
 (defun rewrite-with-physical-regs (code assignment spill-slots)
@@ -326,9 +329,9 @@
         (multiple-value-bind (assignment max-reg spill-slots)
             (linear-scan-allocate intervals)
           (let ((spill-count (hash-table-count spill-slots)))
-            ;; (when (> spill-count 0)
-            ;;   ;; Signal error so caller can fall back to non-virtual-reg mode
-            ;;   (error 'spill-needed :count spill-count))
+            (when (> spill-count 0)
+              ;; Signal error so caller can fall back to non-virtual-reg mode
+              (error 'spill-needed :count spill-count))
             (values (rewrite-with-physical-regs code assignment spill-slots)
                     max-reg
                     spill-count))))))

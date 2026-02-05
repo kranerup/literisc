@@ -825,10 +825,11 @@
           ;; Decide between register and stack allocation
           ;; Use register for scalar (non-array) variables when registers available
           ;; and the variable doesn't have its address taken
+          ;; Limit to 4 local regs (R6-R9) for physical mode compatibility
           (let ((local-reg-count (compiler-state-local-reg-count *state*)))
             (if (and (not array-size)               ; Not an array
                      (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
-                     t          ; Have free local regs (R6-R9)
+                     (< local-reg-count 4)          ; Have free local regs (R6-R9)
                      (not (is-address-taken name))) ; Address not taken
                 ;; Register allocation
                 (progn

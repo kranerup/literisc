@@ -344,7 +344,15 @@
                     (let ((spill-size (* spill-count 4)))
                       (incf *frame-size* spill-size))
                     (setf body-code allocated-code)
-                    (setf max-reg allocated-max-reg))
+                    ;; When stack params exist, force max-reg >= pre-estimated value
+                    ;; so push-r saves enough regs to match the offsets baked into body code
+                    (setf max-reg (if has-stack-params
+                                      (let ((estimated-max-reg
+                                             (if (> *local-reg-count* 0)
+                                                 (+ 5 *local-reg-count*)
+                                                 5)))
+                                        (max allocated-max-reg estimated-max-reg))
+                                      allocated-max-reg)))
                 (spill-needed ()
                   ;; Fall back to regenerating without virtual registers
                   (setf need-regenerate t)))
