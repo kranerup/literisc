@@ -13,6 +13,10 @@
   "Hash table mapping global variable names to their constant values.
    Used for propagating constants during fold-constants.")
 
+(defvar *local-constants* nil
+  "Hash table mapping local variable names to their constant values.
+   Used for propagating local constants within a function.")
+
 (defun collect-assignment-targets (node targets)
   "Collect all variable names that are assigned to in the AST.
    Populates the TARGETS hash table with variable names."
@@ -78,6 +82,57 @@
              globals)
     result))
 
+(defun collect-local-constants (body &optional param-names)
+  "Analyze function body to find local variables that can be constant-propagated.
+   PARAM-NAMES is a list of parameter names that should not be shadowed.
+   Returns a hash table mapping local variable names to their constant values.
+   A local can be propagated if:
+   1. It's initialized with a constant expression, AND
+   2. It's never assigned to after initialization, AND
+   3. Its address is never taken (can't do &x on a propagated constant), AND
+   4. It's not shadowed (no other declaration with the same name in scope), AND
+   5. It doesn't shadow a parameter"
+  (let ((locals (make-hash-table :test 'equal))        ; name -> init-value (after folding)
+        (shadowed (make-hash-table :test 'equal))      ; names that appear multiple times
+        (targets (make-hash-table :test 'equal))       ; assigned-to variables
+        (result (make-hash-table :test 'equal)))       ; propagatable name -> value
+    ;; Mark parameter names as already seen (locals with same name shadow them)
+    (dolist (pname param-names)
+      (when pname
+        (setf (gethash pname locals) :parameter)))
+    ;; First pass: collect assignment targets
+    (collect-assignment-targets body targets)
+    ;; Second pass: collect var-decls with constant initializers
+    ;; Also detect shadowed names (declared more than once, or shadows parameter)
+    (labels ((process-node (node)
+               (when (and node (ast-node-p node))
+                 (case (ast-node-type node)
+                   (var-decl
+                    (let* ((name (ast-node-value node))
+                           (init-expr (first (ast-node-children node))))
+                      ;; Check if this name was already seen (shadowing param or another local)
+                      (if (gethash name locals)
+                          (setf (gethash name shadowed) t)
+                          ;; First occurrence - check if initializer is a constant
+                          (when (and init-expr (is-constant-node init-expr))
+                            (setf (gethash name locals) (get-constant-value init-expr)))))
+                    ;; Also process children (initializer might have nested decls)
+                    (dolist (child (ast-node-children node))
+                      (process-node child)))
+                   (otherwise
+                    (dolist (child (ast-node-children node))
+                      (process-node child)))))))
+      (process-node body))
+    ;; Build result: locals with constant init AND not assigned to AND not address-taken AND not shadowed
+    (maphash (lambda (name init-val)
+               (unless (or (eq init-val :parameter)  ; Skip parameter placeholders
+                           (gethash name targets)
+                           (gethash name shadowed)
+                           (is-address-taken name))
+                 (setf (gethash name result) init-val)))
+             locals)
+    result))
+
 ;;; ===========================================================================
 ;;; Constant Folding
 ;;; ===========================================================================
@@ -106,12 +161,35 @@
                       :source-loc (ast-node-source-loc node))))
 
     (function
-     (make-ast-node :type 'function
-                    :value (ast-node-value node)
-                    :children (mapcar #'fold-constants (ast-node-children node))
-                    :result-type (ast-node-result-type node)
-                    :source-loc (ast-node-source-loc node)
-                    :data (ast-node-data node)))
+     ;; Iteratively fold and propagate local constants until fixed point
+     (let* ((params-node (first (ast-node-children node)))
+            (body-node (second (ast-node-children node)))
+            (folded-params (fold-constants params-node))
+            (current-body (fold-constants body-node))
+            ;; Extract parameter names to avoid propagating locals that shadow them
+            (param-names (mapcar (lambda (p)
+                                   (when (and (ast-node-p p) (eq (ast-node-type p) 'param))
+                                     (ast-node-value p)))
+                                 (ast-node-children params-node)))
+            (prev-const-count 0)
+            (max-iterations 10))  ; Safety limit
+       ;; Iterate: collect local constants, fold with them, repeat until stable
+       (loop for iteration from 1 to max-iterations
+             do (let* ((local-consts (collect-local-constants current-body param-names))
+                       (const-count (hash-table-count local-consts)))
+                  ;; Stop if no new constants found
+                  (when (<= const-count prev-const-count)
+                    (return))
+                  (setf prev-const-count const-count)
+                  ;; Fold with local constants bound
+                  (let ((*local-constants* local-consts))
+                    (setf current-body (fold-constants current-body)))))
+       (make-ast-node :type 'function
+                      :value (ast-node-value node)
+                      :children (list folded-params current-body)
+                      :result-type (ast-node-result-type node)
+                      :source-loc (ast-node-source-loc node)
+                      :data (ast-node-data node))))
 
     (params
      (make-ast-node :type 'params
@@ -230,6 +308,11 @@
          ;; Fold constant global to literal
          ((and *constant-globals* (gethash name *constant-globals*))
           (make-constant-node (gethash name *constant-globals*)
+                              (make-int-type)
+                              (ast-node-source-loc node)))
+         ;; Fold constant local to literal
+         ((and *local-constants* (gethash name *local-constants*))
+          (make-constant-node (gethash name *local-constants*)
                               (make-int-type)
                               (ast-node-source-loc node)))
          ;; Not a constant - keep as var-ref

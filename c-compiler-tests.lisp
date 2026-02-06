@@ -4019,6 +4019,39 @@ void modify() { g = 200; }
 int main() { modify(); return g; }
 "))))
 
+(deftest test-local-constant-propagation ()
+  "Test: local constant propagation chains"
+  (check
+    ;; Full chain propagation: global -> locals -> expression
+    (= 26625 (run-c-program "
+const int x = 100;
+int main() {
+    int a = x << 1;   // 200
+    int b = x << 3;   // 800
+    int c = x << 8;   // 25600
+    int d = x >> 2;   // 25
+    return a + b + c + d;  // Should fold to 26625
+}
+"))
+    ;; Chained local constants
+    (= 33 (run-c-program "
+int main() {
+    int a = 2;
+    int b = a + 1;      // 3
+    int c = b * 2;      // 6
+    int d = c + a + b;  // 6 + 2 + 3 = 11
+    return a * b * c / d * d;  // 2*3*6/11*11 = 36/11*11 = 3*11 = 33
+}
+"))
+    ;; Local with no initializer should not be propagated
+    (= 100 (run-c-program "
+int main() {
+    int x;
+    x = 100;
+    return x;
+}
+"))))
+
 (deftest test-phase22-new-features ()
   "Run Phase 22 new C language feature tests"
   (combine-results
@@ -4032,7 +4065,8 @@ int main() { modify(); return g; }
     (test-global-init)
     (test-const-global)
     (test-unmodified-global-propagation)
-    (test-modified-global-no-propagation)))
+    (test-modified-global-no-propagation)
+    (test-local-constant-propagation)))
 
 (deftest test-c-compiler ()
   "Run all C compiler tests"
