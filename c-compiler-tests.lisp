@@ -1462,6 +1462,38 @@ int main() {
   return x;
 }"))))
 
+(deftest test-triple-pointer ()
+  "Test: triple pointer (int***)"
+  (check
+    ;; Basic triple pointer dereference
+    (= 1 (run-and-get-result "
+int main() {
+  int x = 1;
+  int *p = &x;
+  int **pp = &p;
+  int ***ppp = &pp;
+  return ***ppp;
+}"))
+    ;; Modify through triple pointer
+    (= 99 (run-and-get-result "
+int main() {
+  int x = 0;
+  int *p = &x;
+  int **pp = &p;
+  int ***ppp = &pp;
+  ***ppp = 99;
+  return x;
+}"))
+    ;; Access intermediate levels
+    (= 42 (run-and-get-result "
+int main() {
+  int x = 42;
+  int *p = &x;
+  int **pp = &p;
+  int ***ppp = &pp;
+  return **(*ppp);
+}"))))
+
 (deftest test-pointer-null ()
   "Test: null pointer and zero comparison"
   (check
@@ -1517,6 +1549,7 @@ int main() {
     (test-array-as-param)
     (test-pointer-subscript)
     (test-double-pointer)
+    (test-triple-pointer)
     (test-pointer-null)
     (test-advanced-pointer-operations)))
 
@@ -3679,6 +3712,216 @@ int main() {
     (test-regpressure-loops-with-locals)
     (test-regpressure-mixed-operations)))
 
+;;; ===========================================================================
+;;; Phase 22 Tests: Additional C Language Features
+;;; (union, static, goto, volatile)
+;;; ===========================================================================
+
+(deftest test-union-basic ()
+  "Test: basic union functionality"
+  (check
+    ;; Union members share the same memory (int as char)
+    (= 65 (run-and-get-result "
+union Data { int i; char c; };
+int main() {
+  union Data d;
+  d.i = 0x41;
+  return d.c;
+}"))
+    ;; Union size is max of member sizes
+    (= 4 (run-and-get-result "
+union Data { int i; char c; };
+int main() {
+  return sizeof(union Data);
+}"))
+    ;; Write through one member, read through another
+    (= 255 (run-and-get-result "
+union Data { int i; unsigned char c; };
+int main() {
+  union Data d;
+  d.i = 255;
+  return d.c;
+}"))))
+
+(deftest test-union-pointer ()
+  "Test: union with pointer access"
+  (check
+    ;; Access union through pointer
+    (= 42 (run-and-get-result "
+union U { int x; char c; };
+int main() {
+  union U u;
+  union U *p = &u;
+  p->x = 42;
+  return u.x;
+}"))
+    ;; Modify through pointer
+    (= 100 (run-and-get-result "
+union U { int val; };
+int main() {
+  union U u;
+  union U *p = &u;
+  u.val = 0;
+  p->val = 100;
+  return u.val;
+}"))))
+
+(deftest test-union-in-struct ()
+  "Test: union inside struct and vice versa"
+  (check
+    ;; Union with multiple same-size members
+    (= 1000 (run-and-get-result "
+union IntOrPtr { int i; int *p; };
+int main() {
+  union IntOrPtr u;
+  int x = 1000;
+  u.p = &x;
+  return *u.p;
+}"))))
+
+(deftest test-static-local ()
+  "Test: static local variables"
+  (check
+    ;; Static local persists across calls
+    (= 3 (run-and-get-result "
+int counter() {
+  static int n = 0;
+  n++;
+  return n;
+}
+int main() {
+  counter();
+  counter();
+  return counter();
+}"))
+    ;; Multiple static locals
+    (= 15 (run-and-get-result "
+int accumulate(int x) {
+  static int sum = 0;
+  static int count = 0;
+  sum += x;
+  count++;
+  return sum;
+}
+int main() {
+  accumulate(1);
+  accumulate(2);
+  accumulate(3);
+  accumulate(4);
+  return accumulate(5);
+}"))
+    ;; Static in different functions are independent
+    (= 9 (run-and-get-result "
+int f() { static int x = 0; x += 2; return x; }
+int g() { static int x = 0; x += 3; return x; }
+int main() {
+  f(); f();  // x in f = 4
+  g();       // x in g = 3
+  return f() + g() - 3;  // (6) + (6) - 3 = 9
+}"))
+))
+
+(deftest test-goto-basic ()
+  "Test: goto statement and labels"
+  (check
+    ;; Basic goto forward
+    (= 0 (run-and-get-result "
+int main() {
+  int x = 0;
+  goto skip;
+  x = 100;
+skip:
+  return x;
+}"))
+    ;; Goto backward (simple loop)
+    (= 10 (run-and-get-result "
+int main() {
+  int i = 0;
+loop:
+  i++;
+  if (i < 10) goto loop;
+  return i;
+}"))
+    ;; Multiple labels
+    (= 3 (run-and-get-result "
+int main() {
+  int x = 0;
+  goto first;
+second:
+  x++;
+  goto done;
+first:
+  x = 2;
+  goto second;
+done:
+  return x;
+}"))))
+
+(deftest test-goto-nested ()
+  "Test: goto with nested blocks"
+  (check
+    ;; Jump out of loop
+    (= 5 (run-and-get-result "
+int main() {
+  int i;
+  for (i = 0; i < 100; i++) {
+    if (i == 5) goto out;
+  }
+out:
+  return i;
+}"))
+    ;; Jump out of nested if
+    (= 42 (run-and-get-result "
+int main() {
+  int x = 42;
+  if (1) {
+    if (1) {
+      goto end;
+    }
+    x = 0;
+  }
+end:
+  return x;
+}"))))
+
+(deftest test-volatile-basic ()
+  "Test: volatile qualifier (forces memory access)"
+  (check
+    ;; Basic volatile variable
+    (= 42 (run-and-get-result "
+int main() {
+  volatile int x = 42;
+  return x;
+}"))
+    ;; Volatile prevents register allocation
+    (= 10 (run-and-get-result "
+int main() {
+  volatile int x = 0;
+  int i;
+  for (i = 0; i < 10; i++) {
+    x++;
+  }
+  return x;
+}"))
+    ;; Volatile pointer
+    (= 99 (run-and-get-result "
+int main() {
+  int y = 99;
+  volatile int *p = &y;
+  return *p;
+}"))))
+
+(deftest test-phase22-new-features ()
+  "Run Phase 22 new C language feature tests"
+  (combine-results
+    (test-union-basic)
+    (test-union-pointer)
+    (test-union-in-struct)
+    (test-static-local)
+    (test-goto-basic)
+    (test-goto-nested)
+    (test-volatile-basic)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -3702,7 +3945,8 @@ int main() {
     (test-phase18-strings)
     (test-phase19-peephole)
     (test-phase20-typedef)
-    (test-phase21-regpressure)))
+    (test-phase21-regpressure)
+    (test-phase22-new-features)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

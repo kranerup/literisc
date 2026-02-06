@@ -49,11 +49,12 @@
 
 ;;; Type descriptor
 (defstruct type-desc
-  base           ; int, char, void, struct
+  base           ; int, char, void, struct, union
   pointer-level  ; 0 = not a pointer, 1 = *, 2 = **, etc.
   array-size     ; nil for non-arrays, integer for arrays
   size           ; 1, 2, or 4 bytes (nil defaults based on base type)
   unsigned-p     ; t for unsigned, nil for signed
+  volatile-p     ; t for volatile, prevents register allocation
   enum-tag       ; nil, :anonymous, or tag-name string for enum types
   struct-tag)    ; nil, :anonymous, or tag-name string for struct types
 
@@ -106,6 +107,7 @@
   (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
   (struct-types (make-hash-table :test 'equal))  ; tag-name -> struct-def
+  (union-types (make-hash-table :test 'equal))   ; tag-name -> struct-def (all offsets=0)
   (typedef-types (make-hash-table :test 'equal)) ; typedef-name -> type-desc
   (peephole nil))                                ; enable peephole optimization
 
@@ -445,6 +447,10 @@
      (let ((def (gethash (type-desc-struct-tag type)
                          (compiler-state-struct-types *state*))))
        (if def (struct-def-alignment def) 4)))
+    ((eq (type-desc-base type) 'union)
+     (let ((def (gethash (type-desc-struct-tag type)
+                         (compiler-state-union-types *state*))))
+       (if def (struct-def-alignment def) 4)))
     (t (min 4 (type-size type)))))
 
 (defun make-struct-type (tag-name)
@@ -455,10 +461,21 @@
                     :size (if def (struct-def-size def) 0)
                     :struct-tag (or tag-name :anonymous))))
 
+(defun make-union-type (tag-name)
+  "Create a type descriptor for a union type"
+  (let ((def (when tag-name
+               (gethash tag-name (compiler-state-union-types *state*)))))
+    (make-type-desc :base 'union :pointer-level 0 :array-size nil
+                    :size (if def (struct-def-size def) 0)
+                    :struct-tag (or tag-name :anonymous))))
+
 (defun lookup-struct-member (struct-type member-name)
-  "Look up a member in a struct type, returns struct-member or nil"
+  "Look up a member in a struct or union type, returns struct-member or nil"
   (let* ((tag (type-desc-struct-tag struct-type))
-         (def (gethash tag (compiler-state-struct-types *state*))))
+         (base (type-desc-base struct-type))
+         ;; Check both struct and union registries
+         (def (or (gethash tag (compiler-state-struct-types *state*))
+                  (gethash tag (compiler-state-union-types *state*)))))
     (when def
       (find member-name (struct-def-members def)
             :key #'struct-member-name :test #'string=))))
@@ -472,6 +489,11 @@
     ((eq (type-desc-base type) 'struct)
      (let ((def (gethash (type-desc-struct-tag type)
                          (compiler-state-struct-types *state*))))
+       (if def (struct-def-size def) 0)))
+    ;; Union types - look up size from definition
+    ((eq (type-desc-base type) 'union)
+     (let ((def (gethash (type-desc-struct-tag type)
+                         (compiler-state-union-types *state*))))
        (if def (struct-def-size def) 0)))
     ;; Use explicit size if set
     ((type-desc-size type) (type-desc-size type))

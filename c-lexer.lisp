@@ -31,7 +31,7 @@
 (defparameter *keywords*
   '("int" "char" "void" "if" "else" "while" "for" "do"
     "return" "break" "continue" "sizeof" "struct" "union"
-    "typedef" "static" "extern" "const" "unsigned" "signed"
+    "typedef" "static" "extern" "const" "volatile" "unsigned" "signed"
     "short" "long" "switch" "case" "default" "enum" "goto"
     "inline"
     ;; C99 fixed-width integer types

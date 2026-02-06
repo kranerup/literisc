@@ -315,6 +315,46 @@
       (compiler-error "Expected struct tag name or body"))
     (make-struct-type tag-name)))
 
+(defun parse-union-specifier ()
+  "Parse: union [tag] [{ member-list }]
+   Unlike struct, all union members have offset 0, and size is max of member sizes."
+  (expect-token 'keyword "union")
+  (let ((tag-name nil) (has-body nil))
+    ;; Optional tag name
+    (when (check-token 'identifier)
+      (setf tag-name (token-value (advance-token))))
+    ;; Optional body
+    (when (match-token 'punctuation "{")
+      (setf has-body t)
+      (let ((members nil) (max-size 0) (max-align 1))
+        (loop until (check-token 'punctuation "}")
+              do (multiple-value-bind (member-list next-offset)
+                     (parse-struct-member-declaration 0)  ; Always pass 0 for union
+                   (declare (ignore next-offset))
+                   (dolist (m member-list)
+                     ;; For union, override offset to 0 and track max size
+                     (setf (struct-member-offset m) 0)
+                     (let ((member-type (struct-member-type m)))
+                       (setf max-size (max max-size (type-size member-type)))
+                       (setf max-align (max max-align (type-alignment member-type)))))
+                   (setf members (append members member-list))))
+        (expect-token 'punctuation "}")
+        (let ((def (make-struct-def :tag tag-name
+                                    :members members
+                                    :size (align-to max-size max-align)
+                                    :alignment max-align)))
+          (when tag-name
+            (setf (gethash tag-name (compiler-state-union-types *state*)) def))
+          ;; For anonymous unions, generate a unique tag
+          (unless tag-name
+            (let ((anon-tag (format nil "__anon_union_~a"
+                                    (incf (compiler-state-label-counter *state*)))))
+              (setf (gethash anon-tag (compiler-state-union-types *state*)) def)
+              (setf tag-name anon-tag))))))
+    (unless (or tag-name has-body)
+      (compiler-error "Expected union tag name or body"))
+    (make-union-type tag-name)))
+
 ;;; ===========================================================================
 ;;; Type Parsing
 ;;; ===========================================================================
@@ -351,12 +391,14 @@
 
 (defun parse-type-specifier ()
   "Parse a type specifier with modifiers (signed/unsigned, short/long)"
-  ;; Handle enum and struct first
+  ;; Handle enum, struct, and union first
   (cond
     ((check-token 'keyword "enum")
      (parse-enum-specifier))
     ((check-token 'keyword "struct")
      (parse-struct-specifier))
+    ((check-token 'keyword "union")
+     (parse-union-specifier))
     ;; Handle C99 fixed-width types
     ((match-token 'keyword "int8_t")
      (make-int8-type nil))
@@ -422,18 +464,21 @@
                           (token-value (current-token)))))))))
 
 (defun parse-type ()
-  "Parse a full type including pointer levels"
-  (let ((base-type (parse-type-specifier))
-        (ptr-level 0))
-    ;; Count pointer stars
-    (loop while (match-token 'operator "*")
-          do (incf ptr-level))
-    (make-type-desc :base (type-desc-base base-type)
-                    :pointer-level ptr-level
-                    :array-size nil
-                    :size (type-desc-size base-type)
-                    :unsigned-p (type-desc-unsigned-p base-type)
-                    :struct-tag (type-desc-struct-tag base-type))))
+  "Parse a full type including volatile qualifier and pointer levels"
+  ;; Check for volatile qualifier (can appear before type)
+  (let ((is-volatile (match-token 'keyword "volatile")))
+    (let ((base-type (parse-type-specifier))
+          (ptr-level 0))
+      ;; Count pointer stars
+      (loop while (match-token 'operator "*")
+            do (incf ptr-level))
+      (make-type-desc :base (type-desc-base base-type)
+                      :pointer-level ptr-level
+                      :array-size nil
+                      :size (type-desc-size base-type)
+                      :unsigned-p (type-desc-unsigned-p base-type)
+                      :volatile-p is-volatile
+                      :struct-tag (type-desc-struct-tag base-type)))))
 
 ;;; ===========================================================================
 ;;; Expression Parsing (Precedence Climbing)
@@ -542,7 +587,7 @@
                             (member (token-value next)
                                     '("int" "char" "void" "unsigned" "signed" "short" "long"
                                       "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                                      "enum" "struct")
+                                      "enum" "struct" "union" "volatile")
                                     :test #'string=))
                        ;; Typedef names are identifiers in typedef-types
                        (and (eq (token-type next) 'identifier)
@@ -682,6 +727,19 @@
      (expect-token 'punctuation ";")
      (make-node 'continue))
 
+    ;; Goto statement
+    ((check-token 'keyword "goto")
+     (parse-goto-statement))
+
+    ;; Labeled statement (identifier followed by colon)
+    ;; Need to look ahead to distinguish from expression statement
+    ((and (check-token 'identifier)
+          (let ((next (peek-token 1)))
+            (and next
+                 (eq (token-type next) 'punctuation)
+                 (string= (token-value next) ":"))))
+     (parse-labeled-statement))
+
     ;; Empty statement
     ((match-token 'punctuation ";")
      (make-node 'empty))
@@ -693,13 +751,13 @@
          (parse-expression-statement)))))
 
 (defun is-type-token (tok)
-  "Check if token starts a type declaration"
+  "Check if token starts a type declaration (including storage class specifiers)"
   (and tok
        (or (and (eq (token-type tok) 'keyword)
                 (member (token-value tok)
                         '("int" "char" "void" "unsigned" "signed" "short" "long"
                           "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                          "enum" "struct")
+                          "enum" "struct" "union" "volatile" "static")
                         :test #'string=))
            ;; Typedef names are identifiers
            (and (eq (token-type tok) 'identifier)
@@ -797,70 +855,112 @@
     (expect-token 'punctuation ";")
     (make-node 'expr-stmt :children (list expr))))
 
-(defun parse-local-declaration ()
-  "Parse a local variable declaration"
-  (let ((var-type (parse-type))
-        (decls nil))
-    ;; Parse declarators
-    (loop
-      (let* ((name (token-value (expect-token 'identifier)))
-             (array-size nil))
-        ;; Check for array declaration
-        (when (match-token 'punctuation "[")
-          (when (check-token 'number)
-            (setf array-size (token-value (advance-token))))
-          (expect-token 'punctuation "]")
-          (setf var-type (make-type-desc :base (type-desc-base var-type)
-                                         :pointer-level (type-desc-pointer-level var-type)
-                                         :array-size array-size
-                                         :size (type-desc-size var-type)
-                                         :unsigned-p (type-desc-unsigned-p var-type)
-                                         :struct-tag (type-desc-struct-tag var-type))))
-
-        ;; Check for initializer
-        (let ((init nil))
-          (when (match-token 'operator "=")
-            (setf init (parse-assignment-expression)))
-
-          ;; Decide between register and stack allocation
-          ;; Use register for scalar (non-array) variables when registers available
-          ;; and the variable doesn't have its address taken
-          ;; Limit to 4 local regs (R6-R9) for physical mode compatibility
-          (let ((local-reg-count (compiler-state-local-reg-count *state*)))
-            (if (and (not array-size)               ; Not an array
-                     (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
-                     (< local-reg-count 4)          ; Have free local regs (R6-R9)
-                     (not (is-address-taken name))) ; Address not taken
-                ;; Register allocation
-                (progn
-                  (add-symbol name var-type :register local-reg-count)
-                  (incf (compiler-state-local-reg-count *state*)))
-                ;; Stack allocation (arrays or when out of registers)
-                (let* ((size (if array-size
-                                 (* array-size (type-size var-type))
-                                 (type-size var-type)))
-                       (elem-size (type-size var-type))
-                       (alignment (if (>= elem-size 4) 4
-                                     (if (>= elem-size 2) 2 1)))
-                       (current-offset (compiler-state-local-offset *state*))
-                       (aligned-offset (- current-offset
-                                          (mod current-offset alignment)))
-                       (offset (- aligned-offset size)))
-                  (setf (compiler-state-local-offset *state*) offset)
-                  (add-symbol name var-type :local offset))))
-
-          (push (make-node 'var-decl
-                           :value name
-                           :children (when init (list init))
-                           :result-type var-type)
-                decls)))
-
-      ;; Check for more declarators
-      (unless (match-token 'punctuation ",")
-        (return)))
-
+(defun parse-goto-statement ()
+  "Parse a goto statement: goto label;"
+  (expect-token 'keyword "goto")
+  (let ((label-name (token-value (expect-token 'identifier))))
     (expect-token 'punctuation ";")
-    (make-node 'decl-list :children (reverse decls))))
+    (make-node 'goto :value label-name)))
+
+(defun parse-labeled-statement ()
+  "Parse a labeled statement: label: statement"
+  (let ((label-name (token-value (advance-token))))  ; consume identifier
+    (expect-token 'punctuation ":")  ; consume colon
+    (let ((stmt (parse-statement)))  ; parse the following statement
+      (make-node 'labeled-stmt :value label-name :children (list stmt)))))
+
+(defun parse-local-declaration ()
+  "Parse a local variable declaration, including static locals"
+  ;; Check for static keyword
+  (let ((is-static (match-token 'keyword "static")))
+    (let ((var-type (parse-type))
+          (decls nil))
+      ;; Parse declarators
+      (loop
+        (let* ((name (token-value (expect-token 'identifier)))
+               (array-size nil))
+          ;; Check for array declaration
+          (when (match-token 'punctuation "[")
+            (when (check-token 'number)
+              (setf array-size (token-value (advance-token))))
+            (expect-token 'punctuation "]")
+            (setf var-type (make-type-desc :base (type-desc-base var-type)
+                                           :pointer-level (type-desc-pointer-level var-type)
+                                           :array-size array-size
+                                           :size (type-desc-size var-type)
+                                           :unsigned-p (type-desc-unsigned-p var-type)
+                                           :struct-tag (type-desc-struct-tag var-type))))
+
+          ;; Check for initializer
+          (let ((init nil)
+                (init-value 0))  ; Default init for static
+            (when (match-token 'operator "=")
+              (setf init (parse-assignment-expression))
+              ;; For static locals, try to evaluate constant initializer
+              (when is-static
+                (let ((const-val (evaluate-constant-expression init)))
+                  (when const-val
+                    (setf init-value const-val)))))
+
+            (if is-static
+                ;; Static local - store in data section with unique label
+                (let* ((func-name (or (compiler-state-current-function *state*) "global"))
+                       (label-name (format nil "__static_~a_~a_~a"
+                                           func-name name
+                                           (incf (compiler-state-label-counter *state*))))
+                       (label-sym (intern (string-upcase label-name) :c-compiler)))
+                  ;; Register symbol with :static-local storage, offset stores init value
+                  (add-symbol name var-type :static-local label-sym)
+                  ;; Record the static data for emission (label, initial value, size)
+                  (push (list label-sym init-value (type-size var-type))
+                        (compiler-state-data *state*))
+                  ;; For static, we don't use the init AST node - already handled
+                  (push (make-node 'var-decl
+                                   :value name
+                                   :children nil  ; No runtime init for static
+                                   :result-type var-type
+                                   :data :static)
+                        decls))
+                ;; Non-static local - existing logic
+                (progn
+                  ;; Decide between register and stack allocation
+                  (let ((local-reg-count (compiler-state-local-reg-count *state*)))
+                    (if (and (not array-size)               ; Not an array
+                             (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
+                             (not (eq (type-desc-base var-type) 'union))  ; Not a union
+                             (not (type-desc-volatile-p var-type))        ; Not volatile
+                             (< local-reg-count 4)          ; Have free local regs (R6-R9)
+                             (not (is-address-taken name))) ; Address not taken
+                        ;; Register allocation
+                        (progn
+                          (add-symbol name var-type :register local-reg-count)
+                          (incf (compiler-state-local-reg-count *state*)))
+                        ;; Stack allocation (arrays or when out of registers)
+                        (let* ((size (if array-size
+                                         (* array-size (type-size var-type))
+                                         (type-size var-type)))
+                               (elem-size (type-size var-type))
+                               (alignment (if (>= elem-size 4) 4
+                                             (if (>= elem-size 2) 2 1)))
+                               (current-offset (compiler-state-local-offset *state*))
+                               (aligned-offset (- current-offset
+                                                  (mod current-offset alignment)))
+                               (offset (- aligned-offset size)))
+                          (setf (compiler-state-local-offset *state*) offset)
+                          (add-symbol name var-type :local offset))))
+
+                  (push (make-node 'var-decl
+                                   :value name
+                                   :children (when init (list init))
+                                   :result-type var-type)
+                        decls)))))
+
+        ;; Check for more declarators
+        (unless (match-token 'punctuation ",")
+          (return)))
+
+      (expect-token 'punctuation ";")
+      (make-node 'decl-list :children (reverse decls)))))
 
 ;;; ===========================================================================
 ;;; Top-Level Parsing
@@ -975,6 +1075,8 @@
   ;; Check for typedef first
   (when (check-token 'keyword "typedef")
     (return-from parse-top-level (parse-typedef-declaration)))
+  ;; Check for static keyword (no-op for functions, just consume it)
+  (match-token 'keyword "static")
   ;; Check for inline keyword
   (let ((is-inline (match-token 'keyword "inline")))
     ;; Parse type and name

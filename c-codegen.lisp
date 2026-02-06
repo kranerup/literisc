@@ -126,6 +126,7 @@
 (defvar *current-param-count* 0) ; number of parameters in current function
 (defvar *param-save-offset* 0)  ; offset where saved params start on stack
 (defvar *skip-final-return-jump* nil) ; when t, generate-return skips the jump
+(defvar *user-labels* nil)      ; hash table: user label name -> generated asm label
 
 ;;; ===========================================================================
 ;;; Sized Memory Access Helpers
@@ -249,7 +250,23 @@
 
   ;; Generate code for each function/declaration
   (dolist (child (ast-node-children ast))
-    (generate-top-level child)))
+    (generate-top-level child))
+
+  ;; Generate static local data section
+  ;; Format: (label init-value size) stored during parsing
+  (when (compiler-state-data *state*)
+    (emit-comment "======== static local variables ========")
+    ;; Ensure proper alignment for data section
+    (emit '(lalign-dword 0))
+    (dolist (static-entry (reverse (compiler-state-data *state*)))
+      (let ((label (first static-entry))
+            (init-value (second static-entry))
+            (size (third static-entry)))
+        (emit `(label ,label))
+        (case size
+          (1 (emit `(abyte ,init-value)))
+          (2 (emit `(aword ,init-value)))
+          (otherwise (emit `(adword ,init-value))))))))
 
 (defun generate-top-level (node)
   "Generate code for a top-level declaration"
@@ -293,6 +310,7 @@
          (*frame-size* (or (getf func-data :frame-size) 0))
          (*current-param-count* (or (getf func-data :param-count) 0))
          (*local-reg-count* (or (getf func-data :local-reg-count) 0))
+         (*user-labels* (make-hash-table :test 'equal))  ; Reset user labels for each function
          (body-ends-with-return (ends-with-return-p body)))
 
     ;; Set current function for symbol lookup
@@ -732,6 +750,9 @@
       ;; Inline-related nodes
       (inline-return-jump (generate-inline-return-jump node))
       (inline-return-label (generate-inline-return-label node))
+      ;; Goto and labels
+      (goto (generate-goto node))
+      (labeled-stmt (generate-labeled-stmt node))
       (otherwise
        (compiler-warning "Unknown statement type: ~a" (ast-node-type node))))))
 
@@ -889,6 +910,30 @@
   (if *continue-label*
       (emit `(j ,*continue-label*))
       (compiler-error "continue statement outside loop")))
+
+(defun get-or-create-user-label (name)
+  "Get the assembly label for a user-defined label, creating it if needed"
+  (or (gethash name *user-labels*)
+      (let ((asm-label (gen-label (format nil "USR_~a" (string-upcase name)))))
+        (setf (gethash name *user-labels*) asm-label)
+        asm-label)))
+
+(defun generate-goto (node)
+  "Generate code for a goto statement"
+  (let* ((label-name (ast-node-value node))
+         (asm-label (get-or-create-user-label label-name)))
+    (emit `(j ,asm-label))))
+
+(defun generate-labeled-stmt (node)
+  "Generate code for a labeled statement"
+  (let* ((label-name (ast-node-value node))
+         (asm-label (get-or-create-user-label label-name))
+         (stmt (first (ast-node-children node))))
+    ;; Emit the label
+    (emit-label asm-label)
+    ;; Generate the associated statement
+    (when stmt
+      (generate-statement stmt))))
 
 (defun generate-expr-stmt (node)
   "Generate code for an expression statement"
@@ -1061,7 +1106,21 @@
              (let ((temp (alloc-temp-reg)))
                (emit `(Rx= ,value ,temp))
                (emit `(A=Rx ,temp))
-               (free-temp-reg temp))))))))
+               (free-temp-reg temp)))))
+
+      (:static-local
+       ;; Static local - load from global label (stored in offset field)
+       (let ((label (sym-entry-offset sym))
+             (var-type (sym-entry-type sym))
+             (temp (alloc-temp-reg)))
+         (emit `(Rx= ,label ,temp))
+         (emit `(A=Rx ,temp))
+         (emit-load-sized var-type temp)
+         (emit `(A=Rx ,temp))
+         (free-temp-reg temp)
+         ;; Apply sign extension for signed sub-word types
+         (when var-type
+           (emit-promote-to-int var-type)))))))
 
 (defun generate-store-local (offset &optional var-type)
   "Generate code to store A to a local variable at offset with optional sized store"
@@ -1598,6 +1657,19 @@
               (free-temp-reg value-reg)))
            (:global
             (let ((label (intern (string-upcase name) :c-compiler))
+                  (value-reg (alloc-temp-reg))
+                  (addr-reg (alloc-temp-reg)))
+              (emit `(Rx=A ,value-reg))
+              (emit `(Rx= ,label ,addr-reg))
+              (emit `(A=Rx ,addr-reg))
+              (if (and var-type (< (type-size var-type) 4))
+                  (emit-store-sized var-type value-reg)
+                  (emit `(M[A]=Rx ,value-reg)))
+              (free-temp-reg addr-reg)
+              (free-temp-reg value-reg)))
+           (:static-local
+            ;; Static local - store to global label (stored in offset field)
+            (let ((label (sym-entry-offset sym))
                   (value-reg (alloc-temp-reg))
                   (addr-reg (alloc-temp-reg)))
               (emit `(Rx=A ,value-reg))
