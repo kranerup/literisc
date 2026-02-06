@@ -3911,6 +3911,41 @@ int main() {
   return *p;
 }"))))
 
+(deftest test-global-init ()
+  "Test: global variable initialization"
+  (check
+    ;; Basic global initialization
+    (= 100 (run-and-get-result "
+int x = 100;
+int main() { return x; }
+"))
+    ;; Global with expression (constant folding)
+    (= 42 (run-and-get-result "
+int x = 40 + 2;
+int main() { return x; }
+"))
+    ;; Multiple globals with init
+    (= 30 (run-and-get-result "
+int a = 10;
+int b = 20;
+int main() { return a + b; }
+"))
+    ;; Global used in computation (200 + 800 + 25 = 1025)
+    (= 1025 (run-and-get-result "
+int x = 100;
+int main() {
+    int a = x << 1;
+    int b = x << 3;
+    int c = x >> 2;
+    return a + b + c;
+}
+" :max-cycles 50000))
+    ;; Modify initialized global
+    (= 150 (run-and-get-result "
+int x = 100;
+int main() { x = x + 50; return x; }
+"))))
+
 (deftest test-phase22-new-features ()
   "Run Phase 22 new C language feature tests"
   (combine-results
@@ -3920,7 +3955,8 @@ int main() {
     (test-static-local)
     (test-goto-basic)
     (test-goto-nested)
-    (test-volatile-basic)))
+    (test-volatile-basic)
+    (test-global-init)))
 
 (deftest test-c-compiler ()
   "Run all C compiler tests"

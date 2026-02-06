@@ -2504,13 +2504,18 @@
     (generate-global-var decl)))
 
 (defun generate-global-var (node)
-  "Generate code/data for a global variable"
+  "Generate code/data for a global variable with optional initializer"
   (let* ((name (ast-node-value node))
          (var-type (ast-node-result-type node))
+         (init-value (or (ast-node-data node) 0))
          (label (intern (string-upcase name) :c-compiler))
          (size (type-size var-type)))
     (emit `(label ,label))
-    (emit `(lalloc-bytes ,size))))
+    ;; Emit initialized data based on size
+    (case size
+      (1 (emit `(abyte ,init-value)))
+      (2 (emit `(aword ,init-value)))
+      (otherwise (emit `(adword ,init-value))))))
 
 ;;; ===========================================================================
 ;;; String Literal Collection

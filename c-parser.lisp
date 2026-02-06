@@ -1043,28 +1043,47 @@
         func-node))))
 
 (defun parse-global-declaration (var-type name)
-  "Parse a global variable declaration"
+  "Parse a global variable declaration with optional initializer"
   (let ((decls nil))
     ;; Add first declarator
-    (let ((array-size nil))
+    (let ((array-size nil)
+          (init-value 0))
       (when (match-token 'punctuation "[")
         (when (check-token 'number)
           (setf array-size (token-value (advance-token))))
         (expect-token 'punctuation "]"))
 
+      ;; Check for initializer
+      (when (match-token 'operator "=")
+        (let* ((init-expr (parse-assignment-expression))
+               (const-val (evaluate-constant-expression init-expr)))
+          (if const-val
+              (setf init-value const-val)
+              (compiler-error "Global variable initializer must be a constant expression"))))
+
       (add-symbol name var-type :global nil)
       (push (make-node 'global-var
                        :value name
-                       :result-type var-type)
+                       :result-type var-type
+                       :data init-value)
             decls))
 
     ;; Parse additional declarators
     (loop while (match-token 'punctuation ",")
-          do (let ((next-name (token-value (expect-token 'identifier))))
+          do (let ((next-name (token-value (expect-token 'identifier)))
+                   (init-value 0))
+               ;; Check for initializer on additional declarators
+               (when (match-token 'operator "=")
+                 (let* ((init-expr (parse-assignment-expression))
+                        (const-val (evaluate-constant-expression init-expr)))
+                   (if const-val
+                       (setf init-value const-val)
+                       (compiler-error "Global variable initializer must be a constant expression"))))
                (add-symbol next-name var-type :global nil)
                (push (make-node 'global-var
                                 :value next-name
-                                :result-type var-type)
+                                :result-type var-type
+                                :data init-value)
                      decls)))
 
     (expect-token 'punctuation ";")
