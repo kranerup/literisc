@@ -464,9 +464,17 @@
                           (token-value (current-token)))))))))
 
 (defun parse-type ()
-  "Parse a full type including volatile qualifier and pointer levels"
-  ;; Check for volatile qualifier (can appear before type)
-  (let ((is-volatile (match-token 'keyword "volatile")))
+  "Parse a full type including const/volatile qualifiers and pointer levels"
+  ;; Check for const and volatile qualifiers (can appear before type)
+  ;; Both can appear in either order: const volatile int, volatile const int
+  (let ((is-const nil)
+        (is-volatile nil))
+    ;; Parse qualifiers (in any order)
+    (loop while (or (check-token 'keyword "const")
+                    (check-token 'keyword "volatile"))
+          do (cond
+               ((match-token 'keyword "const") (setf is-const t))
+               ((match-token 'keyword "volatile") (setf is-volatile t))))
     (let ((base-type (parse-type-specifier))
           (ptr-level 0))
       ;; Count pointer stars
@@ -478,6 +486,7 @@
                       :size (type-desc-size base-type)
                       :unsigned-p (type-desc-unsigned-p base-type)
                       :volatile-p is-volatile
+                      :const-p is-const
                       :struct-tag (type-desc-struct-tag base-type)))))
 
 ;;; ===========================================================================
@@ -757,7 +766,7 @@
                 (member (token-value tok)
                         '("int" "char" "void" "unsigned" "signed" "short" "long"
                           "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
-                          "enum" "struct" "union" "volatile" "static")
+                          "enum" "struct" "union" "volatile" "const" "static")
                         :test #'string=))
            ;; Typedef names are identifiers
            (and (eq (token-type tok) 'identifier)

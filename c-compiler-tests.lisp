@@ -3946,6 +3946,79 @@ int x = 100;
 int main() { x = x + 50; return x; }
 "))))
 
+(deftest test-const-global ()
+  "Test: const global variable propagation"
+  (check
+    ;; const global should be propagated - entire expression becomes constant
+    (= 400 (run-c-program "
+const int SIZE = 100;
+int main() {
+    return SIZE * 4;
+}
+"))
+    ;; const global with multiple uses
+    (= 300 (run-c-program "
+const int X = 100;
+int main() {
+    int a = X;
+    int b = X + X;
+    return a + b;
+}
+"))
+    ;; const volatile should still be propagated (const takes precedence for value)
+    (= 42 (run-c-program "
+const volatile int VAL = 42;
+int main() { return VAL; }
+"))))
+
+(deftest test-unmodified-global-propagation ()
+  "Test: unmodified initialized global propagation"
+  (check
+    ;; Initialized global never modified - should be propagated
+    (= 1025 (run-c-program "
+int x = 100;
+int main() {
+    int a = x << 1;   // 200
+    int b = x << 3;   // 800
+    int d = x >> 2;   // 25
+    return a + b + d; // 1025
+}
+"))
+    ;; Multiple unmodified globals
+    (= 30 (run-c-program "
+int a = 10;
+int b = 20;
+int main() { return a + b; }
+"))
+    ;; Unmodified global in expression
+    (= 50 (run-c-program "
+int scale = 5;
+int main() {
+    int x = 10;
+    return x * scale;
+}
+"))))
+
+(deftest test-modified-global-no-propagation ()
+  "Test: modified global should NOT be propagated"
+  (check
+    ;; Global modified in main - should not be propagated
+    (= 150 (run-c-program "
+int x = 100;
+int main() { x = x + 50; return x; }
+"))
+    ;; Global modified with ++
+    (= 101 (run-c-program "
+int counter = 100;
+int main() { counter++; return counter; }
+"))
+    ;; Global modified in helper function - should not be propagated
+    (= 200 (run-c-program "
+int g = 100;
+void modify() { g = 200; }
+int main() { modify(); return g; }
+"))))
+
 (deftest test-phase22-new-features ()
   "Run Phase 22 new C language feature tests"
   (combine-results
@@ -3956,7 +4029,10 @@ int main() { x = x + 50; return x; }
     (test-goto-basic)
     (test-goto-nested)
     (test-volatile-basic)
-    (test-global-init)))
+    (test-global-init)
+    (test-const-global)
+    (test-unmodified-global-propagation)
+    (test-modified-global-no-propagation)))
 
 (deftest test-c-compiler ()
   "Run all C compiler tests"

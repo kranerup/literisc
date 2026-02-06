@@ -6,6 +6,79 @@
 (in-package :c-compiler)
 
 ;;; ===========================================================================
+;;; Global Constant Propagation
+;;; ===========================================================================
+
+(defvar *constant-globals* nil
+  "Hash table mapping global variable names to their constant values.
+   Used for propagating constants during fold-constants.")
+
+(defun collect-assignment-targets (node targets)
+  "Collect all variable names that are assigned to in the AST.
+   Populates the TARGETS hash table with variable names."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      ;; Direct assignment
+      (assign
+       (let ((lhs (first (ast-node-children node))))
+         (when (and (ast-node-p lhs) (eq (ast-node-type lhs) 'var-ref))
+           (setf (gethash (ast-node-value lhs) targets) t)))
+       ;; Also check children for nested assignments
+       (dolist (child (ast-node-children node))
+         (collect-assignment-targets child targets)))
+      ;; Pre/post increment/decrement
+      ((unary-op post-op)
+       (when (member (ast-node-value node) '("++" "--") :test #'string=)
+         (let ((operand (first (ast-node-children node))))
+           (when (and (ast-node-p operand) (eq (ast-node-type operand) 'var-ref))
+             (setf (gethash (ast-node-value operand) targets) t))))
+       (dolist (child (ast-node-children node))
+         (collect-assignment-targets child targets)))
+      ;; Recurse into all other nodes
+      (otherwise
+       (dolist (child (ast-node-children node))
+         (collect-assignment-targets child targets))))))
+
+(defun collect-constant-globals (ast)
+  "Analyze AST to find global variables that can be constant-propagated.
+   Returns a hash table mapping global names to their constant values.
+   A global can be propagated if:
+   1. It's declared const AND has an initializer, OR
+   2. It's initialized with a constant AND never assigned to"
+  (let ((globals (make-hash-table :test 'equal))       ; name -> (init-value . const-p)
+        (targets (make-hash-table :test 'equal))       ; assigned-to variables
+        (result (make-hash-table :test 'equal)))       ; propagatable name -> value
+    ;; First pass: collect global variable info
+    ;; Handle both direct global-var nodes and those inside decl-list
+    (labels ((process-global (node)
+               (when (and (ast-node-p node) (eq (ast-node-type node) 'global-var))
+                 (let* ((name (ast-node-value node))
+                        (init-val (ast-node-data node))
+                        (var-type (ast-node-result-type node))
+                        (is-const (and var-type (type-desc-p var-type) (type-desc-const-p var-type))))
+                   ;; Only collect if it has an initializer
+                   (when (and init-val (integerp init-val))
+                     (setf (gethash name globals) (cons init-val is-const)))))))
+      (dolist (child (ast-node-children ast))
+        (when (ast-node-p child)
+          (case (ast-node-type child)
+            (global-var (process-global child))
+            (decl-list (dolist (decl (ast-node-children child))
+                         (process-global decl)))))))
+    ;; Second pass: collect all assignment targets
+    (dolist (child (ast-node-children ast))
+      (collect-assignment-targets child targets))
+    ;; Build result: globals that are const OR not assigned to
+    (maphash (lambda (name val-and-const)
+               (let ((init-val (car val-and-const))
+                     (is-const (cdr val-and-const)))
+                 (when (or is-const
+                           (not (gethash name targets)))
+                   (setf (gethash name result) init-val))))
+             globals)
+    result))
+
+;;; ===========================================================================
 ;;; Constant Folding
 ;;; ===========================================================================
 
@@ -26,9 +99,11 @@
   (case (ast-node-type node)
     ;; Recursively process children for compound nodes
     (program
-     (make-ast-node :type 'program
-                    :children (mapcar #'fold-constants (ast-node-children node))
-                    :source-loc (ast-node-source-loc node)))
+     ;; Collect constant-propagatable globals before processing
+     (let ((*constant-globals* (collect-constant-globals node)))
+       (make-ast-node :type 'program
+                      :children (mapcar #'fold-constants (ast-node-children node))
+                      :source-loc (ast-node-source-loc node))))
 
     (function
      (make-ast-node :type 'function
@@ -143,16 +218,22 @@
     (literal node)
     (string-literal node)
     (var-ref
-     ;; Check if var-ref is an enum constant - fold to literal
+     ;; Check if var-ref can be folded to a constant
      (let* ((name (ast-node-value node))
             (sym (lookup-symbol name)))
-       (if (and sym (eq (sym-entry-storage sym) :enum-constant))
-           ;; Fold enum constant to literal
-           (make-constant-node (sym-entry-offset sym)
-                               (make-int-type)
-                               (ast-node-source-loc node))
-           ;; Not an enum constant - keep as var-ref
-           node)))
+       (cond
+         ;; Fold enum constant to literal
+         ((and sym (eq (sym-entry-storage sym) :enum-constant))
+          (make-constant-node (sym-entry-offset sym)
+                              (make-int-type)
+                              (ast-node-source-loc node)))
+         ;; Fold constant global to literal
+         ((and *constant-globals* (gethash name *constant-globals*))
+          (make-constant-node (gethash name *constant-globals*)
+                              (make-int-type)
+                              (ast-node-source-loc node)))
+         ;; Not a constant - keep as var-ref
+         (t node))))
     (break node)
     (continue node)
     (empty node)

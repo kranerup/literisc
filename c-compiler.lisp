@@ -55,6 +55,7 @@
   size           ; 1, 2, or 4 bytes (nil defaults based on base type)
   unsigned-p     ; t for unsigned, nil for signed
   volatile-p     ; t for volatile, prevents register allocation
+  const-p        ; t for const, enables constant propagation
   enum-tag       ; nil, :anonymous, or tag-name string for enum types
   struct-tag)    ; nil, :anonymous, or tag-name string for struct types
 
