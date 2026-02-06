@@ -573,6 +573,12 @@
         (format t "~%AST (after constant folding):~%")
         (print-ast ast))
 
+      ;; Dead code elimination (removes unused variables after constant propagation)
+      (setf ast (dead-code-elimination ast))
+      (when verbose
+        (format t "~%AST (after dead code elimination):~%")
+        (print-ast ast))
+
       ;; Code generation
       (generate-program ast)
 

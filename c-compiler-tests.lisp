@@ -4052,6 +4052,41 @@ int main() {
 }
 "))))
 
+(deftest test-dead-code-elimination ()
+  "Test: dead code elimination removes unused variables"
+  (check
+    ;; Unused variable with constant init should be removed
+    (= 42 (run-c-program "
+int main() {
+    int unused = 100;  // Should be eliminated
+    return 42;
+}
+"))
+    ;; Variable used only in another dead variable should be eliminated
+    (= 1 (run-c-program "
+int main() {
+    int a = 10;        // Dead - only used in dead b
+    int b = a + 20;    // Dead - never read
+    return 1;
+}
+"))
+    ;; Variable with side-effect initializer should NOT be eliminated
+    (= 42 (run-c-program "
+int side_effect() { return 42; }
+int main() {
+    int x = side_effect();  // Should NOT be eliminated (has side effect)
+    return 42;
+}
+"))
+    ;; Variable whose address is taken should NOT be eliminated
+    (= 100 (run-c-program "
+int main() {
+    int x = 100;
+    int *p = &x;  // x's address is taken
+    return *p;
+}
+"))))
+
 (deftest test-phase22-new-features ()
   "Run Phase 22 new C language feature tests"
   (combine-results
@@ -4066,7 +4101,8 @@ int main() {
     (test-const-global)
     (test-unmodified-global-propagation)
     (test-modified-global-no-propagation)
-    (test-local-constant-propagation)))
+    (test-local-constant-propagation)
+    (test-dead-code-elimination)))
 
 (deftest test-c-compiler ()
   "Run all C compiler tests"

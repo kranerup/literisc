@@ -1020,3 +1020,106 @@
                  defined-functions))
 
       result-ast)))
+
+;;; ===========================================================================
+;;; Dead Code Elimination
+;;; ===========================================================================
+
+(defun collect-used-variables (node used)
+  "Collect all variable names that are actually read in the AST.
+   Populates the USED hash table with variable names."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      ;; Variable reference - this variable is used
+      (var-ref
+       (setf (gethash (ast-node-value node) used) t))
+      ;; Assignment - only the RHS counts as a read, LHS is a write
+      (assign
+       (let ((lhs (first (ast-node-children node)))
+             (rhs (second (ast-node-children node))))
+         ;; Don't count simple var-ref on LHS as a use
+         ;; But do collect uses from subscript expressions on LHS
+         (when (and (ast-node-p lhs)
+                    (not (eq (ast-node-type lhs) 'var-ref)))
+           (collect-used-variables lhs used))
+         (collect-used-variables rhs used)))
+      ;; For other nodes, recurse into children
+      (otherwise
+       (dolist (child (ast-node-children node))
+         (collect-used-variables child used))))))
+
+(defun has-side-effects (node)
+  "Check if an expression has side effects (function calls, assignments, etc.)"
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      ;; These have side effects
+      ((call assign post-op) t)
+      ;; Pre-increment/decrement have side effects
+      (unary-op
+       (member (ast-node-value node) '("++" "--") :test #'string=))
+      ;; Check children for side effects
+      (otherwise
+       (some #'has-side-effects (ast-node-children node))))))
+
+(defun eliminate-dead-code (node used)
+  "Remove dead variable declarations from the AST.
+   USED is a hash table of variable names that are actually read."
+  (when (null node)
+    (return-from eliminate-dead-code nil))
+  (unless (ast-node-p node)
+    (return-from eliminate-dead-code node))
+
+  (case (ast-node-type node)
+    ;; For blocks and decl-lists, filter out dead declarations
+    ((block decl-list)
+     (let ((live-children
+             (loop for child in (ast-node-children node)
+                   ;; Keep non-var-decl nodes
+                   when (or (not (ast-node-p child))
+                            (not (eq (ast-node-type child) 'decl-list))
+                            ;; For decl-list, check if var-decl inside is used
+                            (let ((inner (first (ast-node-children child))))
+                              (or (not (ast-node-p inner))
+                                  (not (eq (ast-node-type inner) 'var-decl))
+                                  ;; Keep if variable is used
+                                  (gethash (ast-node-value inner) used)
+                                  ;; Keep if has address taken
+                                  (is-address-taken (ast-node-value inner))
+                                  ;; Keep if initializer has side effects
+                                  (has-side-effects (first (ast-node-children inner))))))
+                   collect (eliminate-dead-code child used))))
+       (make-ast-node :type (ast-node-type node)
+                      :value (ast-node-value node)
+                      :children live-children
+                      :result-type (ast-node-result-type node)
+                      :source-loc (ast-node-source-loc node))))
+
+    ;; Recursively process other nodes
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (eliminate-dead-code c used))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
+(defun dead-code-elimination (ast)
+  "Main entry point for dead code elimination.
+   Removes unused variable declarations whose initializers have no side effects."
+  (when (null ast)
+    (return-from dead-code-elimination nil))
+
+  ;; Process each function separately
+  (make-ast-node :type 'program
+                 :children (mapcar (lambda (child)
+                                     (if (and (ast-node-p child)
+                                              (eq (ast-node-type child) 'function))
+                                         ;; Collect used variables and eliminate dead code
+                                         (let ((used (make-hash-table :test 'equal)))
+                                           (collect-used-variables child used)
+                                           (eliminate-dead-code child used))
+                                         ;; Non-function nodes pass through
+                                         child))
+                                   (ast-node-children ast))
+                 :source-loc (ast-node-source-loc ast)))
