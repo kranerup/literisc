@@ -139,25 +139,49 @@
        (when (integerp val)
          val)))
 
-    ;; Variable reference - might be an enum constant
+    ;; Variable reference - might be an enum constant or function
     (var-ref
      (let* ((name (ast-node-value expr))
             (sym (lookup-symbol name)))
-       (when (and sym (eq (sym-entry-storage sym) :enum-constant))
-         (sym-entry-offset sym))))  ; offset stores the enum value
+       (when sym
+         (cond
+           ;; Enum constant - return the value
+           ((eq (sym-entry-storage sym) :enum-constant)
+            (sym-entry-offset sym))
+           ;; Function reference - return the label
+           ((eq (sym-entry-storage sym) :function)
+            (list :label (sym-entry-offset sym)))
+           ;; Global variable - return the label (for function pointers initialized to globals)
+           ((eq (sym-entry-storage sym) :global)
+            (list :label (make-c-label name)))))))
 
     ;; Unary operators
     (unary-op
      (let* ((op (ast-node-value expr))
-            (operand (first (ast-node-children expr)))
-            (operand-val (evaluate-constant-expression operand)))
-       (when operand-val
-         (cond
-           ((string= op "-") (- operand-val))
-           ((string= op "+") operand-val)
-           ((string= op "~") (lognot operand-val))
-           ((string= op "!") (if (zerop operand-val) 1 0))
-           (t nil)))))
+            (operand (first (ast-node-children expr))))
+       ;; Address-of operator with global variable or function
+       (when (string= op "&")
+         (when (and (ast-node-p operand)
+                    (eq (ast-node-type operand) 'var-ref))
+           (let* ((name (ast-node-value operand))
+                  (sym (lookup-symbol name)))
+             (when sym
+               (cond
+                 ((eq (sym-entry-storage sym) :global)
+                  (return-from evaluate-constant-expression
+                    (list :label (make-c-label name))))
+                 ((eq (sym-entry-storage sym) :function)
+                  (return-from evaluate-constant-expression
+                    (list :label (sym-entry-offset sym)))))))))
+       ;; Other unary operators
+       (let ((operand-val (evaluate-constant-expression operand)))
+         (when (and operand-val (numberp operand-val))
+           (cond
+             ((string= op "-") (- operand-val))
+             ((string= op "+") operand-val)
+             ((string= op "~") (lognot operand-val))
+             ((string= op "!") (if (zerop operand-val) 1 0))
+             (t nil))))))
 
     ;; Binary operators
     (binary-op
@@ -241,8 +265,11 @@
               (incf next-value)
 
               ;; Continue or stop
-              (unless (match-token 'punctuation ",")
-                (return)))))
+              (if (match-token 'punctuation ",")
+                  ;; Allow trailing comma (check if } follows)
+                  (when (check-token 'punctuation "}")
+                    (return))
+                  (return)))))
 
         (expect-token 'punctuation "}")
 
@@ -261,23 +288,102 @@
 ;;; Struct Parsing
 ;;; ===========================================================================
 
+(defun parse-function-pointer-declarator (return-type)
+  "Parse function pointer declarator (*name)(...) or (*name)[]
+   Returns (name final-type) or nil if not a function pointer pattern"
+  ;; We've already confirmed we're at '(' and next is '*'
+  (expect-token 'punctuation "(")
+  (expect-token 'operator "*")
+  (let ((name (token-value (expect-token 'identifier))))
+    (expect-token 'punctuation ")")
+    ;; Check for function parameters
+    (when (match-token 'punctuation "(")
+      ;; Skip parameter list - for now just consume until matching )
+      (let ((depth 1))
+        (loop while (and (> depth 0) (current-token))
+              do (cond
+                   ((match-token 'punctuation "(") (incf depth))
+                   ((match-token 'punctuation ")") (decf depth))
+                   (t (advance-token)))))
+      ;; Function pointer - store full return type for use when calling
+      (let ((ptr-type (make-type-desc :base 'function
+                                      :pointer-level 1
+                                      :size 4
+                                      :return-type return-type)))
+        (return-from parse-function-pointer-declarator
+          (values name ptr-type))))
+    ;; Not a function pointer, might be a pointer to array - for now return as pointer
+    (let ((ptr-type (make-type-desc :base (type-desc-base return-type)
+                                    :pointer-level (1+ (type-desc-pointer-level return-type))
+                                    :struct-tag (type-desc-struct-tag return-type)
+                                    :struct-scope (type-desc-struct-scope return-type))))
+      (values name ptr-type))))
+
+(defun check-function-pointer-pattern ()
+  "Check if we're looking at a function pointer pattern: ( * identifier )"
+  (and (check-token 'punctuation "(")
+       ;; Peek ahead to check for *
+       (let ((saved-pos (compiler-state-token-pos *state*)))
+         (advance-token)  ; skip (
+         (let ((is-ptr (check-token 'operator "*")))
+           (setf (compiler-state-token-pos *state*) saved-pos)  ; restore position
+           is-ptr))))
+
 (defun parse-struct-member-declaration (current-offset)
   "Parse struct member declaration. Returns (member-list new-offset)"
   (let ((member-type (parse-type))
         (members nil)
         (offset current-offset))
-    (loop
-      (let* ((name (token-value (expect-token 'identifier)))
-             (aligned-offset (align-to offset (type-alignment member-type)))
-             (member (make-struct-member :name name
-                                         :type member-type
-                                         :offset aligned-offset)))
-        (push member members)
-        (setf offset (+ aligned-offset (type-size member-type))))
-      (unless (match-token 'punctuation ",")
-        (return)))
-    (expect-token 'punctuation ";")
-    (values (nreverse members) offset)))
+    ;; Check for anonymous struct/union (no identifier after type, just semicolon)
+    (if (and (or (eq (type-desc-base member-type) 'struct)
+                 (eq (type-desc-base member-type) 'union))
+             (check-token 'punctuation ";"))
+        ;; Anonymous struct/union - inline its members with adjusted offsets
+        (let* ((tag (type-desc-struct-tag member-type))
+               (nested-def (or (lookup-struct-def tag)
+                               (lookup-union-def tag))))
+          (when nested-def
+            (let ((aligned-base (align-to offset (struct-def-alignment nested-def))))
+              (dolist (nested-member (struct-def-members nested-def))
+                (let ((adjusted-member (make-struct-member
+                                        :name (struct-member-name nested-member)
+                                        :type (struct-member-type nested-member)
+                                        :offset (+ aligned-base (struct-member-offset nested-member)))))
+                  (push adjusted-member members)))
+              (setf offset (+ aligned-base (struct-def-size nested-def)))))
+          (expect-token 'punctuation ";")
+          (values (nreverse members) offset))
+        ;; Named member(s)
+        (progn
+          (loop
+            (let (name final-type)
+              ;; Check for function pointer pattern: int (*name)()
+              (if (check-function-pointer-pattern)
+                  (multiple-value-setq (name final-type)
+                    (parse-function-pointer-declarator member-type))
+                  ;; Normal member
+                  (progn
+                    (setf name (token-value (expect-token 'identifier)))
+                    (setf final-type member-type)
+                    ;; Check for array
+                    (when (match-token 'punctuation "[")
+                      (let ((array-size (token-value (expect-token 'number))))
+                        (expect-token 'punctuation "]")
+                        (setf final-type (make-type-desc :base (type-desc-base member-type)
+                                                         :pointer-level (type-desc-pointer-level member-type)
+                                                         :array-size array-size
+                                                         :struct-tag (type-desc-struct-tag member-type)
+                                                         :struct-scope (type-desc-struct-scope member-type)))))))
+              (let* ((aligned-offset (align-to offset (type-alignment final-type)))
+                     (member (make-struct-member :name name
+                                                 :type final-type
+                                                 :offset aligned-offset)))
+                (push member members)
+                (setf offset (+ aligned-offset (type-size final-type)))))
+            (unless (match-token 'punctuation ",")
+              (return)))
+          (expect-token 'punctuation ";")
+          (values (nreverse members) offset)))))
 
 (defun parse-struct-specifier ()
   "Parse: struct [tag] [{ member-list }]"
@@ -304,12 +410,12 @@
                                     :size (align-to current-offset max-align)
                                     :alignment max-align)))
           (when tag-name
-            (setf (gethash tag-name (compiler-state-struct-types *state*)) def))
+            (register-struct-def tag-name def))
           ;; For anonymous structs, generate a unique tag
           (unless tag-name
             (let ((anon-tag (format nil "__anon_struct_~a"
                                     (incf (compiler-state-label-counter *state*)))))
-              (setf (gethash anon-tag (compiler-state-struct-types *state*)) def)
+              (register-struct-def anon-tag def)
               (setf tag-name anon-tag))))))
     (unless (or tag-name has-body)
       (compiler-error "Expected struct tag name or body"))
@@ -344,12 +450,12 @@
                                     :size (align-to max-size max-align)
                                     :alignment max-align)))
           (when tag-name
-            (setf (gethash tag-name (compiler-state-union-types *state*)) def))
+            (register-union-def tag-name def))
           ;; For anonymous unions, generate a unique tag
           (unless tag-name
             (let ((anon-tag (format nil "__anon_union_~a"
                                     (incf (compiler-state-label-counter *state*)))))
-              (setf (gethash anon-tag (compiler-state-union-types *state*)) def)
+              (register-union-def anon-tag def)
               (setf tag-name anon-tag))))))
     (unless (or tag-name has-body)
       (compiler-error "Expected union tag name or body"))
@@ -367,27 +473,45 @@
     ;; Parse pointer stars
     (loop while (match-token 'operator "*")
           do (incf ptr-level))
-    ;; Get typedef name
-    (let ((typedef-name (token-value (expect-token 'identifier)))
-          (array-size nil))
-      ;; Check for array typedef
-      (when (match-token 'punctuation "[")
-        (when (check-token 'number)
-          (setf array-size (token-value (advance-token))))
-        (expect-token 'punctuation "]"))
-      ;; Create and register typedef
-      (let ((typedef-type (make-type-desc
-                            :base (type-desc-base base-type)
-                            :pointer-level ptr-level
-                            :array-size array-size
-                            :size (type-desc-size base-type)
-                            :unsigned-p (type-desc-unsigned-p base-type)
-                            :enum-tag (type-desc-enum-tag base-type)
-                            :struct-tag (type-desc-struct-tag base-type))))
-        (setf (gethash typedef-name (compiler-state-typedef-types *state*))
-              typedef-type)
-        (expect-token 'punctuation ";")
-        (make-node 'typedef-decl :value typedef-name :result-type typedef-type)))))
+    ;; Build intermediate type with pointer level
+    (let ((inter-type (make-type-desc
+                        :base (type-desc-base base-type)
+                        :pointer-level ptr-level
+                        :size (type-desc-size base-type)
+                        :unsigned-p (type-desc-unsigned-p base-type)
+                        :enum-tag (type-desc-enum-tag base-type)
+                        :struct-tag (type-desc-struct-tag base-type)
+                        :struct-scope (type-desc-struct-scope base-type))))
+      ;; Check for function pointer typedef: typedef type (*name)(...)
+      (if (check-function-pointer-pattern)
+          (multiple-value-bind (typedef-name ptr-type)
+              (parse-function-pointer-declarator inter-type)
+            (setf (gethash typedef-name (compiler-state-typedef-types *state*))
+                  ptr-type)
+            (expect-token 'punctuation ";")
+            (make-node 'typedef-decl :value typedef-name :result-type ptr-type))
+          ;; Normal typedef
+          (let ((typedef-name (token-value (expect-token 'identifier)))
+                (array-size nil))
+            ;; Check for array typedef
+            (when (match-token 'punctuation "[")
+              (when (check-token 'number)
+                (setf array-size (token-value (advance-token))))
+              (expect-token 'punctuation "]"))
+            ;; Create and register typedef
+            (let ((typedef-type (make-type-desc
+                                  :base (type-desc-base inter-type)
+                                  :pointer-level (type-desc-pointer-level inter-type)
+                                  :array-size array-size
+                                  :size (type-desc-size inter-type)
+                                  :unsigned-p (type-desc-unsigned-p inter-type)
+                                  :enum-tag (type-desc-enum-tag inter-type)
+                                  :struct-tag (type-desc-struct-tag inter-type)
+                                  :struct-scope (type-desc-struct-scope inter-type))))
+              (setf (gethash typedef-name (compiler-state-typedef-types *state*))
+                    typedef-type)
+              (expect-token 'punctuation ";")
+              (make-node 'typedef-decl :value typedef-name :result-type typedef-type)))))))
 
 (defun parse-type-specifier ()
   "Parse a type specifier with modifiers (signed/unsigned, short/long)"
@@ -481,13 +605,15 @@
       (loop while (match-token 'operator "*")
             do (incf ptr-level))
       (make-type-desc :base (type-desc-base base-type)
-                      :pointer-level ptr-level
+                      :pointer-level (+ (type-desc-pointer-level base-type) ptr-level)
                       :array-size nil
                       :size (type-desc-size base-type)
                       :unsigned-p (type-desc-unsigned-p base-type)
                       :volatile-p is-volatile
                       :const-p is-const
-                      :struct-tag (type-desc-struct-tag base-type)))))
+                      :struct-tag (type-desc-struct-tag base-type)
+                      :struct-scope (type-desc-struct-scope base-type)
+                      :return-type (type-desc-return-type base-type)))))
 
 ;;; ===========================================================================
 ;;; Expression Parsing (Precedence Climbing)
@@ -889,29 +1015,71 @@
       (parse-initializer-list)
       (parse-assignment-expression)))
 
+(defun parse-designated-or-plain-initializer ()
+  "Parse either a designated initializer (.field = expr or [n] = expr) or a plain initializer"
+  (cond
+    ;; Designated initializer: .field = expr
+    ((match-token 'punctuation ".")
+     (let* ((field-name (token-value (expect-token 'identifier))))
+       (expect-token 'operator "=")
+       (let ((init-expr (parse-initializer)))
+         (make-node 'designated-init
+                    :value field-name
+                    :children (list init-expr)))))
+    ;; Array designated initializer: [n] = expr
+    ((match-token 'punctuation "[")
+     (let ((index-expr (parse-expression)))
+       (expect-token 'punctuation "]")
+       (expect-token 'operator "=")
+       (let ((init-expr (parse-initializer)))
+         (make-node 'array-designated-init
+                    :children (list index-expr init-expr)))))
+    ;; Plain initializer
+    (t (parse-initializer))))
+
 (defun parse-initializer-list ()
-  "Parse {expr, expr, ...} including nested lists.
+  "Parse {expr, expr, ...} including nested lists and designated initializers.
    Returns an AST node of type 'init-list with children being the elements."
   (expect-token 'punctuation "{")
   (let ((elements nil))
     ;; Handle empty initializer list {}
     (unless (check-token 'punctuation "}")
-      (push (parse-initializer) elements)  ; recursive for nesting
+      (push (parse-designated-or-plain-initializer) elements)
       (loop while (match-token 'punctuation ",")
             do (unless (check-token 'punctuation "}")
-                 (push (parse-initializer) elements))))
+                 (push (parse-designated-or-plain-initializer) elements))))
     (expect-token 'punctuation "}")
     (make-node 'init-list :children (nreverse elements))))
 
 (defun infer-array-size-from-init (init-node element-type)
   "Infer array size from initializer.
-   For init-list: count top-level elements.
+   For init-list: count top-level elements, handling array designated initializers.
    For string-literal initializing char[]: use strlen+1."
   (cond
-    ;; Init list - count elements
+    ;; Init list - need to handle array designated initializers
     ((and (ast-node-p init-node)
           (eq (ast-node-type init-node) 'init-list))
-     (length (ast-node-children init-node)))
+     (let ((elements (ast-node-children init-node))
+           (current-index 0)
+           (max-index 0))
+       ;; Walk through elements, tracking current position
+       (dolist (elem elements)
+         (cond
+           ;; Array designated initializer: [n] = value
+           ((and (ast-node-p elem)
+                 (eq (ast-node-type elem) 'array-designated-init))
+            (let* ((index-expr (first (ast-node-children elem)))
+                   (index-val (evaluate-constant-expression index-expr)))
+              (when index-val
+                (setf current-index index-val)
+                (setf max-index (max max-index current-index))
+                (incf current-index))))
+           ;; Regular element - uses current position
+           (t
+            (setf max-index (max max-index current-index))
+            (incf current-index))))
+       ;; Size is max-index + 1
+       (1+ max-index)))
     ;; String literal for char array - use strlen+1
     ((and (ast-node-p init-node)
           (eq (ast-node-type init-node) 'string-literal)
@@ -924,25 +1092,50 @@
   "Parse a local variable declaration, including static locals"
   ;; Check for static keyword
   (let ((is-static (match-token 'keyword "static")))
-    (let ((var-type (parse-type))
+    (let ((base-type (parse-type))
           (decls nil))
+      ;; Check for type-only declaration (e.g., struct T { int x; }; or struct T;)
+      (when (check-token 'punctuation ";")
+        (advance-token)
+        ;; Return empty declaration list for type-only definitions
+        (return-from parse-local-declaration
+          (make-node 'decl-list :children nil)))
       ;; Parse declarators
       (loop
-        (let* ((name (token-value (expect-token 'identifier)))
-               (array-size nil))
-          ;; Check for array declaration
-          (when (match-token 'punctuation "[")
-            (if (check-token 'number)
-                (setf array-size (token-value (advance-token)))
-                ;; Use :infer marker when [] has no size - needs inference
-                (setf array-size :infer))
-            (expect-token 'punctuation "]")
-            (setf var-type (make-type-desc :base (type-desc-base var-type)
-                                           :pointer-level (type-desc-pointer-level var-type)
-                                           :array-size array-size
-                                           :size (type-desc-size var-type)
-                                           :unsigned-p (type-desc-unsigned-p var-type)
-                                           :struct-tag (type-desc-struct-tag var-type))))
+        ;; Count declarator-specific pointer stars (e.g., int x, *p, **pp)
+        (let ((decl-ptr-level 0))
+          (loop while (match-token 'operator "*")
+                do (incf decl-ptr-level))
+          (let* ((name (token-value (expect-token 'identifier)))
+                 (array-size nil)
+                 ;; Create per-declarator type combining base type and declarator pointers
+                 (var-type (make-type-desc :base (type-desc-base base-type)
+                                           :pointer-level (+ (type-desc-pointer-level base-type)
+                                                             decl-ptr-level)
+                                           :array-size nil
+                                           :size (type-desc-size base-type)
+                                           :unsigned-p (type-desc-unsigned-p base-type)
+                                           :volatile-p (type-desc-volatile-p base-type)
+                                           :const-p (type-desc-const-p base-type)
+                                           :struct-tag (type-desc-struct-tag base-type)
+                                           :struct-scope (type-desc-struct-scope base-type)
+                                           :return-type (type-desc-return-type base-type))))
+            ;; Check for array declaration
+            (when (match-token 'punctuation "[")
+              (if (check-token 'number)
+                  (setf array-size (token-value (advance-token)))
+                  ;; Use :infer marker when [] has no size - needs inference
+                  (setf array-size :infer))
+              (expect-token 'punctuation "]")
+              (setf var-type (make-type-desc :base (type-desc-base var-type)
+                                             :pointer-level (type-desc-pointer-level var-type)
+                                             :array-size array-size
+                                             :size (type-desc-size var-type)
+                                             :unsigned-p (type-desc-unsigned-p var-type)
+                                             :volatile-p (type-desc-volatile-p var-type)
+                                             :const-p (type-desc-const-p var-type)
+                                             :struct-tag (type-desc-struct-tag var-type)
+                                             :struct-scope (type-desc-struct-scope var-type))))
 
           ;; Check for initializer
           (let ((init nil)
@@ -966,7 +1159,8 @@
                                                    :array-size array-size
                                                    :size (type-desc-size var-type)
                                                    :unsigned-p (type-desc-unsigned-p var-type)
-                                                   :struct-tag (type-desc-struct-tag var-type))))))
+                                                   :struct-tag (type-desc-struct-tag var-type)
+                                                   :struct-scope (type-desc-struct-scope var-type))))))
               ;; For static locals, try to evaluate constant initializer
               (when is-static
                 (let ((const-val (evaluate-constant-expression init)))
@@ -1007,10 +1201,16 @@
                           (add-symbol name var-type :register local-reg-count)
                           (incf (compiler-state-local-reg-count *state*)))
                         ;; Stack allocation (arrays or when out of registers)
-                        (let* ((size (if array-size
-                                         (* array-size (type-size var-type))
-                                         (type-size var-type)))
-                               (elem-size (type-size var-type))
+                        ;; type-size now handles arrays, so just use it directly
+                        (let* ((size (type-size var-type))
+                               (elem-size (if array-size
+                                             ;; For arrays, get element size (base type without array-size)
+                                             (type-size (make-type-desc :base (type-desc-base var-type)
+                                                                        :pointer-level (type-desc-pointer-level var-type)
+                                                                        :size (type-desc-size var-type)
+                                                                        :struct-tag (type-desc-struct-tag var-type)
+                                                                        :struct-scope (type-desc-struct-scope var-type)))
+                                             (type-size var-type)))
                                (alignment (if (>= elem-size 4) 4
                                              (if (>= elem-size 2) 2 1)))
                                (current-offset (compiler-state-local-offset *state*))
@@ -1024,7 +1224,7 @@
                                    :value name
                                    :children (when init (list init))
                                    :result-type var-type)
-                        decls)))))
+                        decls))))))
 
         ;; Check for more declarators
         (unless (match-token 'punctuation ",")
@@ -1059,6 +1259,10 @@
   (setf (compiler-state-param-count *state*) 0)
   (setf (compiler-state-local-reg-count *state*) 0)  ; Reset local register count
 
+  ;; Register function name in global symbol table for use as function pointer
+  ;; Store the return type directly - get-expression-type uses this when function is called
+  (add-global-symbol name ret-type :function (make-c-label name))
+
   (expect-token 'punctuation "(")
   (enter-scope)
 
@@ -1072,6 +1276,19 @@
           ;; Parameter name is optional in declaration
           (when (check-token 'identifier)
             (setf param-name (token-value (advance-token))))
+          ;; Check for array parameter (e.g., int x[100]) - decays to pointer
+          (when (match-token 'punctuation "[")
+            ;; Consume optional size
+            (unless (check-token 'punctuation "]")
+              (parse-expression))  ; Ignore the size, it's just for documentation
+            (expect-token 'punctuation "]")
+            ;; Array parameters decay to pointers
+            (setf param-type (make-type-desc :base (type-desc-base param-type)
+                                             :pointer-level (1+ (type-desc-pointer-level param-type))
+                                             :size (type-desc-size param-type)
+                                             :unsigned-p (type-desc-unsigned-p param-type)
+                                             :struct-tag (type-desc-struct-tag param-type)
+                                             :struct-scope (type-desc-struct-scope param-type))))
 
           ;; Register parameter in symbol table
           ;; First 4 params go in P0-P3 (R10-R13), rest on stack
@@ -1093,6 +1310,9 @@
     ;; Parse function body
     (let ((body (parse-compound-statement)))
       (exit-scope)
+
+      ;; Reset current function to nil (back to global scope)
+      (setf (compiler-state-current-function *state*) nil)
 
       ;; Calculate frame size from locals allocated during parsing
       (let* ((frame-size (- (compiler-state-local-offset *state*)))
@@ -1132,7 +1352,8 @@
                                        :array-size array-size
                                        :size (type-desc-size var-type)
                                        :unsigned-p (type-desc-unsigned-p var-type)
-                                       :struct-tag (type-desc-struct-tag var-type))))
+                                       :struct-tag (type-desc-struct-tag var-type)
+                                       :struct-scope (type-desc-struct-scope var-type))))
 
       ;; Check for initializer
       (when (match-token 'operator "=")
@@ -1153,7 +1374,8 @@
                                              :array-size array-size
                                              :size (type-desc-size var-type)
                                              :unsigned-p (type-desc-unsigned-p var-type)
-                                             :struct-tag (type-desc-struct-tag var-type))))))
+                                             :struct-tag (type-desc-struct-tag var-type)
+                                             :struct-scope (type-desc-struct-scope var-type))))))
         ;; For simple expressions, evaluate to constant
         (unless (and (ast-node-p init-node)
                      (eq (ast-node-type init-node) 'init-list))
@@ -1213,18 +1435,29 @@
     ;; Parse type and name
     (let* ((type-spec (parse-type)))
 
-      ;; Check for standalone enum declaration (no variable name)
+      ;; Check for standalone type declaration (no variable name)
+      ;; Handles: enum E { ... }; struct T { ... }; struct T;
       (when (match-token 'punctuation ";")
-        ;; Standalone enum definition - constants already added during parse-enum-specifier
+        ;; Standalone type definition - type already registered during parse-type
         (return-from parse-top-level
-          (make-node 'enum-decl :result-type type-spec)))
+          (cond
+            ((type-desc-enum-tag type-spec)
+             (make-node 'enum-decl :result-type type-spec))
+            ((type-desc-struct-tag type-spec)
+             (make-node 'struct-decl :result-type type-spec))
+            (t (make-node 'type-decl :result-type type-spec)))))
 
-      ;; Normal case: expect identifier for variable/function name
-      (let ((name (token-value (expect-token 'identifier))))
-        ;; Function definition or declaration?
-        (if (check-token 'punctuation "(")
-            (parse-function-definition type-spec name is-inline)
-            (parse-global-declaration type-spec name))))))
+      ;; Check for function pointer pattern: return_type (*name)(...)
+      (if (check-function-pointer-pattern)
+          (multiple-value-bind (name ptr-type)
+              (parse-function-pointer-declarator type-spec)
+            (parse-global-declaration ptr-type name))
+          ;; Normal case: expect identifier for variable/function name
+          (let ((name (token-value (expect-token 'identifier))))
+            ;; Function definition or declaration?
+            (if (check-token 'punctuation "(")
+                (parse-function-definition type-spec name is-inline)
+                (parse-global-declaration type-spec name)))))))
 
 (defun parse-program ()
   "Parse a complete program"

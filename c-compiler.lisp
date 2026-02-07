@@ -57,7 +57,9 @@
   volatile-p     ; t for volatile, prevents register allocation
   const-p        ; t for const, enables constant propagation
   enum-tag       ; nil, :anonymous, or tag-name string for enum types
-  struct-tag)    ; nil, :anonymous, or tag-name string for struct types
+  struct-tag     ; nil, :anonymous, or tag-name string for struct types
+  struct-scope   ; scope level where struct/union was defined
+  return-type)   ; for function pointers, the full return type
 
 ;;; Symbol table entry
 (defstruct sym-entry
@@ -104,6 +106,7 @@
   (need-mul-runtime nil) ; set to t when __mul runtime is needed
   (need-div-runtime nil) ; set to t when __div runtime is needed
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
+  (need-indirect-call nil) ; set to t when indirect function calls are used
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
   (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
@@ -152,6 +155,18 @@
                                 :offset offset
                                 :scope (compiler-state-scope-level *state*)
                                 :function func)))
+    (setf (gethash key (compiler-state-symbols *state*)) entry)
+    entry))
+
+(defun add-global-symbol (name type storage &optional offset)
+  "Add a symbol at global scope (scope 0, no function)"
+  (let* ((key (make-symbol-key name 0 nil))
+         (entry (make-sym-entry :name name
+                                :type type
+                                :storage storage
+                                :offset offset
+                                :scope 0
+                                :function nil)))
     (setf (gethash key (compiler-state-symbols *state*)) entry)
     entry))
 
@@ -251,6 +266,14 @@
   (let ((num (incf (compiler-state-label-counter *state*))))
     (intern (format nil "~a~a" prefix num) :c-compiler)))
 
+(defun make-c-label (name)
+  "Create a label symbol for a C identifier, avoiding Common Lisp reserved names"
+  (let ((upper-name (string-upcase name)))
+    ;; Check if the name conflicts with CL special symbols
+    (if (member upper-name '("GO" "IF" "OR" "AND" "DO" "NIL" "T") :test #'string=)
+        (intern (format nil "_~a" upper-name) :c-compiler)
+        (intern upper-name :c-compiler))))
+
 (defun get-generated-code ()
   "Return the generated code in correct order"
   ;; First emit any needed runtime library functions
@@ -271,7 +294,18 @@
     (emit-div-runtime))
   ;; Emit modulo runtime if needed
   (when (compiler-state-need-mod-runtime *state*)
-    (emit-mod-runtime)))
+    (emit-mod-runtime))
+  ;; Emit indirect call helper if needed
+  (when (compiler-state-need-indirect-call *state*)
+    (emit-indirect-call-runtime)))
+
+(defun emit-indirect-call-runtime ()
+  "Emit the __indirect_call runtime helper: jumps to address in R0"
+  (emit '(:comment "======== runtime: __indirect_call ========"))
+  (emit '(:comment "Jump to function address in R0. SRP is preserved."))
+  (emit '(label |__indirect_call|))
+  (emit '(A=Rx R0))   ; load function address into A
+  (emit '(j-a)))      ; jump to it - called function returns to JSR's caller
 
 (defun emit-mul-runtime ()
   "Emit the __mul runtime function: P0 = P0 * P1"
@@ -445,38 +479,91 @@
   (cond
     ((> (type-desc-pointer-level type) 0) 4)
     ((eq (type-desc-base type) 'struct)
-     (let ((def (gethash (type-desc-struct-tag type)
-                         (compiler-state-struct-types *state*))))
+     (let* ((scope (type-desc-struct-scope type))
+            (def (if scope
+                     (lookup-struct-def-at-scope (type-desc-struct-tag type) scope)
+                     (nth-value 0 (lookup-struct-def (type-desc-struct-tag type))))))
        (if def (struct-def-alignment def) 4)))
     ((eq (type-desc-base type) 'union)
-     (let ((def (gethash (type-desc-struct-tag type)
-                         (compiler-state-union-types *state*))))
+     (let* ((scope (type-desc-struct-scope type))
+            (def (if scope
+                     (lookup-union-def-at-scope (type-desc-struct-tag type) scope)
+                     (nth-value 0 (lookup-union-def (type-desc-struct-tag type))))))
        (if def (struct-def-alignment def) 4)))
     (t (min 4 (type-size type)))))
 
+(defun make-struct-key (tag-name scope)
+  "Create a key for struct lookup: (tag-name . scope)"
+  (cons tag-name scope))
+
+(defun register-struct-def (tag-name def)
+  "Register a struct definition at the current scope"
+  (let ((key (make-struct-key tag-name (compiler-state-scope-level *state*))))
+    (setf (gethash key (compiler-state-struct-types *state*)) def)))
+
+(defun lookup-struct-def (tag-name)
+  "Look up a struct definition, searching from current scope down to 0"
+  (when tag-name
+    (loop for scope from (compiler-state-scope-level *state*) downto 0
+          for key = (make-struct-key tag-name scope)
+          for def = (gethash key (compiler-state-struct-types *state*))
+          when def return (values def scope))))
+
+(defun lookup-struct-def-at-scope (tag-name scope-level)
+  "Look up a struct definition at a specific scope level or below"
+  (when tag-name
+    (loop for scope from scope-level downto 0
+          for key = (make-struct-key tag-name scope)
+          for def = (gethash key (compiler-state-struct-types *state*))
+          when def return def)))
+
+(defun register-union-def (tag-name def)
+  "Register a union definition at the current scope"
+  (let ((key (make-struct-key tag-name (compiler-state-scope-level *state*))))
+    (setf (gethash key (compiler-state-union-types *state*)) def)))
+
+(defun lookup-union-def (tag-name)
+  "Look up a union definition, searching from current scope down to 0"
+  (when tag-name
+    (loop for scope from (compiler-state-scope-level *state*) downto 0
+          for key = (make-struct-key tag-name scope)
+          for def = (gethash key (compiler-state-union-types *state*))
+          when def return (values def scope))))
+
+(defun lookup-union-def-at-scope (tag-name scope-level)
+  "Look up a union definition at a specific scope level or below"
+  (when tag-name
+    (loop for scope from scope-level downto 0
+          for key = (make-struct-key tag-name scope)
+          for def = (gethash key (compiler-state-union-types *state*))
+          when def return def)))
+
 (defun make-struct-type (tag-name)
   "Create a type descriptor for a struct type"
-  (let ((def (when tag-name
-               (gethash tag-name (compiler-state-struct-types *state*)))))
+  (multiple-value-bind (def scope) (lookup-struct-def tag-name)
     (make-type-desc :base 'struct :pointer-level 0 :array-size nil
                     :size (if def (struct-def-size def) 0)
-                    :struct-tag (or tag-name :anonymous))))
+                    :struct-tag (or tag-name :anonymous)
+                    :struct-scope scope)))
 
 (defun make-union-type (tag-name)
   "Create a type descriptor for a union type"
-  (let ((def (when tag-name
-               (gethash tag-name (compiler-state-union-types *state*)))))
+  (multiple-value-bind (def scope) (lookup-union-def tag-name)
     (make-type-desc :base 'union :pointer-level 0 :array-size nil
                     :size (if def (struct-def-size def) 0)
-                    :struct-tag (or tag-name :anonymous))))
+                    :struct-tag (or tag-name :anonymous)
+                    :struct-scope scope)))
 
 (defun lookup-struct-member (struct-type member-name)
   "Look up a member in a struct or union type, returns struct-member or nil"
   (let* ((tag (type-desc-struct-tag struct-type))
-         (base (type-desc-base struct-type))
-         ;; Check both struct and union registries
-         (def (or (gethash tag (compiler-state-struct-types *state*))
-                  (gethash tag (compiler-state-union-types *state*)))))
+         (scope (type-desc-struct-scope struct-type))
+         ;; Use stored scope if available, otherwise search from current scope
+         (def (if scope
+                  (or (lookup-struct-def-at-scope tag scope)
+                      (lookup-union-def-at-scope tag scope))
+                  (or (nth-value 0 (lookup-struct-def tag))
+                      (nth-value 0 (lookup-union-def tag))))))
     (when def
       (find member-name (struct-def-members def)
             :key #'struct-member-name :test #'string=))))
@@ -484,17 +571,32 @@
 (defun type-size (type)
   "Return the size in bytes of a type"
   (cond
-    ;; Pointers are always 4 bytes
+    ;; Arrays - multiply element count by element size (check BEFORE pointers!)
+    ;; This handles arrays of pointers like int* a[2] correctly
+    ((and (type-desc-array-size type)
+          (numberp (type-desc-array-size type)))
+     (let* ((element-type (make-type-desc :base (type-desc-base type)
+                                          :pointer-level (type-desc-pointer-level type)
+                                          :size (type-desc-size type)
+                                          :struct-tag (type-desc-struct-tag type)
+                                          :struct-scope (type-desc-struct-scope type)))
+            (elem-size (type-size element-type)))
+       (* (type-desc-array-size type) elem-size)))
+    ;; Pointers are always 4 bytes (non-array pointers only reach here)
     ((> (type-desc-pointer-level type) 0) 4)
     ;; Struct types - look up size from definition
     ((eq (type-desc-base type) 'struct)
-     (let ((def (gethash (type-desc-struct-tag type)
-                         (compiler-state-struct-types *state*))))
+     (let* ((scope (type-desc-struct-scope type))
+            (def (if scope
+                     (lookup-struct-def-at-scope (type-desc-struct-tag type) scope)
+                     (nth-value 0 (lookup-struct-def (type-desc-struct-tag type))))))
        (if def (struct-def-size def) 0)))
     ;; Union types - look up size from definition
     ((eq (type-desc-base type) 'union)
-     (let ((def (gethash (type-desc-struct-tag type)
-                         (compiler-state-union-types *state*))))
+     (let* ((scope (type-desc-struct-scope type))
+            (def (if scope
+                     (lookup-union-def-at-scope (type-desc-struct-tag type) scope)
+                     (nth-value 0 (lookup-union-def (type-desc-struct-tag type))))))
        (if def (struct-def-size def) 0)))
     ;; Use explicit size if set
     ((type-desc-size type) (type-desc-size type))

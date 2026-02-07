@@ -228,6 +228,8 @@
   (setf *param-save-offset* 0)
   (setf *skip-final-return-jump* nil)
   (setf *local-reg-count* 0)
+  ;; Reset scope level to global scope for struct/type lookups
+  (setf (compiler-state-scope-level *state*) 0)
 
   ;; First pass: collect string literals
   (collect-strings ast)
@@ -276,6 +278,8 @@
     (global-var (generate-global-var node))
     (enum-decl nil)  ; Enum declarations are compile-time only, no code needed
     (typedef-decl nil)  ; Typedef declarations are compile-time only, no code needed
+    (struct-decl nil)  ; Struct declarations are compile-time only, no code needed
+    (type-decl nil)  ; Type declarations are compile-time only, no code needed
     (otherwise
      (compiler-warning "Ignoring top-level ~a" (ast-node-type node)))))
 
@@ -304,7 +308,7 @@
          (params (first (ast-node-children node)))
          (body (second (ast-node-children node)))
          (func-data (ast-node-data node))
-         (func-label (intern (string-upcase name) :c-compiler))
+         (func-label (make-c-label name))
          (*function-end-label* (gen-label (format nil "~a_END" (string-upcase name))))
          (*is-leaf-function* (is-leaf-function body))
          (*frame-size* (or (getf func-data :frame-size) 0))
@@ -469,7 +473,7 @@
                                 (type-desc-array-size var-type))
                        ;; This is a struct array
                        (let* ((tag (type-desc-struct-tag var-type))
-                              (struct-def (gethash tag (compiler-state-struct-types *state*))))
+                              (struct-def (lookup-struct-def tag)))
                          (when (and struct-def
                                     (not (member (struct-def-size struct-def) '(1 2 4))))
                            (push (ast-node-value n) result))))))
@@ -488,6 +492,9 @@
         ;; These generate JSR __MUL/__DIV/__MOD when optimize-size is true
         (and (eq (ast-node-type node) 'binary-op)
              (member (ast-node-value node) '("*" "/" "%") :test #'string=))
+        ;; Check for compound assignments that use runtime functions (*=, /=, %=)
+        (and (eq (ast-node-type node) 'assign)
+             (member (ast-node-value node) '("*=" "/=" "%=") :test #'string=))
         ;; Check for subscript of a known struct array
         (and (eq (ast-node-type node) 'subscript)
              (subscript-uses-struct-array node struct-array-vars))
@@ -501,11 +508,24 @@
               (ast-node-children node)))))
 
 (defun subscript-uses-struct-array (subscript-node struct-array-vars)
-  "Check if a subscript node accesses one of the known struct arrays"
+  "Check if a subscript node accesses one of the known struct arrays
+   or if the element type has a non-power-of-2 size"
   (let ((array-node (first (ast-node-children subscript-node))))
-    (and array-node
-         (eq (ast-node-type array-node) 'var-ref)
-         (member (ast-node-value array-node) struct-array-vars :test #'string=))))
+    (or
+     ;; Check local struct array variables
+     (and array-node
+          (eq (ast-node-type array-node) 'var-ref)
+          (member (ast-node-value array-node) struct-array-vars :test #'string=))
+     ;; Check type of array element - if struct with non-power-of-2 size, needs __MUL
+     (let ((elem-type (get-subscript-element-type subscript-node)))
+       (and elem-type
+            (or (eq (type-desc-base elem-type) 'struct)
+                (eq (type-desc-base elem-type) 'union))
+            (let* ((tag (type-desc-struct-tag elem-type))
+                   (def (or (lookup-struct-def tag)
+                            (lookup-union-def tag))))
+              (and def
+                   (not (member (struct-def-size def) '(1 2 4))))))))))
 
 (defun ends-with-return-p (node)
   "Check if a statement or block ends with a return statement"
@@ -951,7 +971,8 @@
                     :array-size nil  ; Element is not an array
                     :size (type-desc-size array-type)
                     :unsigned-p (type-desc-unsigned-p array-type)
-                    :struct-tag (type-desc-struct-tag array-type))))
+                    :struct-tag (type-desc-struct-tag array-type)
+                    :struct-scope (type-desc-struct-scope array-type))))
 
 (defun generate-local-init-list (init-list base-offset target-type)
   "Generate stores for each element of an init-list at computed offsets.
@@ -999,40 +1020,87 @@
 
     ;; Struct initialization
     ((type-desc-struct-tag target-type)
-     (let* ((struct-def (gethash (type-desc-struct-tag target-type)
-                                 (compiler-state-struct-types *state*)))
+     (let* ((struct-def (lookup-struct-def-at-scope
+                          (type-desc-struct-tag target-type)
+                          (or (type-desc-struct-scope target-type)
+                              (compiler-state-scope-level *state*))))
             (members (when struct-def (struct-def-members struct-def)))
-            (init-elements (ast-node-children init-list)))
+            (init-elements (ast-node-children init-list))
+            ;; Check if we have designated initializers
+            (has-designated (some (lambda (e)
+                                    (and (ast-node-p e)
+                                         (eq (ast-node-type e) 'designated-init)))
+                                  init-elements)))
        (when struct-def
-         ;; Initialize each member from corresponding init element
-         (loop for elem in init-elements
-               for member in members
-               do (let* ((member-type (struct-member-type member))
-                         (member-offset (struct-member-offset member))
-                         (member-size (type-size member-type)))
-                    (cond
-                      ;; Nested init-list for nested struct/array
-                      ((and (ast-node-p elem)
-                            (eq (ast-node-type elem) 'init-list))
-                       (generate-local-init-list elem
-                                                 (+ base-offset member-offset)
-                                                 member-type))
-                      ;; Regular expression
-                      (t
-                       (generate-expression elem)
-                       (when (< member-size 4)
-                         (emit-mask-to-size member-type))
-                       ;; Store using computed address (matching generate-struct-address pattern)
-                       (let ((value-reg (alloc-temp-reg))
-                             (addr-temp (alloc-temp-reg))
-                             (total-offset (+ base-offset *frame-size* member-offset)))
-                         (emit `(Rx=A ,value-reg))
-                         (emit `(A=Rx SP))
-                         (emit `(Rx= ,total-offset ,addr-temp))
-                         (emit `(A+=Rx ,addr-temp))
-                         (emit-store-sized member-type value-reg)
-                         (free-temp-reg addr-temp)
-                         (free-temp-reg value-reg)))))))))
+         (if has-designated
+             ;; Handle designated initializers
+             (let ((init-map (make-hash-table :test #'equal)))
+               ;; Populate the map from designated initializers
+               (dolist (elem init-elements)
+                 (when (and (ast-node-p elem)
+                            (eq (ast-node-type elem) 'designated-init))
+                   (let ((field-name (ast-node-value elem))
+                         (init-expr (first (ast-node-children elem))))
+                     (setf (gethash field-name init-map) init-expr))))
+               ;; Initialize each member
+               (dolist (member members)
+                 (let* ((member-name (struct-member-name member))
+                        (member-type (struct-member-type member))
+                        (member-offset (struct-member-offset member))
+                        (member-size (type-size member-type))
+                        (elem (gethash member-name init-map)))
+                   (when elem
+                     (cond
+                       ;; Nested init-list
+                       ((and (ast-node-p elem)
+                             (eq (ast-node-type elem) 'init-list))
+                        (generate-local-init-list elem
+                                                  (+ base-offset member-offset)
+                                                  member-type))
+                       ;; Regular expression
+                       (t
+                        (generate-expression elem)
+                        (when (< member-size 4)
+                          (emit-mask-to-size member-type))
+                        (let ((value-reg (alloc-temp-reg))
+                              (addr-temp (alloc-temp-reg))
+                              (total-offset (+ base-offset *frame-size* member-offset)))
+                          (emit `(Rx=A ,value-reg))
+                          (emit `(A=Rx SP))
+                          (emit `(Rx= ,total-offset ,addr-temp))
+                          (emit `(A+=Rx ,addr-temp))
+                          (emit-store-sized member-type value-reg)
+                          (free-temp-reg addr-temp)
+                          (free-temp-reg value-reg))))))))
+             ;; Non-designated: initialize members in order
+             (loop for elem in init-elements
+                   for member in members
+                   do (let* ((member-type (struct-member-type member))
+                             (member-offset (struct-member-offset member))
+                             (member-size (type-size member-type)))
+                        (cond
+                          ;; Nested init-list for nested struct/array
+                          ((and (ast-node-p elem)
+                                (eq (ast-node-type elem) 'init-list))
+                           (generate-local-init-list elem
+                                                     (+ base-offset member-offset)
+                                                     member-type))
+                          ;; Regular expression
+                          (t
+                           (generate-expression elem)
+                           (when (< member-size 4)
+                             (emit-mask-to-size member-type))
+                           ;; Store using computed address
+                           (let ((value-reg (alloc-temp-reg))
+                                 (addr-temp (alloc-temp-reg))
+                                 (total-offset (+ base-offset *frame-size* member-offset)))
+                             (emit `(Rx=A ,value-reg))
+                             (emit `(A=Rx SP))
+                             (emit `(Rx= ,total-offset ,addr-temp))
+                             (emit `(A+=Rx ,addr-temp))
+                             (emit-store-sized member-type value-reg)
+                             (free-temp-reg addr-temp)
+                             (free-temp-reg value-reg))))))))))
 
     ;; Fallback: shouldn't happen
     (t (compiler-warning "Unknown type for init-list initialization"))))
@@ -1231,7 +1299,7 @@
       (:global
        ;; For arrays, return the address (array-to-pointer decay)
        ;; For scalars, load the value from global address with sized load
-       (let ((label (intern (string-upcase name) :c-compiler))
+       (let ((label (make-c-label name))
              (var-type (sym-entry-type sym))
              (temp (alloc-temp-reg)))
          (emit `(Rx= ,label ,temp))
@@ -1257,6 +1325,14 @@
                (emit `(Rx= ,value ,temp))
                (emit `(A=Rx ,temp))
                (free-temp-reg temp)))))
+
+      (:function
+       ;; Function reference - load function address (for function pointers)
+       (let ((label (sym-entry-offset sym))  ; label is stored in offset
+             (temp (alloc-temp-reg)))
+         (emit `(Rx= ,label ,temp))
+         (emit `(A=Rx ,temp))
+         (free-temp-reg temp)))
 
       (:static-local
        ;; Static local - load from global label (stored in offset field)
@@ -1325,6 +1401,23 @@
                                (get-dereferenced-type base-type) base-type))
               (member (lookup-struct-member struct-type member-name)))
          (when member (struct-member-type member))))
+      (call
+       ;; Function call - get return type from callee's type
+       (let* ((callee (first (ast-node-children node))))
+         ;; Check if callee is a direct function reference (var-ref to :function symbol)
+         (if (and (eq (ast-node-type callee) 'var-ref)
+                  (let ((sym (lookup-symbol (ast-node-value callee))))
+                    (and sym (eq (sym-entry-storage sym) :function))))
+             ;; Direct function call - return the stored return type
+             (let ((sym (lookup-symbol (ast-node-value callee))))
+               (sym-entry-type sym))
+             ;; Indirect call through function pointer - get callee type and extract return-type
+             (let ((callee-type (get-expression-type callee)))
+               (when callee-type
+                 (if (type-desc-return-type callee-type)
+                     (type-desc-return-type callee-type)
+                     ;; Fallback for non-function-pointer types
+                     callee-type))))))
       (otherwise (ast-node-result-type node)))))
 
 (defun pointer-element-size (type)
@@ -1764,7 +1857,14 @@
             (emit `(A+=Rx ,temp))
             (free-temp-reg temp)))
          (:global
-          (let ((label (intern (string-upcase name) :c-compiler))
+          (let ((label (make-c-label name))
+                (temp (alloc-temp-reg)))
+            (emit `(Rx= ,label ,temp))
+            (emit `(A=Rx ,temp))
+            (free-temp-reg temp)))
+         (:function
+          ;; Address of function - load the function label
+          (let ((label (sym-entry-offset sym))  ; offset holds the label
                 (temp (alloc-temp-reg)))
             (emit `(Rx= ,label ,temp))
             (emit `(A=Rx ,temp))
@@ -1806,7 +1906,7 @@
                   (emit `(M[A+n]=Rx ,offset ,value-reg)))
               (free-temp-reg value-reg)))
            (:global
-            (let ((label (intern (string-upcase name) :c-compiler))
+            (let ((label (make-c-label name))
                   (value-reg (alloc-temp-reg))
                   (addr-reg (alloc-temp-reg)))
               (emit `(Rx=A ,value-reg))
@@ -1920,7 +2020,8 @@
                                :pointer-level (max 0 (1- (type-desc-pointer-level arr-type)))
                                :size (type-desc-size arr-type)
                                :unsigned-p (type-desc-unsigned-p arr-type)
-                               :struct-tag (type-desc-struct-tag arr-type)))))))
+                               :struct-tag (type-desc-struct-tag arr-type)
+                               :struct-scope (type-desc-struct-scope arr-type)))))))
       (otherwise nil))))
 
 (defun generate-assignment (node)
@@ -1950,12 +2051,21 @@
   "Generate code for a function call"
   (let* ((func-expr (first (ast-node-children node)))
          (args (rest (ast-node-children node)))
-         (func-name (if (eq (ast-node-type func-expr) 'var-ref)
-                        (ast-node-value func-expr)
-                        nil))
-         (func-label (when func-name
-                       (intern (string-upcase func-name) :c-compiler)))
-         (arg-count (length args)))
+         ;; Only use direct call if callee is a var-ref to a :function symbol
+         (func-label (when (eq (ast-node-type func-expr) 'var-ref)
+                       (let* ((name (ast-node-value func-expr))
+                              (sym (lookup-symbol name)))
+                         (when (and sym (eq (sym-entry-storage sym) :function))
+                           (make-c-label name)))))
+         (arg-count (length args))
+         (indirect-temp nil))  ; Temp register for indirect call target
+
+    ;; For indirect calls (func-label is nil), evaluate func expression first
+    ;; and save to a temp register
+    (unless func-label
+      (setf indirect-temp (alloc-temp-reg))
+      (generate-expression func-expr)
+      (emit `(Rx=A ,indirect-temp)))
 
     ;; Handle stack arguments FIRST (args 5+) before allocating temps for args 0-3
     ;; This maximizes available temp regs during stack arg evaluation
@@ -1996,7 +2106,15 @@
                  (emit `(Rx=A ,(nth i *param-regs*)))))
 
       ;; Call function
-      (emit `(jsr ,func-label))
+      (if func-label
+          ;; Direct call
+          (emit `(jsr ,func-label))
+          ;; Indirect call: move func addr to R0 and call helper
+          (progn
+            (setf (compiler-state-need-indirect-call *state*) t)
+            (emit `(A=Rx ,indirect-temp))
+            (emit '(Rx=A R0))
+            (emit '(jsr |__indirect_call|))))
 
       ;; Clean up stack arguments
       (when (> arg-count 4)
@@ -2009,6 +2127,8 @@
       ;; Free the arg temps
       (dolist (temp arg-temps)
         (free-temp-reg temp))
+      (when indirect-temp
+        (free-temp-reg indirect-temp))
 
       ;; Result is in P0, move to A
       (emit '(A=Rx P0)))))
@@ -2085,7 +2205,8 @@
                     :pointer-level (1- (type-desc-pointer-level type))
                     :size (type-desc-size type)
                     :unsigned-p (type-desc-unsigned-p type)
-                    :struct-tag (type-desc-struct-tag type))))
+                    :struct-tag (type-desc-struct-tag type)
+                    :struct-scope (type-desc-struct-scope type))))
 
 (defun generate-struct-address (node)
   "Generate code to get address of a struct variable"
@@ -2103,7 +2224,7 @@
             (emit `(A+=Rx ,temp))
             (free-temp-reg temp)))
          (:global
-          (let ((label (intern (string-upcase name) :c-compiler)))
+          (let ((label (make-c-label name)))
             (emit `(Rx= ,label R0))
             (emit `(A=Rx R0))))
          (otherwise
@@ -2144,12 +2265,17 @@
          (member (lookup-struct-member struct-type member-name)))
     (unless member (compiler-error "Unknown struct member: ~a" member-name))
     (generate-member-address node)
-    (let ((member-type (struct-member-type member))
-          (temp (alloc-temp-reg)))
-      (emit-load-sized member-type temp)
-      (emit `(A=Rx ,temp))
-      (free-temp-reg temp)
-      (emit-promote-to-int member-type))))
+    (let ((member-type (struct-member-type member)))
+      ;; If member is an array, just return its address (array decays to pointer)
+      (if (type-desc-array-size member-type)
+          ;; Address is already in A, nothing more to do
+          nil
+          ;; Non-array: load the value
+          (let ((temp (alloc-temp-reg)))
+            (emit-load-sized member-type temp)
+            (emit `(A=Rx ,temp))
+            (free-temp-reg temp)
+            (emit-promote-to-int member-type))))))
 
 (defun generate-ternary (node)
   "Generate code for ternary conditional"
@@ -2658,7 +2784,7 @@
   (let* ((name (ast-node-value node))
          (var-type (ast-node-result-type node))
          (init-data (ast-node-data node))
-         (label (intern (string-upcase name) :c-compiler))
+         (label (make-c-label name))
          (alignment (type-alignment var-type)))
     ;; Ensure proper alignment before data label
     (when (>= alignment 4)
@@ -2683,6 +2809,9 @@
       (t
        (let ((init-value (or init-data 0))
              (size (type-size var-type)))
+         ;; Check if init-value is a label reference (:label SYMBOL)
+         (when (and (listp init-value) (eq (car init-value) :label))
+           (setf init-value (second init-value)))  ; extract the label symbol
          ;; For arrays without initializer, emit zeroes for each element
          (if (type-desc-array-size var-type)
              (let* ((array-size (type-desc-array-size var-type))
@@ -2707,75 +2836,175 @@
             (element-size (type-size element-type))
             (array-size (type-desc-array-size target-type))
             (init-elements (ast-node-children init-list))
-            (num-inits (length init-elements)))
-       ;; Emit data for each initializer element
-       (dolist (elem init-elements)
-         (cond
-           ;; Nested init-list (for arrays of structs or 2D arrays)
-           ((and (ast-node-p elem)
-                 (eq (ast-node-type elem) 'init-list))
-            (generate-global-init-list elem element-type))
-           ;; Literal value
-           ((and (ast-node-p elem)
-                 (eq (ast-node-type elem) 'literal))
-            (let ((val (ast-node-value elem)))
-              (case element-size
-                (1 (emit `(abyte ,val)))
-                (2 (emit `(aword ,val)))
-                (otherwise (emit `(adword ,val))))))
-           ;; Constant expression
-           (t
-            (let ((val (evaluate-constant-expression elem)))
-              (unless val
-                (compiler-error "Global array initializer must be a constant expression"))
-              (case element-size
-                (1 (emit `(abyte ,val)))
-                (2 (emit `(aword ,val)))
-                (otherwise (emit `(adword ,val))))))))
-       ;; Zero-fill remaining elements
-       (when (< num-inits array-size)
-         (dotimes (i (- array-size num-inits))
-           (case element-size
-             (1 (emit `(abyte 0)))
-             (2 (emit `(aword 0)))
-             (otherwise (emit `(adword 0))))))))
+            ;; Check if we have array designated initializers
+            (has-array-designated (some (lambda (e)
+                                          (and (ast-node-p e)
+                                               (eq (ast-node-type e) 'array-designated-init)))
+                                        init-elements)))
+       (if has-array-designated
+           ;; Handle array designated initializers by building a value array
+           (let ((values (make-array array-size :initial-element nil))
+                 (current-index 0))
+             ;; Populate values array
+             (dolist (elem init-elements)
+               (cond
+                 ;; Array designated initializer [n] = value
+                 ((and (ast-node-p elem)
+                       (eq (ast-node-type elem) 'array-designated-init))
+                  (let* ((index-expr (first (ast-node-children elem)))
+                         (init-expr (second (ast-node-children elem)))
+                         (index-val (evaluate-constant-expression index-expr)))
+                    (when (and index-val (< index-val array-size))
+                      (setf (aref values index-val) init-expr)
+                      (setf current-index (1+ index-val)))))
+                 ;; Regular element
+                 (t
+                  (when (< current-index array-size)
+                    (setf (aref values current-index) elem)
+                    (incf current-index)))))
+             ;; Emit data for each element
+             (dotimes (i array-size)
+               (let ((elem (aref values i)))
+                 (cond
+                   ;; Nested init-list
+                   ((and elem (ast-node-p elem)
+                         (eq (ast-node-type elem) 'init-list))
+                    (generate-global-init-list elem element-type))
+                   ;; Has a value
+                   (elem
+                    (let ((val (if (and (ast-node-p elem)
+                                        (eq (ast-node-type elem) 'literal))
+                                   (ast-node-value elem)
+                                   (or (evaluate-constant-expression elem) 0))))
+                      (case element-size
+                        (1 (emit `(abyte ,val)))
+                        (2 (emit `(aword ,val)))
+                        (otherwise (emit `(adword ,val))))))
+                   ;; Zero for uninitialized
+                   (t
+                    (case element-size
+                      (1 (emit `(abyte 0)))
+                      (2 (emit `(aword 0)))
+                      (otherwise (emit `(adword 0)))))))))
+           ;; No designated initializers - simple case
+           (let ((num-inits (length init-elements)))
+             ;; Emit data for each initializer element
+             (dolist (elem init-elements)
+               (cond
+                 ;; Nested init-list (for arrays of structs or 2D arrays)
+                 ((and (ast-node-p elem)
+                       (eq (ast-node-type elem) 'init-list))
+                  (generate-global-init-list elem element-type))
+                 ;; Literal value
+                 ((and (ast-node-p elem)
+                       (eq (ast-node-type elem) 'literal))
+                  (let ((val (ast-node-value elem)))
+                    (case element-size
+                      (1 (emit `(abyte ,val)))
+                      (2 (emit `(aword ,val)))
+                      (otherwise (emit `(adword ,val))))))
+                 ;; Constant expression
+                 (t
+                  (let ((val (evaluate-constant-expression elem)))
+                    (unless val
+                      (compiler-error "Global array initializer must be a constant expression"))
+                    (case element-size
+                      (1 (emit `(abyte ,val)))
+                      (2 (emit `(aword ,val)))
+                      (otherwise (emit `(adword ,val))))))))
+             ;; Zero-fill remaining elements
+             (when (< num-inits array-size)
+               (dotimes (i (- array-size num-inits))
+                 (case element-size
+                   (1 (emit `(abyte 0)))
+                   (2 (emit `(aword 0)))
+                   (otherwise (emit `(adword 0))))))))))
 
     ;; Struct initialization
     ((type-desc-struct-tag target-type)
-     (let* ((struct-def (gethash (type-desc-struct-tag target-type)
-                                 (compiler-state-struct-types *state*)))
+     (let* ((struct-def (lookup-struct-def (type-desc-struct-tag target-type)))
             (members (when struct-def (struct-def-members struct-def)))
             (init-elements (ast-node-children init-list))
-            (current-offset 0))
+            (current-offset 0)
+            ;; Check if we have designated initializers
+            (has-designated (some (lambda (e)
+                                    (and (ast-node-p e)
+                                         (eq (ast-node-type e) 'designated-init)))
+                                  init-elements)))
        (when struct-def
-         ;; Initialize each member from corresponding init element
-         (loop for member in members
-               for elem = (pop init-elements)
-               do (let* ((member-type (struct-member-type member))
-                         (member-offset (struct-member-offset member))
-                         (member-size (type-size member-type)))
-                    ;; Emit padding if needed
-                    (when (> member-offset current-offset)
-                      (dotimes (i (- member-offset current-offset))
-                        (emit `(abyte 0))))
-                    (setf current-offset member-offset)
-                    (cond
-                      ;; Nested init-list for nested struct/array
-                      ((and elem
-                            (ast-node-p elem)
-                            (eq (ast-node-type elem) 'init-list))
-                       (generate-global-init-list elem member-type)
-                       (incf current-offset (type-size member-type)))
-                      ;; Value (or nil for uninitialized)
-                      (t
-                       (let ((val (if elem
-                                      (or (evaluate-constant-expression elem) 0)
-                                      0)))
-                         (case member-size
-                           (1 (emit `(abyte ,val)))
-                           (2 (emit `(aword ,val)))
-                           (otherwise (emit `(adword ,val))))
-                         (incf current-offset member-size))))))
+         (if has-designated
+             ;; Handle designated initializers - build a map from member name to value
+             (let ((init-map (make-hash-table :test #'equal)))
+               ;; Populate the map from designated initializers
+               (dolist (elem init-elements)
+                 (when (and (ast-node-p elem)
+                            (eq (ast-node-type elem) 'designated-init))
+                   (let ((field-name (ast-node-value elem))
+                         (init-expr (first (ast-node-children elem))))
+                     (setf (gethash field-name init-map) init-expr))))
+               ;; Now emit members in order
+               (dolist (member members)
+                 (let* ((member-name (struct-member-name member))
+                        (member-type (struct-member-type member))
+                        (member-offset (struct-member-offset member))
+                        (member-size (type-size member-type))
+                        (elem (gethash member-name init-map)))
+                   ;; Emit padding if needed
+                   (when (> member-offset current-offset)
+                     (dotimes (i (- member-offset current-offset))
+                       (emit `(abyte 0))))
+                   (setf current-offset member-offset)
+                   (cond
+                     ;; Nested init-list for nested struct/array
+                     ((and elem
+                           (ast-node-p elem)
+                           (eq (ast-node-type elem) 'init-list))
+                      (generate-global-init-list elem member-type)
+                      (incf current-offset (type-size member-type)))
+                     ;; Value (or nil/0 for uninitialized)
+                     (t
+                      (let ((val (if elem
+                                     (or (evaluate-constant-expression elem) 0)
+                                     0)))
+                        ;; Check if val is a label reference (:label SYMBOL)
+                        (when (and (listp val) (eq (car val) :label))
+                          (setf val (second val)))
+                        (case member-size
+                          (1 (emit `(abyte ,val)))
+                          (2 (emit `(aword ,val)))
+                          (otherwise (emit `(adword ,val))))
+                        (incf current-offset member-size)))))))
+             ;; Non-designated: iterate through members and pop elements in order
+             (loop for member in members
+                   for elem = (pop init-elements)
+                   do (let* ((member-type (struct-member-type member))
+                             (member-offset (struct-member-offset member))
+                             (member-size (type-size member-type)))
+                        ;; Emit padding if needed
+                        (when (> member-offset current-offset)
+                          (dotimes (i (- member-offset current-offset))
+                            (emit `(abyte 0))))
+                        (setf current-offset member-offset)
+                        (cond
+                          ;; Nested init-list for nested struct/array
+                          ((and elem
+                                (ast-node-p elem)
+                                (eq (ast-node-type elem) 'init-list))
+                           (generate-global-init-list elem member-type)
+                           (incf current-offset (type-size member-type)))
+                          ;; Value (or nil for uninitialized)
+                          (t
+                           (let ((val (if elem
+                                          (or (evaluate-constant-expression elem) 0)
+                                          0)))
+                             ;; Check if val is a label reference (:label SYMBOL)
+                             (when (and (listp val) (eq (car val) :label))
+                               (setf val (second val)))
+                             (case member-size
+                               (1 (emit `(abyte ,val)))
+                               (2 (emit `(aword ,val)))
+                               (otherwise (emit `(adword ,val))))
+                             (incf current-offset member-size)))))))
          ;; Emit trailing padding to reach struct size
          (let ((struct-size (struct-def-size struct-def)))
            (when (< current-offset struct-size)
