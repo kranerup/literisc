@@ -4104,6 +4104,153 @@ int main() {
     (test-local-constant-propagation)
     (test-dead-code-elimination)))
 
+;;; ===========================================================================
+;;; Phase 23: Initializer Lists
+;;; ===========================================================================
+
+(deftest test-array-init ()
+  "Test basic array initializer lists"
+  (check
+    ;; Basic array initialization
+    (= 60 (run-and-get-result "
+int main() {
+    int arr[3] = {10, 20, 30};
+    return arr[0] + arr[1] + arr[2];
+}"))
+    ;; Access different elements
+    (= 20 (run-and-get-result "
+int main() {
+    int arr[3] = {10, 20, 30};
+    return arr[1];
+}"))))
+
+(deftest test-array-size-inference ()
+  "Test array size inference from initializer"
+  (check
+    ;; Size inferred from init list
+    (= 5 (run-and-get-result "
+int main() {
+    int arr[] = {1, 2, 3, 4, 5};
+    return arr[4];
+}"))
+    ;; Sum with inferred size
+    (= 15 (run-and-get-result "
+int main() {
+    int arr[] = {1, 2, 3, 4, 5};
+    return arr[0] + arr[1] + arr[2] + arr[3] + arr[4];
+}"))))
+
+(deftest test-struct-init ()
+  "Test struct initializer lists"
+  (check
+    ;; Basic struct initialization
+    (= 300 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point p = {100, 200};
+    return p.x + p.y;
+}"))
+    ;; Access individual members
+    (= 100 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point p = {100, 200};
+    return p.x;
+}"))))
+
+(deftest test-global-array-init ()
+  "Test global array initialization"
+  (check
+    ;; Global array init
+    (= 10 (run-and-get-result "
+int arr[] = {5, 10, 15};
+int main() {
+    return arr[1];
+}"))
+    ;; Global array sum
+    (= 30 (run-and-get-result "
+int arr[] = {5, 10, 15};
+int main() {
+    return arr[0] + arr[1] + arr[2];
+}"))))
+
+(deftest test-global-struct-init ()
+  "Test global struct initialization"
+  (check
+    ;; Global struct init
+    (= 50 (run-and-get-result "
+struct Point { int x; int y; };
+struct Point p = {20, 30};
+int main() {
+    return p.x + p.y;
+}"))))
+
+(deftest test-array-of-structs-init ()
+  "Test array of structs initialization"
+  (check
+    ;; Array of structs
+    (= 5 (run-and-get-result "
+struct Point { int x; int y; };
+int main() {
+    struct Point pts[2] = {{1, 2}, {3, 4}};
+    return pts[0].x + pts[1].y;
+}"))))
+
+(deftest test-string-to-char-array ()
+  "Test string literal to char array initialization"
+  (check
+    ;; String to char array
+    (= 198 (run-and-get-result "
+int main() {
+    char str[] = \"ABC\";
+    return str[0] + str[1] + str[2];
+}"))
+    ;; Check null terminator
+    (= 0 (run-and-get-result "
+int main() {
+    char str[] = \"ABC\";
+    return str[3];
+}"))))
+
+(deftest test-partial-init ()
+  "Test partial initialization with zero-fill"
+  (check
+    ;; Partial init should zero-fill
+    (= 0 (run-and-get-result "
+int main() {
+    int arr[5] = {1, 2};
+    return arr[2] + arr[3] + arr[4];
+}"))
+    ;; First elements should be set
+    (= 3 (run-and-get-result "
+int main() {
+    int arr[5] = {1, 2};
+    return arr[0] + arr[1];
+}"))))
+
+(deftest test-char-array-init ()
+  "Test char array initialization"
+  (check
+    ;; Char array with init list
+    (= 198 (run-and-get-result "
+int main() {
+    char arr[3] = {65, 66, 67};
+    return arr[0] + arr[1] + arr[2];
+}"))))
+
+(deftest test-phase23-initializers ()
+  "Run all initializer tests"
+  (combine-results
+    (test-array-init)
+    (test-array-size-inference)
+    (test-struct-init)
+    (test-global-array-init)
+    (test-global-struct-init)
+    (test-array-of-structs-init)
+    (test-string-to-char-array)
+    (test-partial-init)
+    (test-char-array-init)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -4128,7 +4275,8 @@ int main() {
     (test-phase19-peephole)
     (test-phase20-typedef)
     (test-phase21-regpressure)
-    (test-phase22-new-features)))
+    (test-phase22-new-features)
+    (test-phase23-initializers)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

@@ -878,6 +878,48 @@
     (let ((stmt (parse-statement)))  ; parse the following statement
       (make-node 'labeled-stmt :value label-name :children (list stmt)))))
 
+;;; ===========================================================================
+;;; Initializer List Parsing
+;;; ===========================================================================
+
+(defun parse-initializer ()
+  "Parse either a single expression or an initializer list.
+   Also handles string literal as special case for char array initialization."
+  (if (check-token 'punctuation "{")
+      (parse-initializer-list)
+      (parse-assignment-expression)))
+
+(defun parse-initializer-list ()
+  "Parse {expr, expr, ...} including nested lists.
+   Returns an AST node of type 'init-list with children being the elements."
+  (expect-token 'punctuation "{")
+  (let ((elements nil))
+    ;; Handle empty initializer list {}
+    (unless (check-token 'punctuation "}")
+      (push (parse-initializer) elements)  ; recursive for nesting
+      (loop while (match-token 'punctuation ",")
+            do (unless (check-token 'punctuation "}")
+                 (push (parse-initializer) elements))))
+    (expect-token 'punctuation "}")
+    (make-node 'init-list :children (nreverse elements))))
+
+(defun infer-array-size-from-init (init-node element-type)
+  "Infer array size from initializer.
+   For init-list: count top-level elements.
+   For string-literal initializing char[]: use strlen+1."
+  (cond
+    ;; Init list - count elements
+    ((and (ast-node-p init-node)
+          (eq (ast-node-type init-node) 'init-list))
+     (length (ast-node-children init-node)))
+    ;; String literal for char array - use strlen+1
+    ((and (ast-node-p init-node)
+          (eq (ast-node-type init-node) 'string-literal)
+          (eq (type-desc-base element-type) 'char))
+     (1+ (length (ast-node-value init-node))))
+    ;; Otherwise can't infer
+    (t nil)))
+
 (defun parse-local-declaration ()
   "Parse a local variable declaration, including static locals"
   ;; Check for static keyword
@@ -890,8 +932,10 @@
                (array-size nil))
           ;; Check for array declaration
           (when (match-token 'punctuation "[")
-            (when (check-token 'number)
-              (setf array-size (token-value (advance-token))))
+            (if (check-token 'number)
+                (setf array-size (token-value (advance-token)))
+                ;; Use :infer marker when [] has no size - needs inference
+                (setf array-size :infer))
             (expect-token 'punctuation "]")
             (setf var-type (make-type-desc :base (type-desc-base var-type)
                                            :pointer-level (type-desc-pointer-level var-type)
@@ -904,7 +948,25 @@
           (let ((init nil)
                 (init-value 0))  ; Default init for static
             (when (match-token 'operator "=")
-              (setf init (parse-assignment-expression))
+              (setf init (parse-initializer))
+              ;; Infer array size if declared with [] but no size specified
+              (when (and (eq array-size :infer)
+                         init
+                         (or (and (ast-node-p init)
+                                  (eq (ast-node-type init) 'init-list))
+                             (and (ast-node-p init)
+                                  (eq (ast-node-type init) 'string-literal)
+                                  (eq (type-desc-base var-type) 'char))))
+                ;; Infer array size from initializer
+                (let ((inferred-size (infer-array-size-from-init init var-type)))
+                  (when inferred-size
+                    (setf array-size inferred-size)
+                    (setf var-type (make-type-desc :base (type-desc-base var-type)
+                                                   :pointer-level (type-desc-pointer-level var-type)
+                                                   :array-size array-size
+                                                   :size (type-desc-size var-type)
+                                                   :unsigned-p (type-desc-unsigned-p var-type)
+                                                   :struct-tag (type-desc-struct-tag var-type))))))
               ;; For static locals, try to evaluate constant initializer
               (when is-static
                 (let ((const-val (evaluate-constant-expression init)))
@@ -1056,43 +1118,84 @@
   (let ((decls nil))
     ;; Add first declarator
     (let ((array-size nil)
-          (init-value 0))
+          (init-value 0)
+          (init-node nil))
       (when (match-token 'punctuation "[")
-        (when (check-token 'number)
-          (setf array-size (token-value (advance-token))))
-        (expect-token 'punctuation "]"))
+        (if (check-token 'number)
+            (setf array-size (token-value (advance-token)))
+            ;; Use :infer marker when [] has no size
+            (setf array-size :infer))
+        (expect-token 'punctuation "]")
+        ;; Create array type
+        (setf var-type (make-type-desc :base (type-desc-base var-type)
+                                       :pointer-level (type-desc-pointer-level var-type)
+                                       :array-size array-size
+                                       :size (type-desc-size var-type)
+                                       :unsigned-p (type-desc-unsigned-p var-type)
+                                       :struct-tag (type-desc-struct-tag var-type))))
 
       ;; Check for initializer
       (when (match-token 'operator "=")
-        (let* ((init-expr (parse-assignment-expression))
-               (const-val (evaluate-constant-expression init-expr)))
-          (if const-val
-              (setf init-value const-val)
-              (compiler-error "Global variable initializer must be a constant expression"))))
+        (setf init-node (parse-initializer))
+        ;; Infer array size if declared with [] but no size specified
+        (when (and (eq array-size :infer)
+                   init-node
+                   (or (and (ast-node-p init-node)
+                            (eq (ast-node-type init-node) 'init-list))
+                       (and (ast-node-p init-node)
+                            (eq (ast-node-type init-node) 'string-literal)
+                            (eq (type-desc-base var-type) 'char))))
+          (let ((inferred-size (infer-array-size-from-init init-node var-type)))
+            (when inferred-size
+              (setf array-size inferred-size)
+              (setf var-type (make-type-desc :base (type-desc-base var-type)
+                                             :pointer-level (type-desc-pointer-level var-type)
+                                             :array-size array-size
+                                             :size (type-desc-size var-type)
+                                             :unsigned-p (type-desc-unsigned-p var-type)
+                                             :struct-tag (type-desc-struct-tag var-type))))))
+        ;; For simple expressions, evaluate to constant
+        (unless (and (ast-node-p init-node)
+                     (eq (ast-node-type init-node) 'init-list))
+          (let ((const-val (evaluate-constant-expression init-node)))
+            (if const-val
+                (setf init-value const-val)
+                (compiler-error "Global variable initializer must be a constant expression")))))
 
       (add-symbol name var-type :global nil)
       (push (make-node 'global-var
                        :value name
                        :result-type var-type
-                       :data init-value)
+                       ;; Store init-list node in data field, or constant value
+                       :data (if (and (ast-node-p init-node)
+                                      (eq (ast-node-type init-node) 'init-list))
+                                 init-node
+                                 init-value))
             decls))
 
     ;; Parse additional declarators
     (loop while (match-token 'punctuation ",")
           do (let ((next-name (token-value (expect-token 'identifier)))
-                   (init-value 0))
+                   (next-init-value 0)
+                   (next-init-node nil))
                ;; Check for initializer on additional declarators
                (when (match-token 'operator "=")
-                 (let* ((init-expr (parse-assignment-expression))
-                        (const-val (evaluate-constant-expression init-expr)))
-                   (if const-val
-                       (setf init-value const-val)
-                       (compiler-error "Global variable initializer must be a constant expression"))))
+                 (setf next-init-node (parse-initializer))
+                 ;; For simple expressions, evaluate to constant
+                 (unless (and (ast-node-p next-init-node)
+                              (eq (ast-node-type next-init-node) 'init-list))
+                   (let ((const-val (evaluate-constant-expression next-init-node)))
+                     (if const-val
+                         (setf next-init-value const-val)
+                         (compiler-error "Global variable initializer must be a constant expression")))))
                (add-symbol next-name var-type :global nil)
                (push (make-node 'global-var
                                 :value next-name
                                 :result-type var-type
-                                :data init-value)
+                                :data (if (and (ast-node-p next-init-node)
+                                               (eq (ast-node-type next-init-node) 'init-list))
+                                          next-init-node
+                                          next-init-value))
                      decls)))
 
     (expect-token 'punctuation ";")

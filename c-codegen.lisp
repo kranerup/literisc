@@ -939,6 +939,133 @@
   "Generate code for an expression statement"
   (generate-expression (first (ast-node-children node))))
 
+;;; ===========================================================================
+;;; Initializer List Code Generation
+;;; ===========================================================================
+
+(defun get-array-element-type (array-type)
+  "Get the element type of an array type"
+  (when (type-desc-array-size array-type)
+    (make-type-desc :base (type-desc-base array-type)
+                    :pointer-level (type-desc-pointer-level array-type)
+                    :array-size nil  ; Element is not an array
+                    :size (type-desc-size array-type)
+                    :unsigned-p (type-desc-unsigned-p array-type)
+                    :struct-tag (type-desc-struct-tag array-type))))
+
+(defun generate-local-init-list (init-list base-offset target-type)
+  "Generate stores for each element of an init-list at computed offsets.
+   base-offset is the stack offset of the array/struct base.
+   target-type is the type of the variable being initialized."
+  (cond
+    ;; Array initialization
+    ((type-desc-array-size target-type)
+     (let* ((element-type (get-array-element-type target-type))
+            (element-size (type-size element-type))
+            (array-size (type-desc-array-size target-type))
+            (init-elements (ast-node-children init-list))
+            (num-inits (length init-elements))
+            (offset 0))
+       ;; Initialize elements from init-list
+       (dolist (elem init-elements)
+         (cond
+           ;; Nested init-list (for arrays of structs or 2D arrays)
+           ((and (ast-node-p elem)
+                 (eq (ast-node-type elem) 'init-list))
+            (generate-local-init-list elem (+ base-offset offset) element-type))
+           ;; Regular expression
+           (t
+            (generate-expression elem)
+            ;; Mask value to appropriate size
+            (when (< element-size 4)
+              (emit-mask-to-size element-type))
+            ;; Store to stack at base-offset + offset
+            (let ((actual-offset (+ base-offset offset *frame-size*))
+                  (value-reg (alloc-temp-reg)))
+              (emit `(Rx=A ,value-reg))
+              (emit `(A=Rx SP))
+              (emit-store-sized-offset element-type actual-offset value-reg)
+              (free-temp-reg value-reg))))
+         (incf offset element-size))
+       ;; Zero-fill remaining elements if fewer initializers than array size
+       (when (< num-inits array-size)
+         (let ((zero-reg (alloc-temp-reg)))
+           (emit `(Rx= 0 ,zero-reg))
+           (loop for i from num-inits below array-size
+                 for elem-offset = (+ base-offset (* i element-size) *frame-size*)
+                 do (emit `(A=Rx SP))
+                    (emit-store-sized-offset element-type elem-offset zero-reg))
+           (free-temp-reg zero-reg)))))
+
+    ;; Struct initialization
+    ((type-desc-struct-tag target-type)
+     (let* ((struct-def (gethash (type-desc-struct-tag target-type)
+                                 (compiler-state-struct-types *state*)))
+            (members (when struct-def (struct-def-members struct-def)))
+            (init-elements (ast-node-children init-list)))
+       (when struct-def
+         ;; Initialize each member from corresponding init element
+         (loop for elem in init-elements
+               for member in members
+               do (let* ((member-type (struct-member-type member))
+                         (member-offset (struct-member-offset member))
+                         (member-size (type-size member-type)))
+                    (cond
+                      ;; Nested init-list for nested struct/array
+                      ((and (ast-node-p elem)
+                            (eq (ast-node-type elem) 'init-list))
+                       (generate-local-init-list elem
+                                                 (+ base-offset member-offset)
+                                                 member-type))
+                      ;; Regular expression
+                      (t
+                       (generate-expression elem)
+                       (when (< member-size 4)
+                         (emit-mask-to-size member-type))
+                       ;; Store using computed address (matching generate-struct-address pattern)
+                       (let ((value-reg (alloc-temp-reg))
+                             (addr-temp (alloc-temp-reg))
+                             (total-offset (+ base-offset *frame-size* member-offset)))
+                         (emit `(Rx=A ,value-reg))
+                         (emit `(A=Rx SP))
+                         (emit `(Rx= ,total-offset ,addr-temp))
+                         (emit `(A+=Rx ,addr-temp))
+                         (emit-store-sized member-type value-reg)
+                         (free-temp-reg addr-temp)
+                         (free-temp-reg value-reg)))))))))
+
+    ;; Fallback: shouldn't happen
+    (t (compiler-warning "Unknown type for init-list initialization"))))
+
+(defun generate-string-to-char-array (string-node base-offset array-size)
+  "Generate stores to initialize a char array from a string literal.
+   Copies each character and the null terminator."
+  (let* ((str (ast-node-value string-node))
+         (str-len (length str))
+         (char-type (make-char-type))
+         (zero-reg (alloc-temp-reg))
+         (value-reg (alloc-temp-reg)))
+    (emit `(Rx= 0 ,zero-reg))
+    ;; Store each character
+    (loop for i from 0 below str-len
+          for char-code = (char-code (char str i))
+          for elem-offset = (+ base-offset i *frame-size*)
+          do (emit `(Rx= ,char-code ,value-reg))
+             (emit `(A=Rx SP))
+             (emit-store-sized-offset char-type elem-offset value-reg))
+    ;; Store null terminator
+    (let ((term-offset (+ base-offset str-len *frame-size*)))
+      (emit `(A=Rx SP))
+      (emit-store-sized-offset char-type term-offset zero-reg))
+    ;; Zero-fill rest if array is larger
+    (when (and array-size (> array-size (1+ str-len)))
+      (loop for i from (1+ str-len) below array-size
+            for elem-offset = (+ base-offset i *frame-size*)
+            do (emit `(A=Rx SP))
+               (emit-store-sized-offset char-type elem-offset zero-reg)))
+    (free-temp-reg zero-reg)
+    (free-temp-reg value-reg)))
+
 (defun generate-local-decls (node)
   "Generate code for local variable declarations"
   (dolist (decl (ast-node-children node))
@@ -947,21 +1074,38 @@
             (init (first (ast-node-children decl)))
             (var-type (ast-node-result-type decl)))
         (when init
-          ;; Generate initializer
-          (generate-expression init)
-          ;; Mask value to appropriate size before storing
-          (when (and var-type (< (type-size var-type) 4))
-            (emit-mask-to-size var-type))
-          ;; Store to local variable
           (let ((sym (lookup-symbol name)))
             (when sym
-              (case (sym-entry-storage sym)
-                (:register
-                 ;; Store directly to local register (R6-R9)
-                 (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
-                (:local
-                 ;; Store to stack with appropriate size
-                 (generate-store-local (sym-entry-offset sym) var-type))))))))))
+              (cond
+                ;; Init-list for array or struct
+                ((and (ast-node-p init)
+                      (eq (ast-node-type init) 'init-list)
+                      (eq (sym-entry-storage sym) :local))
+                 (generate-local-init-list init (sym-entry-offset sym) var-type))
+
+                ;; String literal initializing char array
+                ((and (ast-node-p init)
+                      (eq (ast-node-type init) 'string-literal)
+                      (type-desc-array-size var-type)
+                      (eq (type-desc-base var-type) 'char)
+                      (eq (sym-entry-storage sym) :local))
+                 (generate-string-to-char-array init
+                                                 (sym-entry-offset sym)
+                                                 (type-desc-array-size var-type)))
+
+                ;; Regular expression initializer
+                (t
+                 (generate-expression init)
+                 ;; Mask value to appropriate size before storing
+                 (when (and var-type (< (type-size var-type) 4))
+                   (emit-mask-to-size var-type))
+                 (case (sym-entry-storage sym)
+                   (:register
+                    ;; Store directly to local register (R6-R9)
+                    (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
+                   (:local
+                    ;; Store to stack with appropriate size
+                    (generate-store-local (sym-entry-offset sym) var-type))))))))))))
 
 ;;; ===========================================================================
 ;;; Expression Generation
@@ -1085,18 +1229,24 @@
                (emit-promote-to-int var-type)))))
 
       (:global
-       ;; Load from global address with sized load
+       ;; For arrays, return the address (array-to-pointer decay)
+       ;; For scalars, load the value from global address with sized load
        (let ((label (intern (string-upcase name) :c-compiler))
              (var-type (sym-entry-type sym))
              (temp (alloc-temp-reg)))
          (emit `(Rx= ,label ,temp))
          (emit `(A=Rx ,temp))
-         (emit-load-sized var-type temp)
-         (emit `(A=Rx ,temp))
-         (free-temp-reg temp)
-         ;; Apply sign extension for signed sub-word types
-         (when var-type
-           (emit-promote-to-int var-type))))
+         (if (and var-type (type-desc-array-size var-type))
+             ;; Array: address is already in A
+             (free-temp-reg temp)
+             ;; Scalar: load value
+             (progn
+               (emit-load-sized var-type temp)
+               (emit `(A=Rx ,temp))
+               (free-temp-reg temp)
+               ;; Apply sign extension for signed sub-word types
+               (when var-type
+                 (emit-promote-to-int var-type))))))
 
       (:enum-constant
        ;; Enum constants are compile-time values stored in the offset field
@@ -2507,15 +2657,148 @@
   "Generate code/data for a global variable with optional initializer"
   (let* ((name (ast-node-value node))
          (var-type (ast-node-result-type node))
-         (init-value (or (ast-node-data node) 0))
+         (init-data (ast-node-data node))
          (label (intern (string-upcase name) :c-compiler))
-         (size (type-size var-type)))
+         (alignment (type-alignment var-type)))
+    ;; Ensure proper alignment before data label
+    (when (>= alignment 4)
+      (emit '(lalign-dword 0)))
+    (when (= alignment 2)
+      (emit '(lalign-word 0)))
     (emit `(label ,label))
-    ;; Emit initialized data based on size
-    (case size
-      (1 (emit `(abyte ,init-value)))
-      (2 (emit `(aword ,init-value)))
-      (otherwise (emit `(adword ,init-value))))))
+    (cond
+      ;; Init-list for array or struct
+      ((and (ast-node-p init-data)
+            (eq (ast-node-type init-data) 'init-list))
+       (generate-global-init-list init-data var-type))
+
+      ;; String literal for char array
+      ((and (ast-node-p init-data)
+            (eq (ast-node-type init-data) 'string-literal)
+            (type-desc-array-size var-type)
+            (eq (type-desc-base var-type) 'char))
+       (generate-global-string-array init-data (type-desc-array-size var-type)))
+
+      ;; Simple value
+      (t
+       (let ((init-value (or init-data 0))
+             (size (type-size var-type)))
+         ;; For arrays without initializer, emit zeroes for each element
+         (if (type-desc-array-size var-type)
+             (let* ((array-size (type-desc-array-size var-type))
+                    (elem-size (type-desc-size var-type)))
+               (dotimes (i array-size)
+                 (case elem-size
+                   (1 (emit `(abyte 0)))
+                   (2 (emit `(aword 0)))
+                   (otherwise (emit `(adword 0))))))
+             ;; Non-array: emit single value
+             (case size
+               (1 (emit `(abyte ,init-value)))
+               (2 (emit `(aword ,init-value)))
+               (otherwise (emit `(adword ,init-value))))))))))
+
+(defun generate-global-init-list (init-list target-type)
+  "Generate data section directives for a global init-list."
+  (cond
+    ;; Array initialization
+    ((type-desc-array-size target-type)
+     (let* ((element-type (get-array-element-type target-type))
+            (element-size (type-size element-type))
+            (array-size (type-desc-array-size target-type))
+            (init-elements (ast-node-children init-list))
+            (num-inits (length init-elements)))
+       ;; Emit data for each initializer element
+       (dolist (elem init-elements)
+         (cond
+           ;; Nested init-list (for arrays of structs or 2D arrays)
+           ((and (ast-node-p elem)
+                 (eq (ast-node-type elem) 'init-list))
+            (generate-global-init-list elem element-type))
+           ;; Literal value
+           ((and (ast-node-p elem)
+                 (eq (ast-node-type elem) 'literal))
+            (let ((val (ast-node-value elem)))
+              (case element-size
+                (1 (emit `(abyte ,val)))
+                (2 (emit `(aword ,val)))
+                (otherwise (emit `(adword ,val))))))
+           ;; Constant expression
+           (t
+            (let ((val (evaluate-constant-expression elem)))
+              (unless val
+                (compiler-error "Global array initializer must be a constant expression"))
+              (case element-size
+                (1 (emit `(abyte ,val)))
+                (2 (emit `(aword ,val)))
+                (otherwise (emit `(adword ,val))))))))
+       ;; Zero-fill remaining elements
+       (when (< num-inits array-size)
+         (dotimes (i (- array-size num-inits))
+           (case element-size
+             (1 (emit `(abyte 0)))
+             (2 (emit `(aword 0)))
+             (otherwise (emit `(adword 0))))))))
+
+    ;; Struct initialization
+    ((type-desc-struct-tag target-type)
+     (let* ((struct-def (gethash (type-desc-struct-tag target-type)
+                                 (compiler-state-struct-types *state*)))
+            (members (when struct-def (struct-def-members struct-def)))
+            (init-elements (ast-node-children init-list))
+            (current-offset 0))
+       (when struct-def
+         ;; Initialize each member from corresponding init element
+         (loop for member in members
+               for elem = (pop init-elements)
+               do (let* ((member-type (struct-member-type member))
+                         (member-offset (struct-member-offset member))
+                         (member-size (type-size member-type)))
+                    ;; Emit padding if needed
+                    (when (> member-offset current-offset)
+                      (dotimes (i (- member-offset current-offset))
+                        (emit `(abyte 0))))
+                    (setf current-offset member-offset)
+                    (cond
+                      ;; Nested init-list for nested struct/array
+                      ((and elem
+                            (ast-node-p elem)
+                            (eq (ast-node-type elem) 'init-list))
+                       (generate-global-init-list elem member-type)
+                       (incf current-offset (type-size member-type)))
+                      ;; Value (or nil for uninitialized)
+                      (t
+                       (let ((val (if elem
+                                      (or (evaluate-constant-expression elem) 0)
+                                      0)))
+                         (case member-size
+                           (1 (emit `(abyte ,val)))
+                           (2 (emit `(aword ,val)))
+                           (otherwise (emit `(adword ,val))))
+                         (incf current-offset member-size))))))
+         ;; Emit trailing padding to reach struct size
+         (let ((struct-size (struct-def-size struct-def)))
+           (when (< current-offset struct-size)
+             (dotimes (i (- struct-size current-offset))
+               (emit `(abyte 0))))))))
+
+    ;; Fallback
+    (t (compiler-warning "Unknown type for global init-list"))))
+
+(defun generate-global-string-array (string-node array-size)
+  "Generate data section for a char array initialized from a string literal."
+  (let* ((str (ast-node-value string-node))
+         (str-len (length str)))
+    ;; Emit each character
+    (loop for i from 0 below str-len
+          for char-code = (char-code (char str i))
+          do (emit `(abyte ,char-code)))
+    ;; Emit null terminator
+    (emit `(abyte 0))
+    ;; Zero-fill rest if array is larger
+    (when (> array-size (1+ str-len))
+      (dotimes (i (- array-size (1+ str-len)))
+        (emit `(abyte 0))))))
 
 ;;; ===========================================================================
 ;;; String Literal Collection
