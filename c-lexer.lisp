@@ -351,12 +351,47 @@
 ;;; Main Tokenize Function
 ;;; ===========================================================================
 
+(defun merge-adjacent-strings (tokens)
+  "Merge adjacent string literals into single tokens.
+   In C, \"a\" \"b\" \"c\" is equivalent to \"abc\"."
+  (when (null tokens)
+    (return-from merge-adjacent-strings nil))
+  (let ((result nil)
+        (current-string nil)
+        (string-line nil))
+    (dolist (tok tokens)
+      (if (eq (token-type tok) 'string)
+          (if current-string
+              ;; Append to current string
+              (setf current-string (concatenate 'string current-string (token-value tok)))
+              ;; Start a new string
+              (setf current-string (token-value tok)
+                    string-line (token-line tok)))
+          ;; Non-string token
+          (progn
+            ;; Flush any pending string
+            (when current-string
+              (push (make-token :type 'string
+                                :value current-string
+                                :line string-line)
+                    result)
+              (setf current-string nil))
+            (push tok result))))
+    ;; Flush final string if any
+    (when current-string
+      (push (make-token :type 'string
+                        :value current-string
+                        :line string-line)
+            result))
+    (nreverse result)))
+
 (defun tokenize (source)
   "Tokenize the source string and return a list of tokens"
   (let ((*lexer* (make-lexer-state :source source
                                    :pos 0
                                    :line 1
                                    :column 1)))
-    (loop for token = (next-token)
-          while token
-          collect token)))
+    (merge-adjacent-strings
+     (loop for token = (next-token)
+           while token
+           collect token))))

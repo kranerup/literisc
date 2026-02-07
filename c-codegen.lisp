@@ -280,6 +280,7 @@
     (typedef-decl nil)  ; Typedef declarations are compile-time only, no code needed
     (struct-decl nil)  ; Struct declarations are compile-time only, no code needed
     (type-decl nil)  ; Type declarations are compile-time only, no code needed
+    (func-prototype nil)  ; Function prototypes are declarations only, no code needed
     (otherwise
      (compiler-warning "Ignoring top-level ~a" (ast-node-type node)))))
 
@@ -2777,7 +2778,9 @@
 (defun generate-global-decls (node)
   "Generate code for global variable declarations"
   (dolist (decl (ast-node-children node))
-    (generate-global-var decl)))
+    ;; Skip function prototypes - they don't generate code
+    (unless (eq (ast-node-type decl) 'func-prototype)
+      (generate-global-var decl))))
 
 (defun generate-global-var (node)
   "Generate code/data for a global variable with optional initializer"

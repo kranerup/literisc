@@ -102,19 +102,18 @@
 
 (defun scan-address-taken-variables ()
   "Pre-scan tokens to find variables that have their address taken with &.
-   This is needed to prevent register allocation for such variables."
+   This is needed to prevent register allocation for such variables.
+   We conservatively mark any &identifier as address-taken, even if it might
+   be binary AND, since the cost of missing a register allocation is low
+   but the cost of incorrectly register-allocating an addressed variable is a bug."
   (let ((tokens (compiler-state-tokens *state*))
         (addr-taken (compiler-state-address-taken *state*)))
     (loop for i from 0 below (1- (length tokens))
           for tok = (nth i tokens)
           for next-tok = (nth (1+ i) tokens)
-          for prev-tok = (when (> i 0) (nth (1- i) tokens))
           when (and (eq (token-type tok) 'operator)
                     (string= (token-value tok) "&")
-                    (eq (token-type next-tok) 'identifier)
-                    ;; Not after an operand means it's unary & (address-of)
-                    ;; After an operand, it's binary & (bitwise AND)
-                    (not (is-operand-token prev-tok)))
+                    (eq (token-type next-tok) 'identifier))
           do (setf (gethash (token-value next-tok) addr-taken) t))))
 
 (defun is-address-taken (name)
@@ -222,6 +221,11 @@
          (if (not (zerop cond-val))
              (evaluate-constant-expression then-expr)
              (evaluate-constant-expression else-expr)))))
+
+    ;; Cast expressions - just evaluate the operand (the cast is compile-time only for constants)
+    (cast
+     (let ((operand (first (ast-node-children expr))))
+       (evaluate-constant-expression operand)))
 
     (otherwise nil)))
 
@@ -1252,6 +1256,40 @@
      1)
     (otherwise 0)))
 
+(defun parse-function-prototype-params (name ret-type)
+  "Parse just the parameter list of a function prototype (for multi-declarator lines)"
+  ;; Register function name in global symbol table
+  (add-global-symbol name ret-type :function (make-c-label name))
+
+  (expect-token 'punctuation "(")
+  (let ((params nil))
+    (unless (check-token 'punctuation ")")
+      (loop
+        (let ((param-type (parse-type))
+              (param-name nil))
+          ;; Parameter name is optional in declaration
+          (when (check-token 'identifier)
+            (setf param-name (token-value (advance-token))))
+          ;; Check for array parameter - decays to pointer
+          (when (match-token 'punctuation "[")
+            (unless (check-token 'punctuation "]")
+              (parse-expression))  ; Ignore size
+            (expect-token 'punctuation "]")
+            (setf param-type (make-type-desc :base (type-desc-base param-type)
+                                             :pointer-level (1+ (type-desc-pointer-level param-type))
+                                             :size (type-desc-size param-type)
+                                             :unsigned-p (type-desc-unsigned-p param-type)
+                                             :struct-tag (type-desc-struct-tag param-type)
+                                             :struct-scope (type-desc-struct-scope param-type))))
+          (push (make-node 'param :value param-name :result-type param-type) params))
+        (unless (match-token 'punctuation ",")
+          (return))))
+    (expect-token 'punctuation ")")
+    (make-node 'func-prototype
+               :value name
+               :children (list (make-node 'params :children (nreverse params)))
+               :result-type ret-type)))
+
 (defun parse-function-definition (ret-type name &optional is-inline)
   "Parse a function definition"
   (setf (compiler-state-current-function *state*) name)
@@ -1306,6 +1344,44 @@
 
     (expect-token 'punctuation ")")
     (setf (compiler-state-param-count *state*) param-idx)
+
+    ;; Check for function prototype (declaration without body)
+    (when (match-token 'punctuation ";")
+      (exit-scope)
+      (setf (compiler-state-current-function *state*) nil)
+      ;; Return a prototype node (no code generation needed)
+      (return-from parse-function-definition
+        (make-node 'func-prototype
+                   :value name
+                   :children (list (make-node 'params :children (reverse params)))
+                   :result-type ret-type)))
+
+    ;; Check for multiple declarators (e.g., int f(int a), g(int b), x;)
+    (when (check-token 'punctuation ",")
+      (exit-scope)
+      (setf (compiler-state-current-function *state*) nil)
+      ;; First prototype is done, continue parsing more declarators
+      (let ((decls (list (make-node 'func-prototype
+                                    :value name
+                                    :children (list (make-node 'params :children (reverse params)))
+                                    :result-type ret-type))))
+        (loop while (match-token 'punctuation ",")
+              do (let ((next-name (token-value (expect-token 'identifier))))
+                   (if (check-token 'punctuation "(")
+                       ;; Another function prototype
+                       (let ((proto-node (parse-function-prototype-params next-name ret-type)))
+                         (push proto-node decls))
+                       ;; Regular variable
+                       (progn
+                         (add-symbol next-name ret-type :global nil)
+                         ;; Handle tentative definition
+                         (let ((existing-def (gethash next-name (compiler-state-global-defs *state*))))
+                           (unless existing-def
+                             (setf (gethash next-name (compiler-state-global-defs *state*))
+                                   (list :tentative ret-type))))))))
+        (expect-token 'punctuation ";")
+        (return-from parse-function-definition
+          (make-node 'decl-list :children (nreverse decls)))))
 
     ;; Parse function body
     (let ((body (parse-compound-statement)))
@@ -1377,23 +1453,56 @@
                                              :struct-tag (type-desc-struct-tag var-type)
                                              :struct-scope (type-desc-struct-scope var-type))))))
         ;; For simple expressions, evaluate to constant
+        ;; Skip for init-list and string-literal - those are handled specially
         (unless (and (ast-node-p init-node)
-                     (eq (ast-node-type init-node) 'init-list))
+                     (member (ast-node-type init-node) '(init-list string-literal)))
           (let ((const-val (evaluate-constant-expression init-node)))
             (if const-val
                 (setf init-value const-val)
                 (compiler-error "Global variable initializer must be a constant expression")))))
 
-      (add-symbol name var-type :global nil)
-      (push (make-node 'global-var
-                       :value name
-                       :result-type var-type
-                       ;; Store init-list node in data field, or constant value
-                       :data (if (and (ast-node-p init-node)
-                                      (eq (ast-node-type init-node) 'init-list))
-                                 init-node
-                                 init-value))
-            decls))
+      ;; Handle tentative definitions (C allows multiple declarations of same global)
+      ;; In C, multiple declarations merge: int x; int x = 3; int x; is valid
+      ;; Only emit a node if this is definite (has initializer) or first tentative
+      (let* ((has-init (or init-node (not (zerop init-value))))
+             (existing-def (gethash name (compiler-state-global-defs *state*)))
+             (should-emit nil))
+        (cond
+          ;; Already definitively defined with an initializer
+          ((eq existing-def :definite)
+           (when has-init
+             (compiler-error "Redefinition of global variable '~a'" name)))
+          ;; Previously tentatively defined (stored as (:tentative type))
+          ((and (listp existing-def) (eq (first existing-def) :tentative))
+           (when has-init
+             ;; Upgrade to definite and emit this definition
+             (setf (gethash name (compiler-state-global-defs *state*)) :definite)
+             (setf should-emit t)))
+          ;; First time seeing this variable
+          (t
+           (setf (gethash name (compiler-state-global-defs *state*))
+                 (if has-init :definite :tentative))
+           ;; Only emit if definite; tentative will be emitted at end if not overridden
+           (setf should-emit has-init)))
+
+        (add-symbol name var-type :global nil)
+        ;; Store type info for tentative definitions to emit later if needed
+        ;; But don't overwrite a definite definition
+        (when (and (not has-init)
+                   (not (eq existing-def :definite)))
+          (setf (gethash name (compiler-state-global-defs *state*))
+                (list :tentative var-type)))
+        (when should-emit
+          (push (make-node 'global-var
+                           :value name
+                           :result-type var-type
+                           ;; Store init-list/string-literal node in data field, or constant value
+                           :data (if (and (ast-node-p init-node)
+                                          (member (ast-node-type init-node)
+                                                  '(init-list string-literal)))
+                                     init-node
+                                     init-value))
+                decls))))
 
     ;; Parse additional declarators
     (loop while (match-token 'punctuation ",")
@@ -1410,15 +1519,37 @@
                      (if const-val
                          (setf next-init-value const-val)
                          (compiler-error "Global variable initializer must be a constant expression")))))
-               (add-symbol next-name var-type :global nil)
-               (push (make-node 'global-var
-                                :value next-name
-                                :result-type var-type
-                                :data (if (and (ast-node-p next-init-node)
-                                               (eq (ast-node-type next-init-node) 'init-list))
-                                          next-init-node
-                                          next-init-value))
-                     decls)))
+               ;; Handle tentative definitions for additional declarators
+               (let* ((has-init (or next-init-node (not (zerop next-init-value))))
+                      (existing-def (gethash next-name (compiler-state-global-defs *state*)))
+                      (should-emit nil))
+                 (cond
+                   ((eq existing-def :definite)
+                    (when has-init
+                      (compiler-error "Redefinition of global variable '~a'" next-name)))
+                   ((and (listp existing-def) (eq (first existing-def) :tentative))
+                    (when has-init
+                      (setf (gethash next-name (compiler-state-global-defs *state*)) :definite)
+                      (setf should-emit t)))
+                   (t
+                    (setf (gethash next-name (compiler-state-global-defs *state*))
+                          (if has-init :definite :tentative))
+                    (setf should-emit has-init)))
+
+                 (add-symbol next-name var-type :global nil)
+                 (when (and (not has-init)
+                            (not (eq existing-def :definite)))
+                   (setf (gethash next-name (compiler-state-global-defs *state*))
+                         (list :tentative var-type)))
+                 (when should-emit
+                   (push (make-node 'global-var
+                                    :value next-name
+                                    :result-type var-type
+                                    :data (if (and (ast-node-p next-init-node)
+                                                   (eq (ast-node-type next-init-node) 'init-list))
+                                              next-init-node
+                                              next-init-value))
+                         decls)))))
 
     (expect-token 'punctuation ";")
     (make-node 'decl-list :children (reverse decls))))
@@ -1464,4 +1595,14 @@
   (let ((declarations nil))
     (loop until (at-end)
           do (push (parse-top-level) declarations))
+    ;; Emit tentative definitions that were never given a definite initializer
+    (maphash (lambda (name def-info)
+               (when (and (listp def-info) (eq (first def-info) :tentative))
+                 (let ((var-type (second def-info)))
+                   (push (make-node 'global-var
+                                    :value name
+                                    :result-type var-type
+                                    :data 0)  ; Default to zero
+                         declarations))))
+             (compiler-state-global-defs *state*))
     (make-node 'program :children (reverse declarations))))

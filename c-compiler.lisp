@@ -113,6 +113,7 @@
   (struct-types (make-hash-table :test 'equal))  ; tag-name -> struct-def
   (union-types (make-hash-table :test 'equal))   ; tag-name -> struct-def (all offsets=0)
   (typedef-types (make-hash-table :test 'equal)) ; typedef-name -> type-desc
+  (global-defs (make-hash-table :test 'equal))   ; name -> :tentative or :definite
   (peephole nil))                                ; enable peephole optimization
 
 ;;; Global compiler state
