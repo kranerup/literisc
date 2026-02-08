@@ -965,11 +965,12 @@
 ;;; ===========================================================================
 
 (defun get-array-element-type (array-type)
-  "Get the element type of an array type"
+  "Get element type of array. For multi-dim, preserves inner dimensions."
   (when (type-desc-array-size array-type)
     (make-type-desc :base (type-desc-base array-type)
                     :pointer-level (type-desc-pointer-level array-type)
-                    :array-size nil  ; Element is not an array
+                    :array-size (get-remaining-dimensions
+                                  (type-desc-array-size array-type))
                     :size (type-desc-size array-type)
                     :unsigned-p (type-desc-unsigned-p array-type)
                     :struct-tag (type-desc-struct-tag array-type)
@@ -1010,14 +1011,16 @@
               (free-temp-reg value-reg))))
          (incf offset element-size))
        ;; Zero-fill remaining elements if fewer initializers than array size
-       (when (< num-inits array-size)
-         (let ((zero-reg (alloc-temp-reg)))
-           (emit `(Rx= 0 ,zero-reg))
-           (loop for i from num-inits below array-size
-                 for elem-offset = (+ base-offset (* i element-size) *frame-size*)
-                 do (emit `(A=Rx SP))
-                    (emit-store-sized-offset element-type elem-offset zero-reg))
-           (free-temp-reg zero-reg)))))
+       ;; For multi-dim arrays, use outer dimension for this comparison
+       (let ((outer-dim (get-outer-dimension array-size)))
+         (when (< num-inits outer-dim)
+           (let ((zero-reg (alloc-temp-reg)))
+             (emit `(Rx= 0 ,zero-reg))
+             (loop for i from num-inits below outer-dim
+                   for elem-offset = (+ base-offset (* i element-size) *frame-size*)
+                   do (emit `(A=Rx SP))
+                      (emit-store-sized-offset element-type elem-offset zero-reg))
+             (free-temp-reg zero-reg))))))
 
     ;; Struct initialization
     ((type-desc-struct-tag target-type)
@@ -2016,13 +2019,21 @@
          (when sym
            (let ((arr-type (sym-entry-type sym)))
              (when arr-type
-               ;; Return element type (pointer level - 1 or same for array)
-               (make-type-desc :base (type-desc-base arr-type)
-                               :pointer-level (max 0 (1- (type-desc-pointer-level arr-type)))
-                               :size (type-desc-size arr-type)
-                               :unsigned-p (type-desc-unsigned-p arr-type)
-                               :struct-tag (type-desc-struct-tag arr-type)
-                               :struct-scope (type-desc-struct-scope arr-type)))))))
+               ;; For arrays, use get-array-element-type to preserve inner dimensions
+               (if (type-desc-array-size arr-type)
+                   (get-array-element-type arr-type)
+                   ;; For pointers, decrement pointer level
+                   (make-type-desc :base (type-desc-base arr-type)
+                                   :pointer-level (max 0 (1- (type-desc-pointer-level arr-type)))
+                                   :size (type-desc-size arr-type)
+                                   :unsigned-p (type-desc-unsigned-p arr-type)
+                                   :struct-tag (type-desc-struct-tag arr-type)
+                                   :struct-scope (type-desc-struct-scope arr-type))))))))
+      ;; For nested subscripts, get element type from inner subscript's result
+      (subscript
+       (let ((inner-elem-type (get-subscript-element-type array-node)))
+         (when (and inner-elem-type (type-desc-array-size inner-elem-type))
+           (get-array-element-type inner-elem-type))))
       (otherwise nil))))
 
 (defun generate-assignment (node)
@@ -2138,16 +2149,19 @@
   "Generate code for array subscript with sized load"
   (let ((elem-type (get-subscript-element-type node)))
     (generate-subscript-address node)
-    ;; Load value at computed address with appropriate size
-    (let ((temp (alloc-temp-reg)))
-      (if (and elem-type (< (type-size elem-type) 4))
-          (emit-load-sized elem-type temp)
-          (emit `(Rx=M[A] ,temp)))
-      (emit `(A=Rx ,temp))
-      (free-temp-reg temp)
-      ;; Apply sign extension for signed sub-word types
-      (when elem-type
-        (emit-promote-to-int elem-type)))))
+    ;; For multi-dimensional arrays: if element is itself an array,
+    ;; don't load - just keep the computed address in A
+    (unless (and elem-type (type-desc-array-size elem-type))
+      ;; Load value at computed address with appropriate size
+      (let ((temp (alloc-temp-reg)))
+        (if (and elem-type (< (type-size elem-type) 4))
+            (emit-load-sized elem-type temp)
+            (emit `(Rx=M[A] ,temp)))
+        (emit `(A=Rx ,temp))
+        (free-temp-reg temp)
+        ;; Apply sign extension for signed sub-word types
+        (when elem-type
+          (emit-promote-to-int elem-type))))))
 
 (defun generate-subscript-address (node)
   "Generate code to compute address of array subscript"
@@ -2328,6 +2342,13 @@
                   (let ((sym (lookup-symbol (ast-node-value operand))))
                     (if (and sym (sym-entry-type sym))
                         (type-size (sym-entry-type sym))
+                        4)))
+                 ;; sizeof(subscript) - get element type including inner dimensions
+                 ((and (ast-node-p operand)
+                       (eq (ast-node-type operand) 'subscript))
+                  (let ((elem-type (get-subscript-element-type operand)))
+                    (if elem-type
+                        (type-size elem-type)
                         4)))
                  ;; sizeof(expression) - default to 4 bytes
                  (t 4))))

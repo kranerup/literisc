@@ -574,15 +574,19 @@
   (cond
     ;; Arrays - multiply element count by element size (check BEFORE pointers!)
     ;; This handles arrays of pointers like int* a[2] correctly
-    ((and (type-desc-array-size type)
-          (numberp (type-desc-array-size type)))
-     (let* ((element-type (make-type-desc :base (type-desc-base type)
+    ;; For multi-dimensional arrays, total-array-elements computes the product
+    ((type-desc-array-size type)
+     (let* ((array-size (type-desc-array-size type))
+            (total-elements (if (or (numberp array-size) (listp array-size))
+                                (total-array-elements array-size)
+                                1))
+            (element-type (make-type-desc :base (type-desc-base type)
                                           :pointer-level (type-desc-pointer-level type)
                                           :size (type-desc-size type)
                                           :struct-tag (type-desc-struct-tag type)
                                           :struct-scope (type-desc-struct-scope type)))
             (elem-size (type-size element-type)))
-       (* (type-desc-array-size type) elem-size)))
+       (* total-elements elem-size)))
     ;; Pointers are always 4 bytes (non-array pointers only reach here)
     ((> (type-desc-pointer-level type) 0) 4)
     ;; Struct types - look up size from definition
@@ -607,6 +611,24 @@
          (char 1)
          (void 0)
          (otherwise 4)))))
+
+(defun get-outer-dimension (array-size)
+  "Get outermost dimension from array-size (integer or list)"
+  (if (listp array-size) (car array-size) array-size))
+
+(defun get-remaining-dimensions (array-size)
+  "Get remaining dimensions after stripping outer. Returns nil, integer, or list."
+  (when (listp array-size)
+    (let ((rest (cdr array-size)))
+      (cond ((null rest) nil)
+            ((= (length rest) 1) (car rest))
+            (t rest)))))
+
+(defun total-array-elements (array-size)
+  "Calculate total element count (product of all dimensions)"
+  (if (listp array-size)
+      (reduce #'* array-size)
+      array-size))
 
 (defun is-pointer-type (type)
   (> (type-desc-pointer-level type) 0))

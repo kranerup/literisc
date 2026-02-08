@@ -4332,6 +4332,73 @@ int main() { return add(5U, 5L); }
     (test-integer-suffix-unsigned-semantics)
     (test-integer-suffix-in-expressions)))
 
+;;; ===========================================================================
+;;; Phase 25 Tests: Multi-Dimensional Arrays
+;;; ===========================================================================
+
+(deftest test-2d-array-basic ()
+  "Test 2D array declaration and access"
+  (check
+    (= 6 (run-and-get-result "
+int main() {
+    int arr[2][3];
+    arr[1][2] = 6;
+    return arr[1][2];
+}"))))
+
+(deftest test-2d-array-init ()
+  "Test 2D array initialization"
+  (check
+    (= 50 (run-and-get-result "
+int main() {
+    int arr[2][3] = {{10,20,30},{40,50,60}};
+    return arr[1][1];
+}"))))
+
+(deftest test-2d-array-sizeof ()
+  "Test sizeof with 2D arrays"
+  (check
+    (= 24 (run-and-get-result "int main() { int a[2][3]; return sizeof(a); }"))
+    (= 12 (run-and-get-result "int main() { int a[2][3]; return sizeof(a[0]); }"))))
+
+(deftest test-3d-array ()
+  "Test 3D arrays"
+  (check
+    (= 32 (run-and-get-result "int main() { int a[2][2][2]; return sizeof(a); }"))
+    (= 7 (run-and-get-result "
+int main() {
+    int a[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}};
+    return a[1][1][0];
+}"))))
+
+(deftest test-2d-array-loop ()
+  "Test 2D array access in loops"
+  (check
+    ;; Sum of 0+1+2+3+4+5+6+7+8 = 36
+    ;; Use optimize-size t to avoid register pressure from inline multiply
+    (= 36 (run-and-get-result "
+int main() {
+    int arr[3][3];
+    int i, j, sum;
+    for (i = 0; i < 3; i = i + 1)
+        for (j = 0; j < 3; j = j + 1)
+            arr[i][j] = i * 3 + j;
+    sum = 0;
+    for (i = 0; i < 3; i = i + 1)
+        for (j = 0; j < 3; j = j + 1)
+            sum = sum + arr[i][j];
+    return sum;
+}" :optimize-size t))))
+
+(deftest test-phase25-multidim-arrays ()
+  "Run all multi-dimensional array tests"
+  (combine-results
+    (test-2d-array-basic)
+    (test-2d-array-init)
+    (test-2d-array-sizeof)
+    (test-3d-array)
+    (test-2d-array-loop)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -4358,7 +4425,8 @@ int main() { return add(5U, 5L); }
     (test-phase21-regpressure)
     (test-phase22-new-features)
     (test-phase23-initializers)
-    (test-phase24-integer-suffixes)))
+    (test-phase24-integer-suffixes)
+    (test-phase25-multidim-arrays)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

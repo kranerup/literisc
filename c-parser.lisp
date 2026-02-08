@@ -398,15 +398,22 @@
                   (progn
                     (setf name (token-value (expect-token 'identifier)))
                     (setf final-type member-type)
-                    ;; Check for array
-                    (when (match-token 'punctuation "[")
-                      (let ((array-size (number-token-value (expect-token 'number))))
-                        (expect-token 'punctuation "]")
-                        (setf final-type (make-type-desc :base (type-desc-base member-type)
-                                                         :pointer-level (type-desc-pointer-level member-type)
-                                                         :array-size array-size
-                                                         :struct-tag (type-desc-struct-tag member-type)
-                                                         :struct-scope (type-desc-struct-scope member-type)))))))
+                    ;; Check for array (supports multi-dimensional)
+                    (when (check-token 'punctuation "[")
+                      (let ((dimensions nil))
+                        (loop while (match-token 'punctuation "[")
+                              do (let ((dim (number-token-value (expect-token 'number))))
+                                   (expect-token 'punctuation "]")
+                                   (push dim dimensions)))
+                        (when dimensions
+                          (let ((array-size (if (= (length dimensions) 1)
+                                                (car dimensions)
+                                                (nreverse dimensions))))
+                            (setf final-type (make-type-desc :base (type-desc-base member-type)
+                                                             :pointer-level (type-desc-pointer-level member-type)
+                                                             :array-size array-size
+                                                             :struct-tag (type-desc-struct-tag member-type)
+                                                             :struct-scope (type-desc-struct-scope member-type)))))))))
               (let* ((aligned-offset (align-to offset (type-alignment final-type)))
                      (member (make-struct-member :name name
                                                  :type final-type
@@ -1087,6 +1094,7 @@
 (defun infer-array-size-from-init (init-node element-type)
   "Infer array size from initializer.
    For init-list: count top-level elements, handling array designated initializers.
+   For nested init-lists (multi-dim arrays): recursively infer inner dimensions.
    For string-literal initializing char[]: use strlen+1."
   (cond
     ;; Init list - need to handle array designated initializers
@@ -1111,8 +1119,20 @@
            (t
             (setf max-index (max max-index current-index))
             (incf current-index))))
-       ;; Size is max-index + 1
-       (1+ max-index)))
+       ;; outer-dim is max-index + 1
+       (let ((outer-dim (1+ max-index)))
+         ;; Check for nested init-lists (multi-dimensional arrays)
+         (if (and elements
+                  (ast-node-p (first elements))
+                  (eq (ast-node-type (first elements)) 'init-list))
+             ;; Recursively infer inner dimensions from first nested init-list
+             (let ((inner (infer-array-size-from-init (first elements) element-type)))
+               (if inner
+                   (if (listp inner)
+                       (cons outer-dim inner)
+                       (list outer-dim inner))
+                   outer-dim))
+             outer-dim))))
     ;; String literal for char array - use strlen+1
     ((and (ast-node-p init-node)
           (eq (ast-node-type init-node) 'string-literal)
@@ -1153,13 +1173,19 @@
                                            :struct-tag (type-desc-struct-tag base-type)
                                            :struct-scope (type-desc-struct-scope base-type)
                                            :return-type (type-desc-return-type base-type))))
-            ;; Check for array declaration
-            (when (match-token 'punctuation "[")
-              (if (check-token 'number)
-                  (setf array-size (number-token-value (advance-token)))
-                  ;; Use :infer marker when [] has no size - needs inference
-                  (setf array-size :infer))
-              (expect-token 'punctuation "]")
+            ;; Check for array declaration (supports multi-dimensional)
+            (when (check-token 'punctuation "[")
+              (let ((dimensions nil))
+                (loop while (match-token 'punctuation "[")
+                      do (let ((dim (if (check-token 'number)
+                                        (number-token-value (advance-token))
+                                        :infer)))
+                           (expect-token 'punctuation "]")
+                           (push dim dimensions)))
+                (when dimensions
+                  (setf array-size (if (= (length dimensions) 1)
+                                       (car dimensions)
+                                       (nreverse dimensions)))))
               (setf var-type (make-type-desc :base (type-desc-base var-type)
                                              :pointer-level (type-desc-pointer-level var-type)
                                              :array-size array-size
@@ -1445,12 +1471,19 @@
     (let ((array-size nil)
           (init-value 0)
           (init-node nil))
-      (when (match-token 'punctuation "[")
-        (if (check-token 'number)
-            (setf array-size (number-token-value (advance-token)))
-            ;; Use :infer marker when [] has no size
-            (setf array-size :infer))
-        (expect-token 'punctuation "]")
+      ;; Check for array declaration (supports multi-dimensional)
+      (when (check-token 'punctuation "[")
+        (let ((dimensions nil))
+          (loop while (match-token 'punctuation "[")
+                do (let ((dim (if (check-token 'number)
+                                  (number-token-value (advance-token))
+                                  :infer)))
+                     (expect-token 'punctuation "]")
+                     (push dim dimensions)))
+          (when dimensions
+            (setf array-size (if (= (length dimensions) 1)
+                                 (car dimensions)
+                                 (nreverse dimensions)))))
         ;; Create array type
         (setf var-type (make-type-desc :base (type-desc-base var-type)
                                        :pointer-level (type-desc-pointer-level var-type)
