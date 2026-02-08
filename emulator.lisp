@@ -515,6 +515,20 @@
         (logxor
           (processor-state-a ps)
           (aref (processor-state-r ps) rx))))
+
+;; c,A = A + Rx + c (add with carry for 64-bit chaining)
+(defun i-adc (ps rx)
+  (let* ((a (processor-state-a ps))
+         (r (aref (processor-state-r ps) rx))
+         (c (processor-state-c ps))
+         (result (+ a r c))
+         (masked (logand #xffffffff result))
+         (carry (if (> result #xffffffff) 1 0)))
+    (setf (processor-state-a ps) masked)
+    (setf (processor-state-c ps) carry))
+  (when (processor-state-debug ps)
+    (format t "A = A + R~a + c~%" rx)))
+
 ; A = ~A
 (defun i-not (ps)
   (setf (processor-state-a ps)
@@ -1195,6 +1209,8 @@
                              (i-st-b-rx-a p param2 dmem))
                             ((equal opcode2 OPCI2_XOR)
                              (i-xor p param2))
+                            ((equal opcode2 OPCI2_ADC)
+                             (i-adc p param2))
                             ((equal opcode2 OPCI2_LDW_A_OFFS )
                              (i-ld-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 OPCI2_LDW_A)
@@ -1794,20 +1810,76 @@
           ;(format t "a:~a e:~a~%" (processor-state-a p) (get-expected-a expected))
           (check-state p expected))))))
 
+(deftest test-adc ()
+  "Test ADC instruction carries correctly"
+  (let* ((p (make-processor))
+         (expected (init-reg-state p)))
+    (check
+      (progn
+        ;--- adc with no carry: A + R5 + 0
+        (setf (processor-state-a p) 100)
+        (setf (aref (processor-state-r p) 5) 50)
+        (setf (processor-state-c p) 0)
+        (set-expected-a expected 150)
+        (set-expected-r expected 5 50)
+        (i-adc p 5)
+        (and (check-state p expected)
+             (equal (processor-state-c p) 0))) ; no carry out
+      (progn
+        ;--- adc with carry in: A + R5 + 1
+        (setf (processor-state-a p) 100)
+        (setf (aref (processor-state-r p) 5) 50)
+        (setf (processor-state-c p) 1)
+        (set-expected-a expected 151)
+        (set-expected-r expected 5 50)
+        (i-adc p 5)
+        (and (check-state p expected)
+             (equal (processor-state-c p) 0))) ; no carry out
+      (progn
+        ;--- adc producing carry out: 0xFFFFFFFF + 1 + 0
+        (setf (processor-state-a p) #xFFFFFFFF)
+        (setf (aref (processor-state-r p) 5) 1)
+        (setf (processor-state-c p) 0)
+        (set-expected-a expected 0)
+        (set-expected-r expected 5 1)
+        (i-adc p 5)
+        (and (check-state p expected)
+             (equal (processor-state-c p) 1))) ; carry out
+      (progn
+        ;--- adc chaining: 0 + 0 + 1 (carry from previous)
+        (setf (processor-state-a p) 0)
+        (setf (aref (processor-state-r p) 5) 0)
+        ; c is still 1 from previous
+        (set-expected-a expected 1)
+        (set-expected-r expected 5 0)
+        (i-adc p 5)
+        (and (check-state p expected)
+             (equal (processor-state-c p) 0))) ; no carry
+      (progn
+        ;--- adc with max overflow: 0xFFFFFFFF + 0xFFFFFFFF + 1
+        (setf (processor-state-a p) #xFFFFFFFF)
+        (setf (aref (processor-state-r p) 5) #xFFFFFFFF)
+        (setf (processor-state-c p) 1)
+        (set-expected-a expected #xFFFFFFFF)
+        (set-expected-r expected 5 #xFFFFFFFF)
+        (i-adc p 5)
+        (and (check-state p expected)
+             (equal (processor-state-c p) 1)))))) ; carry out
+
 (deftest test-and-or ()
   (let* ((p (make-processor))
         (expected (init-reg-state p)))
     (check
       (progn
         ;--- and r15,a
-        (set-expected-a expected 
+        (set-expected-a expected
                         (logand (get-expected-a expected)
                                 (get-expected-r expected 15)))
         (i-and p 15)
         (check-state p expected))
       (progn
         ;--- or r14,a
-        (set-expected-a expected 
+        (set-expected-a expected
                         (logior (get-expected-a expected)
                                 (get-expected-r expected 14)))
         (i-or p 14)
@@ -2602,6 +2674,7 @@
   (combine-results
     (test-mv)
     (test-add)
+    (test-adc)
     (test-and-or )
     (test-shifts )
     (test-mask-sex )

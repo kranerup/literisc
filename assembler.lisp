@@ -98,6 +98,7 @@
            :A&=Rx
            :A\|=Rx
            :A^=Rx
+           :A+=Rx+c
            :M[Rx]=A
            :M[Rx].b=A
            :M[Rx].w=A
@@ -317,6 +318,11 @@
 (defun xor-r (r)
   (opci2 OPCI2_XOR :reg r))
 (setf (symbol-function 'A^=Rx) #'xor-r)
+
+;; c,A = A + Rx + c (add with carry)
+(defun adc (r)
+  (opci2 OPCI2_ADC :reg r))
+(setf (symbol-function 'A+=Rx+c) #'adc)
 
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)

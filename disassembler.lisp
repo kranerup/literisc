@@ -150,6 +150,8 @@
                              (list (format nil "M[R~a].b = A" param2) 2))
                             ((equal opcode2 OPCI2_XOR)
                              (list (format nil "A = A ^ R~a" param2) 2))
+                            ((equal opcode2 OPCI2_ADC)
+                             (list (format nil "A = A + R~a + c" param2) 2))
                             ((equal opcode2 OPCI2_LDW_A_OFFS)
                              (destructuring-bind (val nr-bytes) (disasm-immediate (cddr bytes) nil )
                                (list (format nil "R~a = M[A+~a].w" param2 val) nr-bytes)))
