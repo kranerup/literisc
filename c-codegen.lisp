@@ -1432,33 +1432,58 @@
     ;; Use the size slot for element size, default to 4 for int pointers
     (or (type-desc-size type) 4)))
 
-(defun emit-scale-for-pointer (elem-size)
-  "Scale value in A by element size for pointer arithmetic"
-  (case elem-size
-    (1 nil)                     ; no scaling needed for char*
-    (2 (emit '(A=A<<1)))        ; * 2 for short*
-    (4 (emit '(A=A<<1))         ; * 4 for int*
+(defun power-of-2-p (n)
+  "Check if N is a positive power of 2"
+  (and (integerp n) (> n 0) (zerop (logand n (1- n)))))
+
+(defun log2-int (n)
+  "Compute floor(log2(n)) for positive integer n"
+  (1- (integer-length n)))
+
+(defun emit-multiply-by-constant (size)
+  "Multiply A by a constant SIZE. Uses shifts for powers of 2, else general multiply.
+   Returns t if simple (shifts only), nil if needed general multiply."
+  (cond
+    ((= size 1) t)  ; no-op
+    ((power-of-2-p size)
+     ;; Use shifts: emit log2(size) left shifts
+     (dotimes (i (log2-int size))
        (emit '(A=A<<1)))
-    (otherwise
+     t)
+    (t
      ;; General case: use software multiply
      (let ((size-reg (alloc-temp-reg)))
-       (emit `(Rx= ,elem-size ,size-reg))
+       (emit `(Rx= ,size ,size-reg))
        (generate-multiply size-reg)
+       (free-temp-reg size-reg))
+     nil)))
+
+(defun emit-divide-by-constant (size)
+  "Divide A by a constant SIZE. Uses shifts for powers of 2, else general divide."
+  (cond
+    ((= size 1) nil)  ; no-op
+    ((power-of-2-p size)
+     ;; Use shifts: emit log2(size) right shifts
+     (dotimes (i (log2-int size))
+       (emit '(A=A>>1))))
+    (t
+     ;; General case: use software divide
+     (let ((size-reg (alloc-temp-reg)))
+       (emit `(Rx= ,size ,size-reg))
+       (generate-divide size-reg nil)
        (free-temp-reg size-reg)))))
+
+(defun emit-scale-for-pointer (elem-size)
+  "Scale value in A by element size for pointer arithmetic"
+  (emit-multiply-by-constant elem-size))
 
 (defun emit-unscale-for-pointer (elem-size)
   "Unscale value in A by element size for pointer subtraction result"
-  (case elem-size
-    (1 nil)                     ; no scaling needed for char*
-    (2 (emit '(A=A>>1)))        ; / 2 for short*
-    (4 (emit '(A=A>>1))         ; / 4 for int*
-       (emit '(A=A>>1)))
-    (otherwise
-     ;; General case: use software divide
-     (let ((size-reg (alloc-temp-reg)))
-       (emit `(Rx= ,elem-size ,size-reg))
-       (generate-divide size-reg nil)
-       (free-temp-reg size-reg)))))
+  (emit-divide-by-constant elem-size))
+
+(defun constant-multiply-is-simple-p (size)
+  "Check if multiplying by SIZE can be done with just shifts (no function call)"
+  (power-of-2-p size))
 
 (defun expression-uses-mul-p (node)
   "Check if expression contains struct array access that will call __MUL"
@@ -1466,7 +1491,7 @@
     (or (and (eq (ast-node-type node) 'subscript)
              (let ((elem-type (get-subscript-element-type node)))
                (and elem-type
-                    (not (member (type-size elem-type) '(1 2 4))))))
+                    (not (constant-multiply-is-simple-p (type-size elem-type))))))
         (and (eq (ast-node-type node) 'member)
              (let ((base (first (ast-node-children node))))
                (and base (expression-uses-mul-p base))))
@@ -2169,13 +2194,25 @@
          (index (second (ast-node-children node)))
          (elem-type (get-subscript-element-type node))
          (elem-size (if elem-type (type-size elem-type) 4))
-         (needs-multiply (not (member elem-size '(1 2 4)))))
+         (is-simple (constant-multiply-is-simple-p elem-size)))
     ;; For non-power-of-2 sizes (e.g., structs), we need to call __MUL
     ;; or inline multiply. Both can clobber R0-R5 (inline uses temp regs).
     ;; In physical mode, use local register (R6+) to preserve base address.
     ;; In virtual mode, just use alloc-temp-reg - calling convention preserves regs.
-    (if needs-multiply
-        ;; Struct array case: get base first, save to safe reg, then compute offset
+    (if is-simple
+        ;; Simple case: power-of-2 element size, use shifts
+        (let ((base-reg (alloc-temp-reg)))
+          ;; Get array base address
+          (generate-expression array)
+          (emit `(Rx=A ,base-reg))  ; save base
+          ;; Get index
+          (generate-expression index)
+          ;; Multiply by element size using shifts
+          (emit-multiply-by-constant elem-size)
+          ;; Add to base
+          (emit `(A+=Rx ,base-reg))
+          (free-temp-reg base-reg))
+        ;; Complex case: non-power-of-2, need general multiply
         (let ((base-save-reg (if *use-virtual-regs*
                                  (alloc-temp-reg)
                                  (get-local-reg *local-reg-count*))))
@@ -2184,30 +2221,11 @@
           (emit `(Rx=A ,base-save-reg))  ; save base (safe from multiply)
           ;; Step 2: Compute index * elem_size (may call __MUL or inline, clobbers R0-R5)
           (generate-expression index)
-          (let ((size-reg (alloc-temp-reg)))
-            (emit `(Rx= ,elem-size ,size-reg))
-            (generate-multiply size-reg)
-            (free-temp-reg size-reg))
+          (emit-multiply-by-constant elem-size)
           ;; Step 3: Add base (in safe reg) to offset (in A)
           (emit `(A+=Rx ,base-save-reg))
           (when *use-virtual-regs*
-            (free-temp-reg base-save-reg)))
-        ;; Simple case: no function call, use registers directly
-        (let ((base-reg (alloc-temp-reg)))
-          ;; Get array base address
-          (generate-expression array)
-          (emit `(Rx=A ,base-reg))  ; save base
-          ;; Get index
-          (generate-expression index)
-          ;; Multiply by element size using shifts
-          (case elem-size
-            (1 nil)                     ; no shift needed for byte
-            (2 (emit '(A=A<<1)))        ; * 2 for short
-            (4 (emit '(A=A<<1))         ; * 4 for int/pointer
-               (emit '(A=A<<1))))
-          ;; Add to base
-          (emit `(A+=Rx ,base-reg))
-          (free-temp-reg base-reg)))))
+            (free-temp-reg base-save-reg))))))
 
 ;;; ===========================================================================
 ;;; Struct Member Access
