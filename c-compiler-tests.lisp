@@ -4251,6 +4251,87 @@ int main() {
     (test-partial-init)
     (test-char-array-init)))
 
+;;; ===========================================================================
+;;; Phase 24 Tests: Integer Literal Suffixes
+;;; ===========================================================================
+
+(deftest test-integer-suffix-basic ()
+  "Test basic integer literal suffix parsing"
+  (check
+    ;; U suffix - unsigned
+    (= 42 (run-and-get-result "int main() { return 42U; }"))
+    (= 42 (run-and-get-result "int main() { return 42u; }"))
+    ;; L suffix - long
+    (= 42 (run-and-get-result "int main() { return 42L; }"))
+    (= 42 (run-and-get-result "int main() { return 42l; }"))
+    ;; UL/LU suffix - unsigned long
+    (= 42 (run-and-get-result "int main() { return 42UL; }"))
+    (= 42 (run-and-get-result "int main() { return 42ul; }"))
+    (= 42 (run-and-get-result "int main() { return 42LU; }"))
+    (= 42 (run-and-get-result "int main() { return 42lu; }"))
+    ;; LL suffix - long long (treated as long on 32-bit)
+    (= 42 (run-and-get-result "int main() { return 42LL; }"))
+    (= 42 (run-and-get-result "int main() { return 42ll; }"))
+    ;; ULL/LLU suffix - unsigned long long
+    (= 42 (run-and-get-result "int main() { return 42ULL; }"))
+    (= 42 (run-and-get-result "int main() { return 42ull; }"))
+    (= 42 (run-and-get-result "int main() { return 42LLU; }"))
+    (= 42 (run-and-get-result "int main() { return 42llu; }"))))
+
+(deftest test-integer-suffix-hex ()
+  "Test integer suffixes with hexadecimal literals"
+  (check
+    (= 255 (run-and-get-result "int main() { return 0xFFU; }"))
+    (= 255 (run-and-get-result "int main() { return 0xffu; }"))
+    (= 255 (run-and-get-result "int main() { return 0xFFL; }"))
+    (= 255 (run-and-get-result "int main() { return 0xFFUL; }"))
+    (= 255 (run-and-get-result "int main() { return 0xFFLL; }"))
+    (= 255 (run-and-get-result "int main() { return 0xFFULL; }"))))
+
+(deftest test-integer-suffix-arithmetic ()
+  "Test arithmetic with suffixed literals"
+  (check
+    ;; Basic arithmetic with unsigned
+    (= 10 (run-and-get-result "int main() { return 5U + 5U; }"))
+    (= 20 (run-and-get-result "int main() { return 10UL * 2UL; }"))
+    ;; Mixed suffix operations
+    (= 15 (run-and-get-result "int main() { return 10 + 5U; }"))
+    (= 30 (run-and-get-result "int main() { return 15L + 15UL; }"))))
+
+(deftest test-integer-suffix-unsigned-semantics ()
+  "Test that unsigned suffix affects comparison/division semantics"
+  (check
+    ;; Large unsigned value as return
+    (result= -1 (run-and-get-result "int main() { return 0xFFFFFFFFU; }"))
+    ;; Unsigned arithmetic
+    (= 0 (run-and-get-result "int main() { return 0xFFFFFFFFU + 1U; }"))
+    ;; Unsigned division should be unsigned
+    (= 1 (run-and-get-result "int main() { return 0xFFFFFFFFU / 0xFFFFFFFFU; }"))))
+
+(deftest test-integer-suffix-in-expressions ()
+  "Test suffixed literals in various expression contexts"
+  (check
+    ;; Array indexing
+    (= 2 (run-and-get-result "int main() { int a[3] = {1, 2, 3}; return a[1UL]; }"))
+    ;; Conditional
+    (= 1 (run-and-get-result "int main() { return 42U > 0U ? 1 : 0; }"))
+    ;; Assignment
+    (= 100 (run-and-get-result "int main() { unsigned int x = 100UL; return x; }"))
+    ;; Function argument
+    (= 10 (run-and-get-result "
+int add(int a, int b) { return a + b; }
+int main() { return add(5U, 5L); }
+"))))
+
+(deftest test-phase24-integer-suffixes ()
+  "Run all integer suffix tests"
+  (combine-results
+    (test-integer-suffix-basic)
+    (test-integer-suffix-hex)
+    (test-integer-suffix-arithmetic)
+    (test-integer-suffix-unsigned-semantics)
+    (test-integer-suffix-in-expressions)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -4276,7 +4357,8 @@ int main() {
     (test-phase20-typedef)
     (test-phase21-regpressure)
     (test-phase22-new-features)
-    (test-phase23-initializers)))
+    (test-phase23-initializers)
+    (test-phase24-integer-suffixes)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

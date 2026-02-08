@@ -61,6 +61,35 @@
     t))
 
 ;;; ===========================================================================
+;;; Number Token Helpers
+;;; ===========================================================================
+
+(defun number-token-value (tok)
+  "Extract the integer value from a number token.
+   Number tokens store (value . suffix) in their value field."
+  (let ((val (token-value tok)))
+    (if (consp val) (car val) val)))
+
+(defun number-token-suffix (tok)
+  "Extract the suffix from a number token.
+   Returns nil, :u, :l, :ul, :lu, :ll, :ull, or :llu."
+  (let ((val (token-value tok)))
+    (if (consp val) (cdr val) nil)))
+
+(defun suffix-to-type (suffix)
+  "Convert a number suffix to the appropriate type descriptor.
+   nil -> signed int
+   :u -> unsigned int
+   :l, :ll -> signed long (32-bit on this platform)
+   :ul, :lu, :ull, :llu -> unsigned long"
+  (case suffix
+    ((nil) (make-int-type nil))
+    ((:u) (make-int-type t))
+    ((:l :ll) (make-long-type nil))
+    ((:ul :lu :ull :llu) (make-long-type t))
+    (otherwise (make-int-type nil))))
+
+;;; ===========================================================================
 ;;; AST Construction Helpers
 ;;; ===========================================================================
 
@@ -371,7 +400,7 @@
                     (setf final-type member-type)
                     ;; Check for array
                     (when (match-token 'punctuation "[")
-                      (let ((array-size (token-value (expect-token 'number))))
+                      (let ((array-size (number-token-value (expect-token 'number))))
                         (expect-token 'punctuation "]")
                         (setf final-type (make-type-desc :base (type-desc-base member-type)
                                                          :pointer-level (type-desc-pointer-level member-type)
@@ -500,7 +529,7 @@
             ;; Check for array typedef
             (when (match-token 'punctuation "[")
               (when (check-token 'number)
-                (setf array-size (token-value (advance-token))))
+                (setf array-size (number-token-value (advance-token))))
               (expect-token 'punctuation "]"))
             ;; Create and register typedef
             (let ((typedef-type (make-type-desc
@@ -798,8 +827,8 @@
       ((check-token 'number)
        (advance-token)
        (make-node 'literal
-                  :value (token-value tok)
-                  :result-type (make-int-type)))
+                  :value (number-token-value tok)
+                  :result-type (suffix-to-type (number-token-suffix tok))))
 
       ;; String literal
       ((check-token 'string)
@@ -1127,7 +1156,7 @@
             ;; Check for array declaration
             (when (match-token 'punctuation "[")
               (if (check-token 'number)
-                  (setf array-size (token-value (advance-token)))
+                  (setf array-size (number-token-value (advance-token)))
                   ;; Use :infer marker when [] has no size - needs inference
                   (setf array-size :infer))
               (expect-token 'punctuation "]")
@@ -1418,7 +1447,7 @@
           (init-node nil))
       (when (match-token 'punctuation "[")
         (if (check-token 'number)
-            (setf array-size (token-value (advance-token)))
+            (setf array-size (number-token-value (advance-token)))
             ;; Use :infer marker when [] has no size
             (setf array-size :infer))
         (expect-token 'punctuation "]")

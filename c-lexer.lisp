@@ -148,8 +148,49 @@
        (skip-block-comment))
       (t (return)))))
 
+(defun scan-integer-suffix ()
+  "Scan an optional integer suffix (U, L, UL, LL, ULL, etc.).
+   Returns a keyword: nil, :u, :l, :ul, :lu, :ll, :ull, :llu"
+  (let ((c1 (lexer-peek))
+        (c2 (lexer-peek 1))
+        (c3 (lexer-peek 2)))
+    (cond
+      ;; ULL or UL or U
+      ((and c1 (char-equal c1 #\U))
+       (lexer-advance)
+       (cond
+         ;; ULL
+         ((and c2 c3 (char-equal c2 #\L) (char-equal c3 #\L))
+          (lexer-advance)
+          (lexer-advance)
+          :ull)
+         ;; UL
+         ((and c2 (char-equal c2 #\L))
+          (lexer-advance)
+          :ul)
+         ;; U
+         (t :u)))
+      ;; LLU or LL or LU or L
+      ((and c1 (char-equal c1 #\L))
+       (lexer-advance)
+       (cond
+         ;; LLU or LL
+         ((and c2 (char-equal c2 #\L))
+          (lexer-advance)
+          (if (and c3 (char-equal c3 #\U))
+              (progn (lexer-advance) :llu)
+              :ll))
+         ;; LU
+         ((and c2 (char-equal c2 #\U))
+          (lexer-advance)
+          :lu)
+         ;; L
+         (t :l)))
+      ;; No suffix
+      (t nil))))
+
 (defun scan-number ()
-  "Scan a numeric literal"
+  "Scan a numeric literal with optional size suffix"
   (let ((start-col (lexer-state-column *lexer*))
         (start-line (lexer-state-line *lexer*))
         (chars nil)
@@ -169,10 +210,12 @@
         (loop while (digit-p (lexer-peek))
               do (push (lexer-advance) chars)))
 
-    ;; Parse the number
-    (let ((numstr (coerce (reverse chars) 'string)))
+    ;; Scan optional suffix
+    (let* ((suffix (scan-integer-suffix))
+           (numstr (coerce (reverse chars) 'string))
+           (value (parse-integer numstr :radix base)))
       (make-token :type 'number
-                  :value (parse-integer numstr :radix base)
+                  :value (cons value suffix)
                   :line start-line
                   :column start-col))))
 
@@ -247,7 +290,7 @@
         (lexer-advance)) ; skip closing '
 
       (make-token :type 'number
-                  :value (char-code char)
+                  :value (cons (char-code char) nil)
                   :line start-line
                   :column start-col))))
 
