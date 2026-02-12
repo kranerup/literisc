@@ -11,4 +11,6 @@ tb_cpu.v \
 tb_soc.v \
 tb_top.v \
 top.v \
+sub3_w_sig.v \
+tb_sub3_w_sig.v \
 *.vcd

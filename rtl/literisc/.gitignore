@@ -7,4 +7,6 @@ tb_cpu_sys.v
 tb_soc.v
 tb_top.v
 top.v
+sub3_w_sig.v
+tb_sub3_w_sig.v
 **/__pycache__
