@@ -1,0 +1,10 @@
+cpu.v
+cpu_sys.v
+pa_cpu_*.v
+soc.v
+tb_cpu.v
+tb_cpu_sys.v
+tb_soc.v
+tb_top.v
+top.v
+**/__pycache__

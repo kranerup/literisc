@@ -39,7 +39,7 @@ In the top level the clock generator and the UART submodules are connected to th
 
 ----------------- Testbenches ------------------------------------
 
--- CPU regression testbench
+------ CPU regression testbench
 The CPU has a MyHDL testbench that tests all instructions with coverage.
 When running the testbench it will always output a waveform in trace.vcd.
 Recommend to use gtkwave for viewing the waveform.
@@ -49,7 +49,10 @@ To run single test, all tests or generate Verilog:
 ./gen.sh tb.py sim all
 ./gen.sh tb.py
 
--- SOC bringup testbench
+Regression check:
+./gen.sh tb.py sim all | egrep 'tests pass:|MISS'
+
+------ SOC bringup testbench
 There is a MyHDL bringup testbench for the soc instance. This is not self checking
 testbench. It's not meant for regression. It contains a mockup of the UART so
 that the connection to the AXI slaves can be tested. The CPU program needs to be
@@ -58,7 +61,7 @@ setup in cpu_sys.py for what connection you want to test.
 Run with:
 ./gen.sh tbsoc.py
 
--- SOC Verilog testbench
+------ SOC Verilog testbench
 To test the UART connection there is a Verilog testbench that instantiates
 the UART modules and connects them to the soc module. There is nothing Again this is not self checking
 and the CPU program needs to be setup. UART transmit line is connected to the receive line
@@ -69,10 +72,21 @@ some System Verilog constructs).
 
 ./run_icarus.sh
 
--- Vivado xsim
+------ Vivado xsim
 The complete design (blinky2) can be simulated in xsim to see that clock and reset
 works and that the baud rate is correct. Simple connectivity can be viewed in the waveform.
 But there is no testbench for this so just build the simulator in vivado and force the
 reset and clocks in the waveform.
 
 
+------ Testbench for the 2s complement 8/16/32-bit subtraction module
+The CPU need 8/16 and 32 bit subtraction and additions with flags for all
+sizes. This is implemented in a module that has configurable width and where
+the wider operations are built from the results from narrower operations.
+
+To verify the algoritm and connections the testbench runs all combinations of operands
+and compares the result with expected. The operand size is set to 2 bits to avoid
+long run time but the testbench has been run for larger operand size.
+
+./gen.sh test_sub.py verify
+./gen.sh test_sub.py gen
