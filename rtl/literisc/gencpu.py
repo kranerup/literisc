@@ -4,6 +4,7 @@ from cpu import cpu
 
 
 clk = Signal(bool())
+clk_en = Signal(modbv(0)[1:])
 rstn = Signal(intbv(0)[1:0])
 imem_radr = Signal(modbv(0)[16:])
 imem_wadr = Signal(modbv(0)[16:])
@@ -23,7 +24,11 @@ halt = Signal(modbv(0)[1:])
 intr = Signal(modbv(0)[1:])
 
 toVerilog.standard = 'systemverilog'
-itop = toVerilog( cpu, clk, rstn,
+itop = toVerilog(
+        cpu,
+        clk,
+        clk_en,
+        rstn,
         imem_dout,
         imem_radr,
         imem_rd,

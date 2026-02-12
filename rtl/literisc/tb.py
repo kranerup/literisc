@@ -292,7 +292,7 @@ def cpu_tester( clk, programs ):
     icpu = cpu(
         clk        = clk,
         clk_en     = clk_en,
-        rstn       = rstn,
+        sync_rstn  = rstn,
         imem_dout  = imem_dout,
         imem_adr   = imem_radr,
         imem_rd    = imem_rd,
