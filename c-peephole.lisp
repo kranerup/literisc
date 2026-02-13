@@ -277,12 +277,21 @@
 ;;; Rule 10: Immediate load through temp register
 ;;; (Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2) -> (Rx= ?v ?r2)
 ;;; When loading an immediate to a temp, moving to A, then to target,
-;;; we can just load directly to target
+;;; we can just load directly to target.
+;;; NOTE: When r1 == r2, the Rx=A is redundant but A=Rx is still needed
+;;; because A may be used later (e.g., for M[A]=Rx). In that case, keep A=Rx.
 (push (make-peephole-rule
        :name "immediate-through-temp"
        :pattern '((Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2))
        :replacement (lambda (bindings)
-                      (list (list 'Rx= (getf bindings :v) (getf bindings :r2)))))
+                      (let ((reg1 (getf bindings :r1))
+                            (reg2 (getf bindings :r2))
+                            (val (getf bindings :v)))
+                        (if (eq reg1 reg2)
+                            ;; r1 == r2: keep the A=Rx since A may be used later
+                            (list (list 'Rx= val reg1) (list 'A=Rx reg1))
+                            ;; r1 != r2: safe to optimize away
+                            (list (list 'Rx= val reg2))))))
       *peephole-rules*)
 
 ;;; Rule 11: Small immediate load through temp register

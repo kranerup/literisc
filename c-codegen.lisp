@@ -55,6 +55,618 @@
   ;; Also init old-style tracking for fallback
   (setf *reg-in-use* (make-array 6 :initial-element nil)))
 
+;;; ===========================================================================
+;;; 64-bit (long long) Register Pair Support
+;;; ===========================================================================
+
+;;; For 64-bit values on 32-bit architecture, we use register pairs.
+;;; Memory layout is little-endian: low word at [addr], high word at [addr+4]
+
+;;; Forward declaration to avoid undefined variable warning
+(defvar *frame-size*)
+
+(defstruct reg-pair
+  "A pair of 32-bit registers representing a 64-bit value"
+  low   ; register for low 32 bits (bits 0-31)
+  high) ; register for high 32 bits (bits 32-63)
+
+(defun alloc-reg-pair ()
+  "Allocate a pair of registers for a 64-bit value"
+  (make-reg-pair :low (alloc-temp-reg) :high (alloc-temp-reg)))
+
+(defun free-reg-pair (pair)
+  "Free a register pair"
+  (when pair
+    (free-temp-reg (reg-pair-low pair))
+    (free-temp-reg (reg-pair-high pair))))
+
+(defun emit-load-64 (dest-pair)
+  "Load 64-bit value from address in A into register pair.
+   Memory is little-endian: low word at [A], high word at [A+4]"
+  (let ((addr-temp (alloc-temp-reg)))
+    (emit `(Rx=A ,addr-temp))  ; save address
+    ;; Load low word
+    (emit `(Rx=M[A] ,(reg-pair-low dest-pair)))
+    ;; Load high word from addr+4
+    (emit `(A=Rx ,addr-temp))
+    (emit `(Rx=M[A+n] 4 ,(reg-pair-high dest-pair)))
+    (free-temp-reg addr-temp)))
+
+(defun emit-store-64 (src-pair)
+  "Store 64-bit value from register pair to address in A.
+   Memory is little-endian: low word to [A], high word to [A+4]"
+  (let ((addr-temp (alloc-temp-reg)))
+    (emit `(Rx=A ,addr-temp))  ; save address
+    ;; Store low word
+    (emit `(M[A]=Rx ,(reg-pair-low src-pair)))
+    ;; Store high word to addr+4
+    (emit `(A=Rx ,addr-temp))
+    (emit `(M[A+n]=Rx 4 ,(reg-pair-high src-pair)))
+    (free-temp-reg addr-temp)))
+
+(defun emit-load-64-immediate (dest-pair low-val high-val)
+  "Load a 64-bit immediate value into a register pair"
+  (emit `(Rx= ,low-val ,(reg-pair-low dest-pair)))
+  (emit `(Rx= ,high-val ,(reg-pair-high dest-pair))))
+
+;;; ---------------------------------------------------------------------------
+;;; 64-bit Arithmetic Operations
+;;; ---------------------------------------------------------------------------
+
+(defun generate-add-64 (left-pair right-pair result-pair)
+  "64-bit addition with carry detection.
+   result = left + right.
+   Since A+=Rx doesn't set carry, we detect overflow by comparing:
+   if (result_low < left_low) then there was carry."
+  (let ((no-carry-label (gen-label "ADD64NOCARRY"))
+        (one-reg (alloc-temp-reg)))
+    ;; Add low words
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A+=Rx ,(reg-pair-low right-pair)))
+    (emit `(Rx=A ,(reg-pair-low result-pair)))
+    ;; Detect carry: if result < left_low, there was overflow
+    ;; Use subtraction to compare: A = result - left_low
+    ;; If result < left_low (unsigned), carry flag will be set (JLO will jump)
+    (emit `(A-=Rx ,(reg-pair-low left-pair)))  ; A = result_low - left_low, sets carry if result < left
+    ;; Add high words
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A+=Rx ,(reg-pair-high right-pair)))
+    ;; Add carry if there was overflow in low word addition
+    ;; JHS = jump if higher or same (carry clear = no borrow), so we skip the +1 if no carry
+    (emit `(jhs ,no-carry-label))
+    ;; Add 1 for the carry
+    (emit `(Rx= 1 ,one-reg))
+    (emit `(A+=Rx ,one-reg))
+    (emit-label no-carry-label)
+    (emit `(Rx=A ,(reg-pair-high result-pair)))
+    (free-temp-reg one-reg)))
+
+(defun generate-sub-64 (left-pair right-pair result-pair)
+  "64-bit subtraction with borrow handling.
+   result = left - right.
+   Since we don't have SBC, we detect borrow by comparing after subtraction."
+  (let ((no-borrow-label (gen-label "NOSUB64BORROW")))
+    ;; Subtract low words
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A-=Rx ,(reg-pair-low right-pair)))
+    (emit `(Rx=A ,(reg-pair-low result-pair)))
+    ;; Check for borrow: if left.low < right.low, we need to borrow
+    ;; We detect this by checking if result + right < right (i.e., overflow occurred)
+    ;; Simpler: compare left.low with right.low before subtraction
+    ;; But we already did the subtraction. Use jge to check if no borrow needed.
+    ;; After A = left.low - right.low, carry flag is set if left.low >= right.low (no borrow)
+    ;; Actually in liteRISC, after subtraction, we can check with jlt/jge
+
+    ;; Subtract high words
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A-=Rx ,(reg-pair-high right-pair)))
+    ;; Check if we need to borrow (if left.low < right.low)
+    ;; We do this by re-comparing the low words
+    (let ((temp (alloc-temp-reg)))
+      (emit `(Rx=A ,temp))  ; save high result temporarily
+      (emit `(A=Rx ,(reg-pair-low left-pair)))
+      (emit `(A-=Rx ,(reg-pair-low right-pair)))
+      (emit `(jge ,no-borrow-label))  ; if left.low >= right.low, no borrow needed
+      ;; Need to borrow: subtract 1 from high result
+      (emit `(A=Rx ,temp))
+      (let ((one-reg (alloc-temp-reg)))
+        (emit `(Rx= 1 ,one-reg))
+        (emit `(A-=Rx ,one-reg))
+        (free-temp-reg one-reg))
+      (emit `(Rx=A ,temp))
+      (emit-label no-borrow-label)
+      (emit `(A=Rx ,temp))
+      (emit `(Rx=A ,(reg-pair-high result-pair)))
+      (free-temp-reg temp))))
+
+(defun generate-and-64 (left-pair right-pair result-pair)
+  "64-bit bitwise AND"
+  (emit `(A=Rx ,(reg-pair-low left-pair)))
+  (emit `(A&=Rx ,(reg-pair-low right-pair)))
+  (emit `(Rx=A ,(reg-pair-low result-pair)))
+  (emit `(A=Rx ,(reg-pair-high left-pair)))
+  (emit `(A&=Rx ,(reg-pair-high right-pair)))
+  (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+(defun generate-or-64 (left-pair right-pair result-pair)
+  "64-bit bitwise OR"
+  (emit `(A=Rx ,(reg-pair-low left-pair)))
+  (emit `(A\|=Rx ,(reg-pair-low right-pair)))
+  (emit `(Rx=A ,(reg-pair-low result-pair)))
+  (emit `(A=Rx ,(reg-pair-high left-pair)))
+  (emit `(A\|=Rx ,(reg-pair-high right-pair)))
+  (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+(defun generate-xor-64 (left-pair right-pair result-pair)
+  "64-bit bitwise XOR"
+  (emit `(A=Rx ,(reg-pair-low left-pair)))
+  (emit `(A^=Rx ,(reg-pair-low right-pair)))
+  (emit `(Rx=A ,(reg-pair-low result-pair)))
+  (emit `(A=Rx ,(reg-pair-high left-pair)))
+  (emit `(A^=Rx ,(reg-pair-high right-pair)))
+  (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+(defun generate-not-64 (src-pair result-pair)
+  "64-bit bitwise NOT"
+  (emit `(A=Rx ,(reg-pair-low src-pair)))
+  (emit '(not-a))
+  (emit `(Rx=A ,(reg-pair-low result-pair)))
+  (emit `(A=Rx ,(reg-pair-high src-pair)))
+  (emit '(not-a))
+  (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+(defun generate-neg-64 (src-pair result-pair)
+  "64-bit negation (0 - value)"
+  ;; Negate: complement and add 1
+  ;; -x = ~x + 1
+  (let ((one-pair (alloc-reg-pair)))
+    ;; First complement
+    (emit `(A=Rx ,(reg-pair-low src-pair)))
+    (emit '(not-a))
+    (emit `(Rx=A ,(reg-pair-low result-pair)))
+    (emit `(A=Rx ,(reg-pair-high src-pair)))
+    (emit '(not-a))
+    (emit `(Rx=A ,(reg-pair-high result-pair)))
+    ;; Then add 1
+    (emit-load-64-immediate one-pair 1 0)
+    (generate-add-64 result-pair one-pair result-pair)
+    (free-reg-pair one-pair)))
+
+;;; ---------------------------------------------------------------------------
+;;; 64-bit Comparison Operations
+;;; ---------------------------------------------------------------------------
+
+(defun generate-cmp-64-eq (left-pair right-pair)
+  "64-bit equality comparison. Result 0 or 1 in A.
+   Returns 1 if left == right, else 0."
+  (let ((not-equal-label (gen-label "CMP64NEQ"))
+        (end-label (gen-label "CMP64END")))
+    ;; Compare high words first
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A-=Rx ,(reg-pair-high right-pair)))
+    (emit `(jnz ,not-equal-label))
+    ;; High words equal, compare low words
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A-=Rx ,(reg-pair-low right-pair)))
+    (emit `(jnz ,not-equal-label))
+    ;; Equal
+    (emit '(A= 1))
+    (emit `(j ,end-label))
+    ;; Not equal
+    (emit-label not-equal-label)
+    (emit '(A= 0))
+    (emit-label end-label)))
+
+(defun generate-cmp-64-ne (left-pair right-pair)
+  "64-bit inequality comparison. Result 0 or 1 in A.
+   Returns 1 if left != right, else 0."
+  (let ((not-equal-label (gen-label "CMP64NEQ"))
+        (end-label (gen-label "CMP64END")))
+    ;; Compare high words first
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A-=Rx ,(reg-pair-high right-pair)))
+    (emit `(jnz ,not-equal-label))
+    ;; High words equal, compare low words
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A-=Rx ,(reg-pair-low right-pair)))
+    (emit `(jnz ,not-equal-label))
+    ;; Equal
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+    ;; Not equal
+    (emit-label not-equal-label)
+    (emit '(A= 1))
+    (emit-label end-label)))
+
+(defun generate-cmp-64-lt (left-pair right-pair is-unsigned)
+  "64-bit less-than comparison. Result 0 or 1 in A.
+   Returns 1 if left < right, else 0."
+  (let ((less-label (gen-label "CMP64LT"))
+        (greater-label (gen-label "CMP64GT"))
+        (end-label (gen-label "CMP64END")))
+    ;; Compare high words first
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A-=Rx ,(reg-pair-high right-pair)))
+    (if is-unsigned
+        (progn
+          (emit `(jlt ,less-label))     ; unsigned: use jlt for carry-based comparison
+          (emit `(jnz ,greater-label))) ; if not zero and not less, then greater
+        (progn
+          (emit `(jlt ,less-label))     ; signed: jlt handles sign
+          (emit `(jnz ,greater-label))))
+    ;; High words equal, compare low words (always unsigned for low word)
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A-=Rx ,(reg-pair-low right-pair)))
+    (emit `(jlt ,less-label))
+    ;; Not less
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+    ;; Greater (from high word comparison)
+    (emit-label greater-label)
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+    ;; Less
+    (emit-label less-label)
+    (emit '(A= 1))
+    (emit-label end-label)))
+
+(defun generate-cmp-64-le (left-pair right-pair is-unsigned)
+  "64-bit less-than-or-equal comparison. Result 0 or 1 in A.
+   Returns 1 if left <= right, else 0."
+  (let ((less-label (gen-label "CMP64LE"))
+        (greater-label (gen-label "CMP64GT"))
+        (end-label (gen-label "CMP64END")))
+    ;; Compare high words first
+    (emit `(A=Rx ,(reg-pair-high left-pair)))
+    (emit `(A-=Rx ,(reg-pair-high right-pair)))
+    (if is-unsigned
+        (progn
+          (emit `(jlt ,less-label))
+          (emit `(jnz ,greater-label)))
+        (progn
+          (emit `(jlt ,less-label))
+          (emit `(jnz ,greater-label))))
+    ;; High words equal, compare low words (always unsigned)
+    (emit `(A=Rx ,(reg-pair-low left-pair)))
+    (emit `(A-=Rx ,(reg-pair-low right-pair)))
+    (emit `(jlt ,less-label))
+    (emit `(jz ,less-label))  ; equal is also <=
+    ;; Greater
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+    ;; Greater (from high word comparison)
+    (emit-label greater-label)
+    (emit '(A= 0))
+    (emit `(j ,end-label))
+    ;; Less or equal
+    (emit-label less-label)
+    (emit '(A= 1))
+    (emit-label end-label)))
+
+(defun generate-cmp-64-gt (left-pair right-pair is-unsigned)
+  "64-bit greater-than comparison. Result 0 or 1 in A.
+   Returns 1 if left > right, else 0.
+   a > b is equivalent to b < a"
+  (generate-cmp-64-lt right-pair left-pair is-unsigned))
+
+(defun generate-cmp-64-ge (left-pair right-pair is-unsigned)
+  "64-bit greater-than-or-equal comparison. Result 0 or 1 in A.
+   Returns 1 if left >= right, else 0.
+   a >= b is equivalent to b <= a"
+  (generate-cmp-64-le right-pair left-pair is-unsigned))
+
+;;; ---------------------------------------------------------------------------
+;;; 64-bit Expression Generation
+;;; ---------------------------------------------------------------------------
+
+;;; For 64-bit values, we use a register pair stored in a special variable.
+;;; After generating a 64-bit expression, the result is in *current-64-result*.
+(defvar *current-64-result* nil "Register pair holding current 64-bit result")
+
+(defun generate-literal-64 (node)
+  "Generate code for a 64-bit literal"
+  (let ((value (ast-node-value node))
+        (result (alloc-reg-pair)))
+    (let ((low-word (logand value #xFFFFFFFF))
+          (high-word (logand (ash value -32) #xFFFFFFFF)))
+      (emit-load-64-immediate result low-word high-word)
+      (setf *current-64-result* result))))
+
+(defun generate-var-ref-64 (node)
+  "Generate code for a 64-bit variable reference"
+  (let* ((name (ast-node-value node))
+         (sym (lookup-symbol name))
+         (result (alloc-reg-pair)))
+    (unless sym
+      (compiler-error "Undefined variable: ~a" name))
+
+    (case (sym-entry-storage sym)
+      (:local
+       ;; Load 64-bit value from stack
+       (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+             (addr-temp (alloc-temp-reg)))
+         (emit `(A=Rx SP))
+         (emit `(Rx= ,offset ,addr-temp))
+         (emit `(A+=Rx ,addr-temp))
+         (free-temp-reg addr-temp)
+         (emit-load-64 result)))
+
+      (:global
+       ;; Load 64-bit value from global
+       (let ((label (make-c-label name))
+             (addr-temp (alloc-temp-reg)))
+         (emit `(Rx= ,label ,addr-temp))
+         (emit `(A=Rx ,addr-temp))
+         (free-temp-reg addr-temp)
+         (emit-load-64 result)))
+
+      (:static-local
+       ;; Load 64-bit value from static local
+       (let ((label (sym-entry-offset sym))
+             (addr-temp (alloc-temp-reg)))
+         (emit `(Rx= ,label ,addr-temp))
+         (emit `(A=Rx ,addr-temp))
+         (free-temp-reg addr-temp)
+         (emit-load-64 result)))
+
+      (otherwise
+       (compiler-error "Cannot load 64-bit value from ~a storage"
+                       (sym-entry-storage sym))))
+
+    (setf *current-64-result* result)))
+
+(defun generate-store-lvalue-64 (node src-pair)
+  "Generate code to store a 64-bit value to an lvalue"
+  (case (ast-node-type node)
+    (var-ref
+     (let* ((name (ast-node-value node))
+            (sym (lookup-symbol name)))
+       (unless sym
+         (compiler-error "Undefined variable: ~a" name))
+       (case (sym-entry-storage sym)
+         (:local
+          (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+                (addr-temp (alloc-temp-reg)))
+            (emit `(A=Rx SP))
+            (emit `(Rx= ,offset ,addr-temp))
+            (emit `(A+=Rx ,addr-temp))
+            (free-temp-reg addr-temp)
+            (emit-store-64 src-pair)))
+
+         (:global
+          (let ((label (make-c-label name))
+                (addr-temp (alloc-temp-reg)))
+            (emit `(Rx= ,label ,addr-temp))
+            (emit `(A=Rx ,addr-temp))
+            (free-temp-reg addr-temp)
+            (emit-store-64 src-pair)))
+
+         (:static-local
+          (let ((label (sym-entry-offset sym))
+                (addr-temp (alloc-temp-reg)))
+            (emit `(Rx= ,label ,addr-temp))
+            (emit `(A=Rx ,addr-temp))
+            (free-temp-reg addr-temp)
+            (emit-store-64 src-pair)))
+
+         (otherwise
+          (compiler-error "Cannot store 64-bit value to ~a storage"
+                          (sym-entry-storage sym))))))
+    (otherwise
+     (compiler-error "Cannot assign 64-bit value to ~a" (ast-node-type node)))))
+
+(defun generate-cast-to-64 (src-type)
+  "Cast a 32-bit value in A to 64-bit in a register pair.
+   Result in *current-64-result*."
+  (let ((result (alloc-reg-pair)))
+    ;; Low word is the 32-bit value
+    (emit `(Rx=A ,(reg-pair-low result)))
+    ;; High word depends on signedness
+    (if (and src-type (type-desc-unsigned-p src-type))
+        ;; Unsigned: high word is 0
+        (emit `(Rx= 0 ,(reg-pair-high result)))
+        ;; Signed: sign-extend (copy bit 31 to all of high word)
+        (let ((sign-label (gen-label "SIGNEXT64"))
+              (end-label (gen-label "SIGNEXT64END"))
+              (temp (alloc-temp-reg)))
+          ;; Test bit 31
+          (emit `(Rx= #x80000000 ,temp))
+          (emit `(A&=Rx ,temp))
+          (emit-test-zero)
+          (emit `(jz ,sign-label))
+          ;; Negative: high word = -1
+          (emit `(Rx= -1 ,(reg-pair-high result)))
+          (emit `(j ,end-label))
+          ;; Non-negative: high word = 0
+          (emit-label sign-label)
+          (emit `(Rx= 0 ,(reg-pair-high result)))
+          (emit-label end-label)
+          (free-temp-reg temp)))
+    (setf *current-64-result* result)))
+
+(defun generate-cast-from-64 ()
+  "Cast a 64-bit value in *current-64-result* to 32-bit in A.
+   Just takes the low word."
+  (emit `(A=Rx ,(reg-pair-low *current-64-result*)))
+  (free-reg-pair *current-64-result*)
+  (setf *current-64-result* nil))
+
+(defun generate-binary-op-64 (node)
+  "Generate code for a 64-bit binary operation.
+   Result in *current-64-result*."
+  (let ((op (ast-node-value node))
+        (left (first (ast-node-children node)))
+        (right (second (ast-node-children node)))
+        (left-type (get-expression-type (first (ast-node-children node))))
+        (right-type (get-expression-type (second (ast-node-children node)))))
+
+    ;; Evaluate left operand
+    (generate-expression-64 left)
+    (let ((left-pair *current-64-result*))
+      (setf *current-64-result* nil)
+
+      ;; Evaluate right operand
+      (generate-expression-64 right)
+      (let ((right-pair *current-64-result*))
+        (setf *current-64-result* nil)
+
+        (let ((result-pair (alloc-reg-pair))
+              (is-unsigned (or (and left-type (type-desc-unsigned-p left-type))
+                               (and right-type (type-desc-unsigned-p right-type)))))
+
+          (cond
+            ((string= op "+")
+             (generate-add-64 left-pair right-pair result-pair))
+
+            ((string= op "-")
+             (generate-sub-64 left-pair right-pair result-pair))
+
+            ((string= op "&")
+             (generate-and-64 left-pair right-pair result-pair))
+
+            ((string= op "|")
+             (generate-or-64 left-pair right-pair result-pair))
+
+            ((string= op "^")
+             (generate-xor-64 left-pair right-pair result-pair))
+
+            ;; Comparison operators - result is 32-bit (0 or 1)
+            ((string= op "==")
+             (generate-cmp-64-eq left-pair right-pair)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ((string= op "!=")
+             (generate-cmp-64-ne left-pair right-pair)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ((string= op "<")
+             (generate-cmp-64-lt left-pair right-pair is-unsigned)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ((string= op "<=")
+             (generate-cmp-64-le left-pair right-pair is-unsigned)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ((string= op ">")
+             (generate-cmp-64-gt left-pair right-pair is-unsigned)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ((string= op ">=")
+             (generate-cmp-64-ge left-pair right-pair is-unsigned)
+             (free-reg-pair left-pair)
+             (free-reg-pair right-pair)
+             (free-reg-pair result-pair)
+             (return-from generate-binary-op-64))
+
+            ;; Multiplication/division/modulo - TODO: implement runtime library
+            ((member op '("*" "/" "%") :test #'string=)
+             (compiler-error "64-bit ~a not yet implemented" op))
+
+            (t
+             (compiler-error "Unknown 64-bit binary operator: ~a" op)))
+
+          (free-reg-pair left-pair)
+          (free-reg-pair right-pair)
+          (setf *current-64-result* result-pair))))))
+
+(defun generate-unary-op-64 (node)
+  "Generate code for a 64-bit unary operation"
+  (let ((op (ast-node-value node))
+        (operand (first (ast-node-children node))))
+
+    (cond
+      ((string= op "-")
+       ;; Negate
+       (generate-expression-64 operand)
+       (let ((src-pair *current-64-result*)
+             (result-pair (alloc-reg-pair)))
+         (generate-neg-64 src-pair result-pair)
+         (free-reg-pair src-pair)
+         (setf *current-64-result* result-pair)))
+
+      ((string= op "~")
+       ;; Bitwise NOT
+       (generate-expression-64 operand)
+       (let ((src-pair *current-64-result*)
+             (result-pair (alloc-reg-pair)))
+         (generate-not-64 src-pair result-pair)
+         (free-reg-pair src-pair)
+         (setf *current-64-result* result-pair)))
+
+      ((string= op "!")
+       ;; Logical NOT - result is 32-bit
+       (generate-expression-64 operand)
+       (let ((src-pair *current-64-result*))
+         ;; Check if value is zero (both words must be zero)
+         (let ((not-zero-label (gen-label "LNOT64NZ"))
+               (end-label (gen-label "LNOT64END")))
+           (emit `(A=Rx ,(reg-pair-low src-pair)))
+           (emit-test-zero)
+           (emit `(jnz ,not-zero-label))
+           (emit `(A=Rx ,(reg-pair-high src-pair)))
+           (emit-test-zero)
+           (emit `(jnz ,not-zero-label))
+           ;; Value is zero, result is 1
+           (emit '(A= 1))
+           (emit `(j ,end-label))
+           ;; Value is non-zero, result is 0
+           (emit-label not-zero-label)
+           (emit '(A= 0))
+           (emit-label end-label))
+         (free-reg-pair src-pair)
+         (setf *current-64-result* nil)))
+
+      (t
+       (compiler-error "Unknown 64-bit unary operator: ~a" op)))))
+
+(defun generate-expression-64 (node)
+  "Generate code for a 64-bit expression. Result in *current-64-result*.
+   If the source expression is 32-bit, it will be promoted to 64-bit."
+  (when node
+    (let ((expr-type (get-expression-type node)))
+      (cond
+        ;; Already a 64-bit expression
+        ((is-longlong-type expr-type)
+         (case (ast-node-type node)
+           (literal (generate-literal-64 node))
+           (var-ref (generate-var-ref-64 node))
+           (binary-op (generate-binary-op-64 node))
+           (unary-op (generate-unary-op-64 node))
+           (cast
+            ;; Cast to long long
+            (let ((src-expr (first (ast-node-children node)))
+                  (src-type (get-expression-type (first (ast-node-children node)))))
+              (if (is-longlong-type src-type)
+                  ;; Source is already 64-bit
+                  (generate-expression-64 src-expr)
+                  ;; Source is 32-bit, need to promote
+                  (progn
+                    (generate-expression src-expr)
+                    (generate-cast-to-64 src-type)))))
+           (otherwise
+            (compiler-error "Cannot generate 64-bit expression for ~a"
+                            (ast-node-type node)))))
+
+        ;; 32-bit expression - promote to 64-bit
+        (t
+         (generate-expression node)
+         (generate-cast-to-64 expr-type))))))
+
 (defun alloc-temp-reg ()
   "Allocate a temporary register (returns virtual register V0, V1, ...)"
   (if *use-virtual-regs*
@@ -1165,6 +1777,11 @@
                                                  (sym-entry-offset sym)
                                                  (type-desc-array-size var-type)))
 
+                ;; 64-bit local variable initializer
+                ((and (is-longlong-type var-type)
+                      (eq (sym-entry-storage sym) :local))
+                 (generate-local-var-init-64 name sym init var-type))
+
                 ;; Regular expression initializer
                 (t
                  (generate-expression init)
@@ -1178,6 +1795,19 @@
                    (:local
                     ;; Store to stack with appropriate size
                     (generate-store-local (sym-entry-offset sym) var-type))))))))))))
+
+(defun generate-local-var-init-64 (name sym init var-type)
+  "Generate code to initialize a 64-bit local variable"
+  (generate-expression-64 init)
+  (let ((offset (+ (sym-entry-offset sym) *frame-size*))
+        (addr-temp (alloc-temp-reg)))
+    (emit `(A=Rx SP))
+    (emit `(Rx= ,offset ,addr-temp))
+    (emit `(A+=Rx ,addr-temp))
+    (free-temp-reg addr-temp)
+    (emit-store-64 *current-64-result*)
+    (free-reg-pair *current-64-result*)
+    (setf *current-64-result* nil)))
 
 ;;; ===========================================================================
 ;;; Expression Generation
@@ -1379,6 +2009,19 @@
         (left (first (ast-node-children node)))
         (right (second (ast-node-children node))))
 
+    ;; Check if either operand is 64-bit - if so, use 64-bit operations
+    (let ((left-type (get-expression-type left))
+          (right-type (get-expression-type right)))
+      (when (or (is-longlong-type left-type)
+                (is-longlong-type right-type))
+        ;; 64-bit operation
+        (generate-binary-op-64 node)
+        ;; If the result is still in a register pair (non-comparison),
+        ;; we need to return the low word in A for 32-bit context compatibility
+        (when *current-64-result*
+          (generate-cast-from-64))
+        (return-from generate-binary-op)))
+
     ;; Handle short-circuit operators specially
     (cond
       ((string= op "&&") (generate-logical-and left right))
@@ -1386,13 +2029,44 @@
       (t (generate-arithmetic-op op left right)))))
 
 (defun get-expression-type (node)
-  "Get the type of an expression (for pointer arithmetic)"
+  "Get the type of an expression (for pointer arithmetic and 64-bit detection)"
   (when (and node (ast-node-p node))
     (case (ast-node-type node)
       (var-ref
        (let ((sym (lookup-symbol (ast-node-value node))))
          (when sym (sym-entry-type sym))))
-      (literal nil)  ; integer literal, no pointer type
+      (literal
+       ;; Return the result-type if set (e.g., for LL/ULL suffixed literals)
+       (ast-node-result-type node))
+      (binary-op
+       ;; For binary ops, result type is the wider of the two operand types
+       (let ((left-type (get-expression-type (first (ast-node-children node))))
+             (right-type (get-expression-type (second (ast-node-children node)))))
+         (cond
+           ((is-longlong-type left-type) left-type)
+           ((is-longlong-type right-type) right-type)
+           (t (or left-type right-type)))))
+      (unary-op
+       ;; For unary ops, handle dereference and address-of specially
+       (let ((op (ast-node-value node))
+             (operand-type (get-expression-type (first (ast-node-children node)))))
+         (cond
+           ;; Dereference: pointer-level decreases by 1
+           ((and (string= op "*") operand-type (> (type-desc-pointer-level operand-type) 0))
+            (make-type-desc
+             :base (type-desc-base operand-type)
+             :pointer-level (1- (type-desc-pointer-level operand-type))
+             :size (type-desc-size operand-type)
+             :unsigned-p (type-desc-unsigned-p operand-type)))
+           ;; Address-of: pointer-level increases by 1
+           ((and (string= op "&") operand-type)
+            (make-type-desc
+             :base (type-desc-base operand-type)
+             :pointer-level (1+ (type-desc-pointer-level operand-type))
+             :size (type-desc-size operand-type)
+             :unsigned-p (type-desc-unsigned-p operand-type)))
+           ;; Other unary ops: same type as operand
+           (t operand-type))))
       (subscript
        ;; Array subscript - return element type
        (get-subscript-element-type node))
@@ -2067,6 +2741,29 @@
         (left (first (ast-node-children node)))
         (right (second (ast-node-children node))))
 
+    ;; Check if target is 64-bit
+    (let ((left-type (get-expression-type left)))
+      (when (is-longlong-type left-type)
+        ;; 64-bit assignment
+        (cond
+          ((string= op "=")
+           ;; Simple 64-bit assignment
+           (generate-expression-64 right)
+           (generate-store-lvalue-64 left *current-64-result*)
+           (free-reg-pair *current-64-result*)
+           (setf *current-64-result* nil))
+          (t
+           ;; Compound 64-bit assignment
+           (let ((base-op (subseq op 0 (1- (length op)))))
+             (generate-binary-op-64
+              (make-node 'binary-op
+                         :value base-op
+                         :children (list left right)))
+             (generate-store-lvalue-64 left *current-64-result*)
+             (free-reg-pair *current-64-result*)
+             (setf *current-64-result* nil))))
+        (return-from generate-assignment)))
+
     (cond
       ((string= op "=")
        ;; Simple assignment
@@ -2340,12 +3037,41 @@
 (defun generate-cast (node)
   "Generate code for type cast"
   (let ((target-type (ast-node-value node))
-        (expr (first (ast-node-children node))))
-    ;; Generate the expression
-    (generate-expression expr)
-    ;; Apply any necessary conversions
-    (when (and target-type (eq (type-desc-base target-type) 'char))
-      (emit '(mask-a-b)))))
+        (expr (first (ast-node-children node)))
+        (src-type (get-expression-type (first (ast-node-children node)))))
+
+    (cond
+      ;; Cast TO 64-bit
+      ((is-longlong-type target-type)
+       (if (is-longlong-type src-type)
+           ;; Already 64-bit, just evaluate
+           (progn
+             (generate-expression-64 expr)
+             ;; Return low word in A for 32-bit context
+             (generate-cast-from-64))
+           ;; Cast 32-bit to 64-bit
+           (progn
+             (generate-expression expr)
+             (generate-cast-to-64 src-type)
+             ;; Return low word in A for 32-bit context
+             (generate-cast-from-64))))
+
+      ;; Cast FROM 64-bit to 32-bit
+      ((is-longlong-type src-type)
+       (generate-expression-64 expr)
+       (generate-cast-from-64)
+       ;; Apply further narrowing if needed
+       (when (and target-type (< (type-size target-type) 4))
+         (case (type-size target-type)
+           (1 (emit '(mask-a-b)))
+           (2 (emit '(mask-a-w))))))
+
+      ;; Normal 32-bit cast
+      (t
+       (generate-expression expr)
+       ;; Apply any necessary conversions
+       (when (and target-type (eq (type-desc-base target-type) 'char))
+         (emit '(mask-a-b)))))))
 
 (defun generate-sizeof (node)
   "Generate code for sizeof"
@@ -2867,6 +3593,11 @@
              (case size
                (1 (emit `(abyte ,init-value)))
                (2 (emit `(aword ,init-value)))
+               (4 (emit `(adword ,init-value)))
+               (8 ;; 64-bit: emit low word then high word (little-endian)
+                (let ((val (if (integerp init-value) init-value 0)))
+                  (emit `(adword ,(logand val #xFFFFFFFF)))
+                  (emit `(adword ,(logand (ash val -32) #xFFFFFFFF)))))
                (otherwise (emit `(adword ,init-value))))))))))
 
 (defun generate-global-init-list (init-list target-type)

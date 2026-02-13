@@ -80,13 +80,17 @@
   "Convert a number suffix to the appropriate type descriptor.
    nil -> signed int
    :u -> unsigned int
-   :l, :ll -> signed long (32-bit on this platform)
-   :ul, :lu, :ull, :llu -> unsigned long"
+   :l -> signed long (32-bit on this platform)
+   :ul, :lu -> unsigned long (32-bit)
+   :ll -> signed long long (64-bit)
+   :ull, :llu -> unsigned long long (64-bit)"
   (case suffix
     ((nil) (make-int-type nil))
     ((:u) (make-int-type t))
-    ((:l :ll) (make-long-type nil))
-    ((:ul :lu :ull :llu) (make-long-type t))
+    ((:l) (make-long-type nil))
+    ((:ul :lu) (make-long-type t))
+    ((:ll) (make-longlong-type nil))
+    ((:ull :llu) (make-longlong-type t))
     (otherwise (make-int-type nil))))
 
 ;;; ===========================================================================
@@ -591,7 +595,7 @@
      (let ((is-unsigned nil)
            (is-signed nil)
            (is-short nil)
-           (is-long nil)
+           (long-count 0)
            (has-int nil)
            (has-char nil))
        ;; Collect modifiers and base type (can appear in any order)
@@ -600,7 +604,7 @@
            ((match-token 'keyword "unsigned") (setf is-unsigned t))
            ((match-token 'keyword "signed") (setf is-signed t))
            ((match-token 'keyword "short") (setf is-short t))
-           ((match-token 'keyword "long") (setf is-long t))
+           ((match-token 'keyword "long") (incf long-count))
            ((match-token 'keyword "int") (setf has-int t))
            ((match-token 'keyword "char") (setf has-char t))
            (t (return))))
@@ -615,8 +619,12 @@
          (is-short
           (make-short-type is-unsigned))
 
+         ;; long long types: "long long" or "long long int"
+         ((>= long-count 2)
+          (make-longlong-type is-unsigned))
+
          ;; long types: "long" or "long int"
-         (is-long
+         ((= long-count 1)
           (make-long-type is-unsigned))
 
          ;; int types (explicit or implied by unsigned/signed alone)
@@ -1252,6 +1260,7 @@
                     (if (and (not array-size)               ; Not an array
                              (not (eq (type-desc-base var-type) 'struct)) ; Not a struct
                              (not (eq (type-desc-base var-type) 'union))  ; Not a union
+                             (not (eq (type-desc-base var-type) 'longlong)) ; Not 64-bit (needs register pair)
                              (not (type-desc-volatile-p var-type))        ; Not volatile
                              (< local-reg-count 4)          ; Have free local regs (R6-R9)
                              (not (is-address-taken name))) ; Address not taken

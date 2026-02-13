@@ -4399,6 +4399,319 @@ int main() {
     (test-3d-array)
     (test-2d-array-loop)))
 
+;;; ===========================================================================
+;;; Phase 26 Tests: 64-bit Integer (long long) Support
+;;; ===========================================================================
+;;;
+;;; NOTE: These tests use global variables to prevent constant folding from
+;;; eliminating the 64-bit operations. Global values are loaded at runtime,
+;;; so the optimizer cannot fold them to constants.
+
+(deftest test-longlong-declaration ()
+  "Test long long variable declaration and simple assignment"
+  (check
+    ;; Basic declaration and cast to int for return
+    (= 42 (run-and-get-result "
+int main() {
+    long long x = 42;
+    return (int)x;
+}"))
+    ;; Unsigned long long
+    (= 123 (run-and-get-result "
+int main() {
+    unsigned long long x = 123;
+    return (int)x;
+}"))))
+
+(deftest test-longlong-literal-suffix ()
+  "Test LL and ULL literal suffixes"
+  (check
+    ;; LL suffix
+    (= 100 (run-and-get-result "
+int main() {
+    long long x = 100LL;
+    return (int)x;
+}"))
+    ;; ULL suffix
+    (= 200 (run-and-get-result "
+int main() {
+    unsigned long long x = 200ULL;
+    return (int)x;
+}"))))
+
+(deftest test-longlong-sizeof ()
+  "Test sizeof(long long) returns 8"
+  (check
+    (= 8 (run-and-get-result "
+int main() {
+    return sizeof(long long);
+}"))
+    (= 8 (run-and-get-result "
+int main() {
+    long long x;
+    return sizeof(x);
+}"))))
+
+(deftest test-longlong-add ()
+  "Test 64-bit addition with carry (using runtime assignments to prevent constant folding)"
+  (check
+    ;; Simple addition in low word only
+    (= 5 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 2; b = 3;
+    long long c = a + b;
+    return (int)c;
+}"))
+    ;; Addition that causes carry from low to high word
+    ;; 0xFFFFFFFF + 1 = 0x100000000, low word is 0
+    (= 0 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0xFFFFFFFFULL; b = 1;
+    unsigned long long c = a + b;
+    return (int)c;
+}"))
+    ;; Verify carry propagated: result == 0x100000000
+    (= 1 (run-and-get-result "
+unsigned long long a, b, expected;
+int main() {
+    a = 0xFFFFFFFFULL; b = 1ULL; expected = 0x100000000ULL;
+    unsigned long long c = a + b;
+    return c == expected;
+}"))))
+
+(deftest test-longlong-sub ()
+  "Test 64-bit subtraction with borrow (using runtime assignments to prevent constant folding)"
+  (check
+    ;; Simple subtraction
+    (= 5 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 10; b = 5;
+    long long c = a - b;
+    return (int)c;
+}"))
+    ;; Subtraction needing borrow from high word
+    ;; 0x100000000 - 1 = 0xFFFFFFFF
+    (result= -1 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0x100000000ULL; b = 1;
+    unsigned long long c = a - b;
+    return (int)c;
+}"))))
+
+(deftest test-longlong-bitwise ()
+  "Test 64-bit bitwise operations (using runtime assignments to prevent constant folding)"
+  (check
+    ;; AND
+    (= 2 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 0x3LL; b = 0x2LL;
+    return (int)(a & b);
+}"))
+    ;; OR
+    (= 3 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 0x1LL; b = 0x2LL;
+    return (int)(a | b);
+}"))
+    ;; XOR
+    (= 1 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 0x3LL; b = 0x2LL;
+    return (int)(a ^ b);
+}"))))
+
+(deftest test-longlong-cmp-eq ()
+  "Test 64-bit equality comparisons (using runtime assignments to prevent constant folding)"
+  (check
+    ;; Equal (same values)
+    (= 1 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 42LL; b = 42LL;
+    return a == b;
+}"))
+    ;; Not equal
+    (= 0 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 42LL; b = 43LL;
+    return a == b;
+}"))
+    ;; Equal large values (tests high word comparison)
+    (= 1 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0x100000001ULL; b = 0x100000001ULL;
+    return a == b;
+}"))
+    ;; Not equal - same low word, different high word
+    (= 0 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0x100000001ULL; b = 0x200000001ULL;
+    return a == b;
+}"))))
+
+(deftest test-longlong-cmp-lt ()
+  "Test 64-bit less-than comparisons (using runtime assignments to prevent constant folding)"
+  (check
+    ;; Less than (true)
+    (= 1 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 5LL; b = 10LL;
+    return a < b;
+}"))
+    ;; Less than (false)
+    (= 0 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 10LL; b = 5LL;
+    return a < b;
+}"))
+    ;; Large value comparison (high word differs)
+    (= 1 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0xFFFFFFFFULL; b = 0x100000000ULL;
+    return a < b;
+}"))))
+
+(deftest test-longlong-cmp-gt ()
+  "Test 64-bit greater-than comparisons (using runtime assignments to prevent constant folding)"
+  (check
+    (= 1 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0x100000000ULL; b = 0xFFFFFFFFULL;
+    return a > b;
+}"))
+    (= 0 (run-and-get-result "
+long long a, b;
+int main() {
+    a = 5LL; b = 10LL;
+    return a > b;
+}"))))
+
+(deftest test-longlong-negate ()
+  "Test 64-bit negation (using runtime assignment to prevent constant folding)"
+  (check
+    (result= -42 (run-and-get-result "
+long long a;
+int main() {
+    a = 42LL;
+    long long b = -a;
+    return (int)b;
+}"))))
+
+(deftest test-longlong-not ()
+  "Test 64-bit logical NOT (using runtime assignments to prevent constant folding)"
+  (check
+    ;; Logical NOT of zero is 1
+    (= 1 (run-and-get-result "
+long long a;
+int main() {
+    a = 0LL;
+    return !a;
+}"))
+    ;; Logical NOT of non-zero is 0
+    (= 0 (run-and-get-result "
+long long a;
+int main() {
+    a = 100LL;
+    return !a;
+}"))))
+
+(deftest test-longlong-cast ()
+  "Test casts to/from long long (using runtime assignments to prevent folding)"
+  (check
+    ;; Cast int to long long (positive)
+    (= 100 (run-and-get-result "
+int x;
+int main() {
+    x = 100;
+    long long y = (long long)x;
+    return (int)y;
+}"))
+    ;; Cast int to long long (negative, should sign-extend)
+    (result= -1 (run-and-get-result "
+int x;
+int main() {
+    x = -1;
+    long long y = (long long)x;
+    return (int)y;
+}"))
+    ;; Cast long long to int (truncation)
+    (= 0 (run-and-get-result "
+unsigned long long x;
+int main() {
+    x = 0x100000000ULL;
+    int y = (int)x;
+    return y;
+}"))))
+
+(deftest test-longlong-global ()
+  "Test global long long variables"
+  (check
+    ;; Reading global - can't constant fold global access
+    (= 42 (run-and-get-result "
+long long g = 42;
+int main() {
+    return (int)g;
+}"))
+    ;; Writing global
+    (= 99 (run-and-get-result "
+long long g;
+int main() {
+    g = 99;
+    return (int)g;
+}"))))
+
+(deftest test-longlong-large-values ()
+  "Test 64-bit operations with values > 32 bits (using runtime assignments)"
+  (check
+    ;; Add two large values
+    (= 2 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 0x100000001ULL; b = 0x100000001ULL;
+    unsigned long long result = a + b;
+    return (int)result;  // low word should be 2
+}"))
+    ;; Subtract large values - verify result is 0x100000000
+    (= 1 (run-and-get-result "
+unsigned long long a, b, expected;
+int main() {
+    a = 0x200000000ULL; b = 0x100000000ULL; expected = 0x100000000ULL;
+    unsigned long long result = a - b;
+    return result == expected;
+}"))))
+
+(deftest test-phase26-longlong ()
+  "Run all 64-bit long long tests"
+  (combine-results
+    (test-longlong-declaration)
+    (test-longlong-literal-suffix)
+    (test-longlong-sizeof)
+    (test-longlong-add)
+    (test-longlong-sub)
+    (test-longlong-bitwise)
+    (test-longlong-cmp-eq)
+    (test-longlong-cmp-lt)
+    (test-longlong-cmp-gt)
+    (test-longlong-negate)
+    (test-longlong-not)
+    (test-longlong-cast)
+    (test-longlong-global)
+    (test-longlong-large-values)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -4426,7 +4739,8 @@ int main() {
     (test-phase22-new-features)
     (test-phase23-initializers)
     (test-phase24-integer-suffixes)
-    (test-phase25-multidim-arrays)))
+    (test-phase25-multidim-arrays)
+    (test-phase26-longlong)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
