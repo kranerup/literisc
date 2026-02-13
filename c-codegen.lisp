@@ -233,6 +233,334 @@
     (free-reg-pair one-pair)))
 
 ;;; ---------------------------------------------------------------------------
+;;; 64-bit Shift Operations
+;;; ---------------------------------------------------------------------------
+
+(defun generate-shl-64 (src-pair count result-pair)
+  "64-bit left shift by constant count.
+   result = src << count"
+  (cond
+    ;; Zero shift - just copy
+    ((= count 0)
+     (emit `(A=Rx ,(reg-pair-low src-pair)))
+     (emit `(Rx=A ,(reg-pair-low result-pair)))
+     (emit `(A=Rx ,(reg-pair-high src-pair)))
+     (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+    ;; Shift by 64 or more - result is 0
+    ((>= count 64)
+     (emit `(Rx= 0 ,(reg-pair-low result-pair)))
+     (emit `(Rx= 0 ,(reg-pair-high result-pair))))
+
+    ;; Shift by exactly 32 - low moves to high, low becomes 0
+    ((= count 32)
+     (emit `(A=Rx ,(reg-pair-low src-pair)))
+     (emit `(Rx=A ,(reg-pair-high result-pair)))
+     (emit `(Rx= 0 ,(reg-pair-low result-pair))))
+
+    ;; Shift by 32-63 - high = low << (count-32), low = 0
+    ((> count 32)
+     (let ((shift-amt (- count 32)))
+       (emit `(A=Rx ,(reg-pair-low src-pair)))
+       (dotimes (i shift-amt)
+         (emit '(A=A<<1)))
+       (emit `(Rx=A ,(reg-pair-high result-pair)))
+       (emit `(Rx= 0 ,(reg-pair-low result-pair)))))
+
+    ;; Shift by 1-31
+    ;; result.high = (src.high << count) | (src.low >> (32 - count))
+    ;; result.low = src.low << count
+    (t
+     (let ((temp (alloc-temp-reg))
+           (complement-shift (- 32 count)))
+       ;; First, get the bits from low that will move into high
+       (emit `(A=Rx ,(reg-pair-low src-pair)))
+       (dotimes (i complement-shift)
+         (emit '(A=A>>1)))
+       (emit `(Rx=A ,temp))  ; temp = src.low >> (32 - count)
+
+       ;; Shift high left and OR with temp
+       (emit `(A=Rx ,(reg-pair-high src-pair)))
+       (dotimes (i count)
+         (emit '(A=A<<1)))
+       (emit `(A\|=Rx ,temp))
+       (emit `(Rx=A ,(reg-pair-high result-pair)))
+
+       ;; Shift low left
+       (emit `(A=Rx ,(reg-pair-low src-pair)))
+       (dotimes (i count)
+         (emit '(A=A<<1)))
+       (emit `(Rx=A ,(reg-pair-low result-pair)))
+
+       (free-temp-reg temp)))))
+
+(defun generate-shr-64 (src-pair count result-pair is-unsigned)
+  "64-bit right shift by constant count.
+   result = src >> count (logical if unsigned, arithmetic if signed)"
+  (cond
+    ;; Zero shift - just copy
+    ((= count 0)
+     (emit `(A=Rx ,(reg-pair-low src-pair)))
+     (emit `(Rx=A ,(reg-pair-low result-pair)))
+     (emit `(A=Rx ,(reg-pair-high src-pair)))
+     (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+    ;; Shift by 64 or more - result is 0 (or -1 for negative signed)
+    ((>= count 64)
+     (if is-unsigned
+         (progn
+           (emit `(Rx= 0 ,(reg-pair-low result-pair)))
+           (emit `(Rx= 0 ,(reg-pair-high result-pair))))
+         ;; Signed: result is 0 or -1 depending on sign bit
+         (let ((pos-label (gen-label "SHR64POS"))
+               (end-label (gen-label "SHR64END")))
+           (emit `(A=Rx ,(reg-pair-high src-pair)))
+           (emit '(A=A>>1))  ; get sign bit into bit 30
+           ;; Check if negative (bit 31 was set)
+           (let ((temp (alloc-temp-reg)))
+             (emit `(Rx= #x40000000 ,temp))
+             (emit `(A&=Rx ,temp))
+             (emit `(Rx= 0 ,temp))
+             (emit `(A-=Rx ,temp))
+             (free-temp-reg temp))
+           (emit `(jz ,pos-label))
+           ;; Negative - fill with -1
+           (emit `(Rx= -1 ,(reg-pair-low result-pair)))
+           (emit `(Rx= -1 ,(reg-pair-high result-pair)))
+           (emit `(j ,end-label))
+           (emit-label pos-label)
+           ;; Positive - fill with 0
+           (emit `(Rx= 0 ,(reg-pair-low result-pair)))
+           (emit `(Rx= 0 ,(reg-pair-high result-pair)))
+           (emit-label end-label))))
+
+    ;; Shift by exactly 32 - high moves to low, high becomes 0 (or sign-extended)
+    ((= count 32)
+     (emit `(A=Rx ,(reg-pair-high src-pair)))
+     (emit `(Rx=A ,(reg-pair-low result-pair)))
+     (if is-unsigned
+         (emit `(Rx= 0 ,(reg-pair-high result-pair)))
+         ;; Sign extend: high = (src.high < 0) ? -1 : 0
+         (let ((pos-label (gen-label "SHR64POS"))
+               (end-label (gen-label "SHR64END"))
+               (temp (alloc-temp-reg)))
+           (emit `(A=Rx ,(reg-pair-high src-pair)))
+           (emit `(Rx= 0 ,temp))
+           (emit `(A-=Rx ,temp))
+           (emit `(jge ,pos-label))
+           (emit `(Rx= -1 ,(reg-pair-high result-pair)))
+           (emit `(j ,end-label))
+           (emit-label pos-label)
+           (emit `(Rx= 0 ,(reg-pair-high result-pair)))
+           (emit-label end-label)
+           (free-temp-reg temp))))
+
+    ;; Shift by 33-63 - low = high >> (count-32), high = 0 (or sign-extended)
+    ((> count 32)
+     (let ((shift-amt (- count 32)))
+       (emit `(A=Rx ,(reg-pair-high src-pair)))
+       (dotimes (i shift-amt)
+         (emit '(A=A>>1)))
+       (emit `(Rx=A ,(reg-pair-low result-pair)))
+       (if is-unsigned
+           (emit `(Rx= 0 ,(reg-pair-high result-pair)))
+           ;; Sign extend
+           (let ((pos-label (gen-label "SHR64POS"))
+                 (end-label (gen-label "SHR64END"))
+                 (temp (alloc-temp-reg)))
+             (emit `(A=Rx ,(reg-pair-high src-pair)))
+             (emit `(Rx= 0 ,temp))
+             (emit `(A-=Rx ,temp))
+             (emit `(jge ,pos-label))
+             (emit `(Rx= -1 ,(reg-pair-high result-pair)))
+             (emit `(j ,end-label))
+             (emit-label pos-label)
+             (emit `(Rx= 0 ,(reg-pair-high result-pair)))
+             (emit-label end-label)
+             (free-temp-reg temp)))))
+
+    ;; Shift by 1-31
+    ;; result.low = (src.low >> count) | (src.high << (32 - count))
+    ;; result.high = src.high >> count (logical or arithmetic)
+    (t
+     (let ((temp (alloc-temp-reg))
+           (complement-shift (- 32 count)))
+       ;; First, get the bits from high that will move into low
+       (emit `(A=Rx ,(reg-pair-high src-pair)))
+       (dotimes (i complement-shift)
+         (emit '(A=A<<1)))
+       (emit `(Rx=A ,temp))  ; temp = src.high << (32 - count)
+
+       ;; Shift low right and OR with temp
+       (emit `(A=Rx ,(reg-pair-low src-pair)))
+       (dotimes (i count)
+         (emit '(A=A>>1)))
+       (emit `(A\|=Rx ,temp))
+       (emit `(Rx=A ,(reg-pair-low result-pair)))
+
+       ;; Shift high right (logical shift - liteRISC A=A>>1 is logical)
+       ;; For arithmetic shift on signed values, we'd need to preserve sign bit
+       (emit `(A=Rx ,(reg-pair-high src-pair)))
+       (if is-unsigned
+           ;; Logical shift
+           (progn
+             (dotimes (i count)
+               (emit '(A=A>>1)))
+             (emit `(Rx=A ,(reg-pair-high result-pair))))
+           ;; Arithmetic shift - need to preserve sign bit
+           ;; A=A>>1 is logical, so we need to manually propagate sign
+           (let ((sign-reg (alloc-temp-reg))
+                 (mask-reg (alloc-temp-reg)))
+             ;; Get sign bit
+             (emit `(Rx= #x80000000 ,sign-reg))
+             (emit `(A&=Rx ,sign-reg))
+             (emit `(Rx=A ,sign-reg))  ; sign-reg = 0 or 0x80000000
+             ;; Do the shifts
+             (emit `(A=Rx ,(reg-pair-high src-pair)))
+             (dotimes (i count)
+               (emit '(A=A>>1)))
+             ;; If sign bit was set, OR in the sign bits
+             (let ((no-sign-label (gen-label "NOSIGN"))
+                   (end-label (gen-label "SIGNEND"))
+                   (temp2 (alloc-temp-reg)))
+               (emit `(Rx=A ,temp))  ; save shifted value
+               (emit `(A=Rx ,sign-reg))
+               (emit `(Rx= 0 ,temp2))
+               (emit `(A-=Rx ,temp2))
+               (emit `(jz ,no-sign-label))
+               ;; Sign was set - create mask with upper bits set
+               ;; Mask = ~((1 << (32 - count)) - 1) = upper 'count' bits set
+               (emit `(A=Rx ,temp))
+               (emit `(Rx= ,(logand #xFFFFFFFF (lognot (1- (ash 1 (- 32 count))))) ,mask-reg))
+               (emit `(A\|=Rx ,mask-reg))
+               (emit `(j ,end-label))
+               (emit-label no-sign-label)
+               (emit `(A=Rx ,temp))
+               (emit-label end-label)
+               (free-temp-reg temp2))
+             (emit `(Rx=A ,(reg-pair-high result-pair)))
+             (free-temp-reg mask-reg)
+             (free-temp-reg sign-reg)))
+
+       (free-temp-reg temp)))))
+
+(defun generate-shift-64-variable (src-pair count-reg result-pair is-left is-unsigned)
+  "64-bit shift by variable count (in count-reg).
+   Uses a loop to shift one bit at a time."
+  (let ((loop-label (gen-label "SH64LOOP"))
+        (end-label (gen-label "SH64END"))
+        (count-temp (alloc-temp-reg))
+        (zero-reg (alloc-temp-reg)))
+
+    ;; Copy source to result (we'll shift in place)
+    (emit `(A=Rx ,(reg-pair-low src-pair)))
+    (emit `(Rx=A ,(reg-pair-low result-pair)))
+    (emit `(A=Rx ,(reg-pair-high src-pair)))
+    (emit `(Rx=A ,(reg-pair-high result-pair)))
+
+    ;; Copy count
+    (emit `(A=Rx ,count-reg))
+    (emit `(Rx=A ,count-temp))
+    (emit `(Rx= 0 ,zero-reg))
+
+    ;; Loop: while count > 0, shift by 1
+    (emit-label loop-label)
+    (emit `(A=Rx ,count-temp))
+    (emit `(A-=Rx ,zero-reg))
+    (emit `(jz ,end-label))
+
+    ;; Decrement count
+    (emit `(A=Rx ,count-temp))
+    (let ((one-reg (alloc-temp-reg)))
+      (emit `(Rx= 1 ,one-reg))
+      (emit `(A-=Rx ,one-reg))
+      (emit `(Rx=A ,count-temp))
+      (free-temp-reg one-reg))
+
+    ;; Shift by 1
+    (if is-left
+        ;; Left shift: shift high left, get carry from low, shift low left
+        (let ((carry-reg (alloc-temp-reg)))
+          ;; Get carry bit from low (bit 31)
+          (emit `(A=Rx ,(reg-pair-low result-pair)))
+          (emit '(A=A>>1))  ; bit 31 now in bit 30
+          (let ((mask-reg (alloc-temp-reg)))
+            (emit `(Rx= #x40000000 ,mask-reg))
+            (emit `(A&=Rx ,mask-reg))  ; isolate bit 30
+            (emit '(A=A<<1))  ; move back to bit 31, then to bit 0
+            (dotimes (i 31) (emit '(A=A>>1)))
+            (free-temp-reg mask-reg))
+          (emit `(Rx=A ,carry-reg))  ; carry-reg = 0 or 1
+
+          ;; Shift low left
+          (emit `(A=Rx ,(reg-pair-low result-pair)))
+          (emit '(A=A<<1))
+          (emit `(Rx=A ,(reg-pair-low result-pair)))
+
+          ;; Shift high left and add carry
+          (emit `(A=Rx ,(reg-pair-high result-pair)))
+          (emit '(A=A<<1))
+          (emit `(A\|=Rx ,carry-reg))
+          (emit `(Rx=A ,(reg-pair-high result-pair)))
+          (free-temp-reg carry-reg))
+
+        ;; Right shift: shift low right, get carry from high, shift high right
+        (let ((carry-reg (alloc-temp-reg)))
+          ;; Get carry bit from high (bit 0)
+          (emit `(A=Rx ,(reg-pair-high result-pair)))
+          (let ((one-reg (alloc-temp-reg)))
+            (emit `(Rx= 1 ,one-reg))
+            (emit `(A&=Rx ,one-reg))
+            (free-temp-reg one-reg))
+          ;; Move to bit 31
+          (dotimes (i 31) (emit '(A=A<<1)))
+          (emit `(Rx=A ,carry-reg))
+
+          ;; Shift high right (logical or arithmetic)
+          (emit `(A=Rx ,(reg-pair-high result-pair)))
+          (emit '(A=A>>1))
+          (unless is-unsigned
+            ;; Arithmetic: restore sign bit
+            ;; Check if original high had bit 31 set
+            (let ((sign-check (alloc-temp-reg))
+                  (restore-label (gen-label "NOSIGNREST")))
+              (emit `(Rx=A ,sign-check))  ; save shifted value
+              (emit `(A=Rx ,(reg-pair-high result-pair)))
+              (let ((sign-mask (alloc-temp-reg)))
+                (emit `(Rx= #x40000000 ,sign-mask))  ; bit 30 after shift = original bit 31
+                (emit `(A&=Rx ,sign-mask))
+                (let ((z (alloc-temp-reg)))
+                  (emit `(Rx= 0 ,z))
+                  (emit `(A-=Rx ,z))
+                  (free-temp-reg z))
+                (free-temp-reg sign-mask))
+              (emit `(jz ,restore-label))
+              ;; Was negative, set bit 31 in result
+              (emit `(A=Rx ,sign-check))
+              (let ((hi-bit (alloc-temp-reg)))
+                (emit `(Rx= #x80000000 ,hi-bit))
+                (emit `(A\|=Rx ,hi-bit))
+                (free-temp-reg hi-bit))
+              (emit `(Rx=A ,sign-check))
+              (emit-label restore-label)
+              (emit `(A=Rx ,sign-check))
+              (free-temp-reg sign-check)))
+          (emit `(Rx=A ,(reg-pair-high result-pair)))
+
+          ;; Shift low right and add carry
+          (emit `(A=Rx ,(reg-pair-low result-pair)))
+          (emit '(A=A>>1))
+          (emit `(A\|=Rx ,carry-reg))
+          (emit `(Rx=A ,(reg-pair-low result-pair)))
+          (free-temp-reg carry-reg)))
+
+    (emit `(j ,loop-label))
+    (emit-label end-label)
+
+    (free-temp-reg zero-reg)
+    (free-temp-reg count-temp)))
+
+;;; ---------------------------------------------------------------------------
 ;;; 64-bit Comparison Operations
 ;;; ---------------------------------------------------------------------------
 
@@ -573,9 +901,87 @@
              (free-reg-pair result-pair)
              (return-from generate-binary-op-64))
 
-            ;; Multiplication/division/modulo - TODO: implement runtime library
-            ((member op '("*" "/" "%") :test #'string=)
-             (compiler-error "64-bit ~a not yet implemented" op))
+            ;; Shift operators - shift count is 32-bit
+            ((string= op "<<")
+             ;; For shifts, we need the count as a 32-bit value
+             ;; right-pair.low contains the count (high should be 0 for reasonable shifts)
+             ;; Check if shift count is a constant
+             (if (and (ast-node-p right)
+                      (eq (ast-node-type right) 'literal)
+                      (integerp (ast-node-value right)))
+                 ;; Constant shift
+                 (generate-shl-64 left-pair (ast-node-value right) result-pair)
+                 ;; Variable shift - use the low word of right-pair as count
+                 (generate-shift-64-variable left-pair (reg-pair-low right-pair)
+                                             result-pair t is-unsigned)))
+
+            ((string= op ">>")
+             ;; Similar to left shift
+             (if (and (ast-node-p right)
+                      (eq (ast-node-type right) 'literal)
+                      (integerp (ast-node-value right)))
+                 ;; Constant shift
+                 (generate-shr-64 left-pair (ast-node-value right) result-pair is-unsigned)
+                 ;; Variable shift
+                 (generate-shift-64-variable left-pair (reg-pair-low right-pair)
+                                             result-pair nil is-unsigned)))
+
+            ;; Multiplication - call __MUL64 runtime
+            ((string= op "*")
+             (setf (compiler-state-need-mul64-runtime *state*) t)
+             ;; Setup: P0:P1 = left, P2:P3 = right
+             (emit `(A=Rx ,(reg-pair-low left-pair)))
+             (emit '(Rx=A P0))
+             (emit `(A=Rx ,(reg-pair-high left-pair)))
+             (emit '(Rx=A P1))
+             (emit `(A=Rx ,(reg-pair-low right-pair)))
+             (emit '(Rx=A P2))
+             (emit `(A=Rx ,(reg-pair-high right-pair)))
+             (emit '(Rx=A P3))
+             (emit '(jsr __MUL64))
+             ;; Result in P0:P1
+             (emit '(A=Rx P0))
+             (emit `(Rx=A ,(reg-pair-low result-pair)))
+             (emit '(A=Rx P1))
+             (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+            ;; Division - call __DIV64 runtime
+            ((string= op "/")
+             (setf (compiler-state-need-div64-runtime *state*) t)
+             ;; Setup: P0:P1 = left, P2:P3 = right
+             (emit `(A=Rx ,(reg-pair-low left-pair)))
+             (emit '(Rx=A P0))
+             (emit `(A=Rx ,(reg-pair-high left-pair)))
+             (emit '(Rx=A P1))
+             (emit `(A=Rx ,(reg-pair-low right-pair)))
+             (emit '(Rx=A P2))
+             (emit `(A=Rx ,(reg-pair-high right-pair)))
+             (emit '(Rx=A P3))
+             (emit '(jsr __DIV64))
+             ;; Result in P0:P1
+             (emit '(A=Rx P0))
+             (emit `(Rx=A ,(reg-pair-low result-pair)))
+             (emit '(A=Rx P1))
+             (emit `(Rx=A ,(reg-pair-high result-pair))))
+
+            ;; Modulo - call __MOD64 runtime
+            ((string= op "%")
+             (setf (compiler-state-need-mod64-runtime *state*) t)
+             ;; Setup: P0:P1 = left, P2:P3 = right
+             (emit `(A=Rx ,(reg-pair-low left-pair)))
+             (emit '(Rx=A P0))
+             (emit `(A=Rx ,(reg-pair-high left-pair)))
+             (emit '(Rx=A P1))
+             (emit `(A=Rx ,(reg-pair-low right-pair)))
+             (emit '(Rx=A P2))
+             (emit `(A=Rx ,(reg-pair-high right-pair)))
+             (emit '(Rx=A P3))
+             (emit '(jsr __MOD64))
+             ;; Result in P0:P1
+             (emit '(A=Rx P0))
+             (emit `(Rx=A ,(reg-pair-low result-pair)))
+             (emit '(A=Rx P1))
+             (emit `(Rx=A ,(reg-pair-high result-pair))))
 
             (t
              (compiler-error "Unknown 64-bit binary operator: ~a" op)))

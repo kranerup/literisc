@@ -4694,6 +4694,233 @@ int main() {
     return result == expected;
 }"))))
 
+(deftest test-longlong-shift ()
+  "Test 64-bit shift operations"
+  (check
+    ;; Left shift by 0 - no change
+    (= 5 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a << 0;
+    return (int)result;
+}"))
+    ;; Left shift by 1 - multiply by 2
+    (= 10 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a << 1;
+    return (int)result;
+}"))
+    ;; Left shift by 4 - multiply by 16
+    (= 80 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a << 4;
+    return (int)result;
+}"))
+    ;; Left shift by 32 - low word moves to high
+    (= 0 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a << 32;
+    return (int)result;  // low word should be 0
+}"))
+    ;; Left shift by 32 - verify high word is correct
+    (= 1 (run-and-get-result "
+unsigned long long a, expected;
+int main() {
+    a = 5ULL;
+    expected = 0x500000000ULL;
+    unsigned long long result = a << 32;
+    return result == expected;
+}"))
+    ;; Right shift by 0 - no change
+    (= 5 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a >> 0;
+    return (int)result;
+}"))
+    ;; Right shift by 1 - divide by 2
+    (= 2 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 5ULL;
+    unsigned long long result = a >> 1;
+    return (int)result;
+}"))
+    ;; Right shift by 4 - divide by 16
+    (= 5 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 80ULL;
+    unsigned long long result = a >> 4;
+    return (int)result;
+}"))
+    ;; Right shift by 32 - high word moves to low
+    (= 1 (run-and-get-result "
+unsigned long long a, expected;
+int main() {
+    a = 0x100000005ULL;
+    unsigned long long result = a >> 32;
+    return result == 1ULL;
+}"))
+    ;; Left shift by 64 - result is 0
+    (= 1 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 0xFFFFFFFFFFFFFFFFULL;
+    unsigned long long result = a << 64;
+    return result == 0ULL;
+}"))
+    ;; Right shift by 64 - result is 0
+    (= 1 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 0xFFFFFFFFFFFFFFFFULL;
+    unsigned long long result = a >> 64;
+    return result == 0ULL;
+}"))
+    ;; Left shift that crosses 32-bit boundary
+    (= 1 (run-and-get-result "
+unsigned long long a, expected;
+int main() {
+    a = 0xFFFFFFFFULL;  // 32 bits of 1s
+    expected = 0x1FFFFFFFE0000000ULL;  // shifted left by 29
+    unsigned long long result = a << 29;
+    return result == expected;
+}"))))
+
+(deftest test-longlong-multiply ()
+  "Test 64-bit multiplication"
+  (check
+    ;; Simple multiplication by 0
+    (= 0 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 12345ULL;
+    unsigned long long result = a * 0ULL;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Multiplication by 1
+    (= 42 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 42ULL;
+    unsigned long long result = a * 1ULL;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Simple multiplication
+    (= 20 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 4ULL;
+    b = 5ULL;
+    unsigned long long result = a * b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Multiplication with larger values
+    (= 100 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 10ULL;
+    b = 10ULL;
+    unsigned long long result = a * b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Powers of 2
+    (= 64 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 8ULL;
+    b = 8ULL;
+    unsigned long long result = a * b;
+    return (int)result;
+}" :max-cycles 100000))))
+
+(deftest test-longlong-divide ()
+  "Test 64-bit division"
+  (check
+    ;; Division by 1
+    (= 42 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 42ULL;
+    unsigned long long result = a / 1ULL;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Simple division
+    (= 5 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 20ULL;
+    b = 4ULL;
+    unsigned long long result = a / b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Division with larger values
+    (= 10 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 100ULL;
+    b = 10ULL;
+    unsigned long long result = a / b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Division with remainder (should truncate)
+    (= 3 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 10ULL;
+    b = 3ULL;
+    unsigned long long result = a / b;
+    return (int)result;
+}" :max-cycles 100000))))
+
+(deftest test-longlong-modulo ()
+  "Test 64-bit modulo"
+  (check
+    ;; Modulo by 1 is always 0
+    (= 0 (run-and-get-result "
+unsigned long long a;
+int main() {
+    a = 42ULL;
+    unsigned long long result = a % 1ULL;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Simple modulo
+    (= 0 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 20ULL;
+    b = 4ULL;
+    unsigned long long result = a % b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Modulo with remainder
+    (= 1 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 10ULL;
+    b = 3ULL;
+    unsigned long long result = a % b;
+    return (int)result;
+}" :max-cycles 100000))
+    ;; Modulo of smaller by larger
+    (= 7 (run-and-get-result "
+unsigned long long a, b;
+int main() {
+    a = 7ULL;
+    b = 10ULL;
+    unsigned long long result = a % b;
+    return (int)result;
+}" :max-cycles 100000))))
+
 (deftest test-phase26-longlong ()
   "Run all 64-bit long long tests"
   (combine-results
@@ -4710,7 +4937,11 @@ int main() {
     (test-longlong-not)
     (test-longlong-cast)
     (test-longlong-global)
-    (test-longlong-large-values)))
+    (test-longlong-large-values)
+    (test-longlong-shift)
+    (test-longlong-multiply)
+    (test-longlong-divide)
+    (test-longlong-modulo)))
 
 (deftest test-c-compiler ()
   "Run all C compiler tests"

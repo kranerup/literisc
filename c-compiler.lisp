@@ -107,6 +107,9 @@
   (need-div-runtime nil) ; set to t when __div runtime is needed
   (need-mod-runtime nil) ; set to t when __mod runtime is needed
   (need-indirect-call nil) ; set to t when indirect function calls are used
+  (need-mul64-runtime nil) ; set to t when __mul64 runtime is needed
+  (need-div64-runtime nil) ; set to t when __div64 runtime is needed
+  (need-mod64-runtime nil) ; set to t when __mod64 runtime is needed
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
   (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
@@ -298,7 +301,16 @@
     (emit-mod-runtime))
   ;; Emit indirect call helper if needed
   (when (compiler-state-need-indirect-call *state*)
-    (emit-indirect-call-runtime)))
+    (emit-indirect-call-runtime))
+  ;; Emit 64-bit multiply runtime if needed
+  (when (compiler-state-need-mul64-runtime *state*)
+    (emit-mul64-runtime))
+  ;; Emit 64-bit divide runtime if needed
+  (when (compiler-state-need-div64-runtime *state*)
+    (emit-div64-runtime))
+  ;; Emit 64-bit modulo runtime if needed
+  (when (compiler-state-need-mod64-runtime *state*)
+    (emit-mod64-runtime)))
 
 (defun emit-indirect-call-runtime ()
   "Emit the __indirect_call runtime helper: jumps to address in R0"
@@ -416,6 +428,289 @@
   (emit '(Rx=A P0))           ; P0 = remainder
   ;; Restore callee-saved registers and return
   (emit '(pop-r R1))
+  (emit '(A=Rx SRP))
+  (emit '(j-A)))
+
+(defun emit-mul64-runtime ()
+  "Emit the __mul64 runtime function: P0:P1 = P0:P1 * P2:P3 (64-bit multiply)
+   Uses shift-and-add algorithm."
+  (emit '(:comment "======== runtime: __mul64 ========"))
+  (emit '(:comment "P0:P1 = P0:P1 * P2:P3 (64-bit shift-and-add)"))
+  (emit '(label __MUL64))
+  ;; Save callee-saved registers
+  (emit '(push-r R6))
+  (emit '(push-r R7))
+  (emit '(push-r R8))
+  (emit '(push-r R9))
+  ;; R0:R1 = multiplicand (copy of P0:P1)
+  ;; R2:R3 = multiplier (copy of P2:P3)
+  ;; R4:R5 = result (starts at 0)
+  ;; R6 = temp
+  (emit '(A=Rx P0))
+  (emit '(Rx=A R0))           ; R0 = multiplicand low
+  (emit '(A=Rx P1))
+  (emit '(Rx=A R1))           ; R1 = multiplicand high
+  (emit '(A=Rx P2))
+  (emit '(Rx=A R2))           ; R2 = multiplier low
+  (emit '(A=Rx P3))
+  (emit '(Rx=A R3))           ; R3 = multiplier high
+  (emit '(A= 0))
+  (emit '(Rx=A R4))           ; R4 = result low = 0
+  (emit '(Rx=A R5))           ; R5 = result high = 0
+  (emit '(Rx=A R6))           ; R6 = 0 (for comparisons)
+  (emit '(label __MUL64_LOOP))
+  ;; Check if multiplier (R2:R3) is zero
+  (emit '(A=Rx R2))
+  (emit '(A\|=Rx R3))
+  (emit '(A-=Rx R6))
+  (emit '(jz __MUL64_END))
+  ;; Check LSB of multiplier
+  (emit '(A=Rx R2))
+  (emit '(Rx= 1 R7))
+  (emit '(A&=Rx R7))
+  (emit '(A-=Rx R6))
+  (emit '(jz __MUL64_SKIP_ADD))
+  ;; Add multiplicand to result (64-bit add with carry)
+  (emit '(A=Rx R4))
+  (emit '(A+=Rx R0))           ; result_low += multiplicand_low (sets carry)
+  (emit '(Rx=A R4))
+  (emit '(A=Rx R5))
+  (emit '(A+=Rx+c R1))         ; result_high += multiplicand_high + carry
+  (emit '(Rx=A R5))
+  (emit '(label __MUL64_SKIP_ADD))
+  ;; Shift multiplicand left (64-bit)
+  ;; First get carry bit from low word's bit 31
+  (emit '(A=Rx R0))
+  (emit '(Rx= #x80000000 R7))
+  (emit '(A&=Rx R7))           ; isolate bit 31
+  (emit '(Rx=A R8))            ; R8 = 0 or 0x80000000
+  ;; Shift low word left
+  (emit '(A=Rx R0))
+  (emit '(A=A<<1))
+  (emit '(Rx=A R0))
+  ;; Shift high word left and add carry
+  (emit '(A=Rx R1))
+  (emit '(A=A<<1))
+  ;; Add carry if bit 31 was set (R8 != 0)
+  (emit '(A=Rx R8))
+  (emit '(A-=Rx R6))           ; compare R8 to 0
+  (emit '(jz __MUL64_NO_CARRY))
+  (emit '(A=Rx R1))
+  (emit '(A=A<<1))
+  (emit '(Rx= 1 R7))
+  (emit '(A\|=Rx R7))          ; add carry bit
+  (emit '(Rx=A R1))
+  (emit '(j __MUL64_SHIFT_DONE))
+  (emit '(label __MUL64_NO_CARRY))
+  (emit '(A=Rx R1))
+  (emit '(A=A<<1))
+  (emit '(Rx=A R1))
+  (emit '(label __MUL64_SHIFT_DONE))
+  ;; Shift multiplier right (64-bit)
+  ;; First get bit 0 from high word
+  (emit '(A=Rx R3))
+  (emit '(Rx= 1 R7))
+  (emit '(A&=Rx R7))           ; isolate bit 0 of high
+  (emit '(Rx=A R8))            ; R8 = 0 or 1
+  ;; Shift high word right
+  (emit '(A=Rx R3))
+  (emit '(A=A>>1))
+  (emit '(Rx=A R3))
+  ;; Shift low word right
+  (emit '(A=Rx R2))
+  (emit '(A=A>>1))
+  ;; Add bit from high word if it was set
+  (emit '(A=Rx R8))
+  (emit '(A-=Rx R6))
+  (emit '(jz __MUL64_NO_HI_BIT))
+  (emit '(A=Rx R2))
+  (emit '(A=A>>1))
+  (emit '(Rx= #x80000000 R7))
+  (emit '(A\|=Rx R7))          ; set bit 31
+  (emit '(Rx=A R2))
+  (emit '(j __MUL64_LOOP))
+  (emit '(label __MUL64_NO_HI_BIT))
+  (emit '(A=Rx R2))
+  (emit '(A=A>>1))
+  (emit '(Rx=A R2))
+  (emit '(j __MUL64_LOOP))
+  (emit '(label __MUL64_END))
+  ;; Copy result to P0:P1
+  (emit '(A=Rx R4))
+  (emit '(Rx=A P0))
+  (emit '(A=Rx R5))
+  (emit '(Rx=A P1))
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R9))
+  (emit '(pop-r R8))
+  (emit '(pop-r R7))
+  (emit '(pop-r R6))
+  (emit '(A=Rx SRP))
+  (emit '(j-A)))
+
+(defun emit-div64-runtime ()
+  "Emit the __div64 runtime function: P0:P1 = P0:P1 / P2:P3 (64-bit divide)
+   Uses repeated subtraction algorithm (unsigned division).
+   Note: This is O(quotient) - slow for large quotients."
+  (emit '(:comment "======== runtime: __div64 ========"))
+  (emit '(:comment "P0:P1 = P0:P1 / P2:P3 (64-bit repeated subtraction)"))
+  (emit '(label __DIV64))
+  ;; Save callee-saved registers
+  (emit '(push-r R6))
+  (emit '(push-r R7))
+  ;; R0:R1 = dividend (becomes remainder)
+  ;; R2:R3 = divisor
+  ;; R4:R5 = quotient (starts at 0)
+  ;; R6 = temp for one
+  ;; R7 = temp
+  (emit '(A=Rx P0))
+  (emit '(Rx=A R0))           ; R0 = dividend low
+  (emit '(A=Rx P1))
+  (emit '(Rx=A R1))           ; R1 = dividend high
+  (emit '(A=Rx P2))
+  (emit '(Rx=A R2))           ; R2 = divisor low
+  (emit '(A=Rx P3))
+  (emit '(Rx=A R3))           ; R3 = divisor high
+  (emit '(A= 0))
+  (emit '(Rx=A R4))           ; quotient low = 0
+  (emit '(Rx=A R5))           ; quotient high = 0
+  (emit '(Rx=A R7))           ; R7 = 0 for comparisons
+  ;; Check for division by zero - if divisor is 0, return 0
+  (emit '(A=Rx R2))
+  (emit '(A\|=Rx R3))
+  (emit '(A-=Rx R7))
+  (emit '(jz __DIV64_END))
+  (emit '(label __DIV64_LOOP))
+  ;; Compare dividend (R0:R1) >= divisor (R2:R3)
+  ;; Compare high words first
+  (emit '(A=Rx R1))
+  (emit '(A-=Rx R3))
+  (emit '(jlt __DIV64_END))   ; dividend.high < divisor.high -> done
+  (emit '(jnz __DIV64_DO_SUB)) ; dividend.high > divisor.high -> subtract
+  ;; High words equal, compare low words
+  (emit '(A=Rx R0))
+  (emit '(A-=Rx R2))
+  (emit '(jlt __DIV64_END))   ; dividend.low < divisor.low -> done
+  (emit '(label __DIV64_DO_SUB))
+  ;; dividend >= divisor, so subtract: R0:R1 -= R2:R3
+  ;; First save original R0 to detect borrow
+  (emit '(A=Rx R0))
+  (emit '(Rx=A R6))           ; R6 = original low
+  ;; Subtract low words
+  (emit '(A=Rx R0))
+  (emit '(A-=Rx R2))
+  (emit '(Rx=A R0))
+  ;; Subtract high words
+  (emit '(A=Rx R1))
+  (emit '(A-=Rx R3))
+  (emit '(Rx=A R1))
+  ;; Check for borrow: if new_low > old_low, we wrapped (borrow occurred)
+  (emit '(A=Rx R0))           ; new low
+  (emit '(A-=Rx R6))          ; new_low - old_low
+  ;; jle = jlt or jz (no jle instruction available)
+  (emit '(jlt __DIV64_NO_BORROW))  ; if new < old, no wrap
+  (emit '(jz __DIV64_NO_BORROW))   ; if new = old, no wrap
+  ;; Borrow occurred - decrement high by 1
+  (emit '(A=Rx R1))
+  (emit '(Rx= 1 R7))
+  (emit '(A-=Rx R7))
+  (emit '(Rx=A R1))
+  (emit '(Rx= 0 R7))          ; restore R7 = 0
+  (emit '(label __DIV64_NO_BORROW))
+  ;; Increment quotient
+  (emit '(A=Rx R4))
+  (emit '(Rx= 1 R6))
+  (emit '(A+=Rx R6))
+  (emit '(Rx=A R4))
+  ;; Check for overflow: if result is 0, we wrapped (0xFFFFFFFF + 1 = 0)
+  (emit '(Rx= 0 R7))
+  (emit '(A-=Rx R7))
+  (emit '(jnz __DIV64_LOOP))  ; if not zero, no overflow, continue
+  ;; Overflow - increment high quotient
+  (emit '(A=Rx R5))
+  (emit '(Rx= 1 R6))
+  (emit '(A+=Rx R6))          ; quotient.high += 1
+  (emit '(Rx=A R5))
+  (emit '(j __DIV64_LOOP))
+  (emit '(label __DIV64_END))
+  ;; Copy quotient to P0:P1
+  (emit '(A=Rx R4))
+  (emit '(Rx=A P0))
+  (emit '(A=Rx R5))
+  (emit '(Rx=A P1))
+  ;; Restore and return
+  (emit '(pop-r R7))
+  (emit '(pop-r R6))
+  (emit '(A=Rx SRP))
+  (emit '(j-A)))
+
+(defun emit-mod64-runtime ()
+  "Emit the __mod64 runtime function: P0:P1 = P0:P1 % P2:P3 (64-bit modulo)
+   Uses repeated subtraction - returns remainder after division."
+  (emit '(:comment "======== runtime: __mod64 ========"))
+  (emit '(:comment "P0:P1 = P0:P1 % P2:P3 (64-bit modulo)"))
+  (emit '(label __MOD64))
+  ;; Save callee-saved registers
+  (emit '(push-r R6))
+  (emit '(push-r R7))
+  ;; R0:R1 = dividend (becomes remainder)
+  ;; R2:R3 = divisor
+  ;; R6, R7 = temps
+  (emit '(A=Rx P0))
+  (emit '(Rx=A R0))
+  (emit '(A=Rx P1))
+  (emit '(Rx=A R1))
+  (emit '(A=Rx P2))
+  (emit '(Rx=A R2))
+  (emit '(A=Rx P3))
+  (emit '(Rx=A R3))
+  (emit '(A= 0))
+  (emit '(Rx=A R7))           ; R7 = 0 for comparisons
+  ;; Check for division by zero - return dividend as-is
+  (emit '(A=Rx R2))
+  (emit '(A\|=Rx R3))
+  (emit '(A-=Rx R7))
+  (emit '(jz __MOD64_END))
+  (emit '(label __MOD64_LOOP))
+  ;; Compare R0:R1 >= R2:R3
+  (emit '(A=Rx R1))
+  (emit '(A-=Rx R3))
+  (emit '(jlt __MOD64_END))
+  (emit '(jnz __MOD64_DO_SUB))
+  (emit '(A=Rx R0))
+  (emit '(A-=Rx R2))
+  (emit '(jlt __MOD64_END))
+  (emit '(label __MOD64_DO_SUB))
+  ;; Subtract: R0:R1 -= R2:R3
+  (emit '(A=Rx R0))
+  (emit '(Rx=A R6))           ; save old low
+  (emit '(A=Rx R0))
+  (emit '(A-=Rx R2))
+  (emit '(Rx=A R0))
+  (emit '(A=Rx R1))
+  (emit '(A-=Rx R3))
+  (emit '(Rx=A R1))
+  ;; Check borrow
+  (emit '(A=Rx R0))
+  (emit '(A-=Rx R6))
+  ;; jle = jlt or jz (no jle instruction available)
+  (emit '(jlt __MOD64_NO_BORROW))
+  (emit '(jz __MOD64_NO_BORROW))
+  (emit '(A=Rx R1))
+  (emit '(Rx= 1 R7))
+  (emit '(A-=Rx R7))
+  (emit '(Rx=A R1))
+  (emit '(Rx= 0 R7))
+  (emit '(label __MOD64_NO_BORROW))
+  (emit '(j __MOD64_LOOP))
+  (emit '(label __MOD64_END))
+  ;; Remainder is in R0:R1
+  (emit '(A=Rx R0))
+  (emit '(Rx=A P0))
+  (emit '(A=Rx R1))
+  (emit '(Rx=A P1))
+  (emit '(pop-r R7))
+  (emit '(pop-r R6))
   (emit '(A=Rx SRP))
   (emit '(j-A)))
 
