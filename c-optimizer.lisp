@@ -60,8 +60,10 @@
                         (init-val (ast-node-data node))
                         (var-type (ast-node-result-type node))
                         (is-const (and var-type (type-desc-p var-type) (type-desc-const-p var-type))))
-                   ;; Only collect if it has an initializer
-                   (when (and init-val (integerp init-val))
+                   ;; Only collect if it has an initializer and is not an array
+                   ;; Arrays cannot be constant-propagated since array names represent addresses
+                   (when (and init-val (integerp init-val)
+                              (not (and var-type (type-desc-array-size var-type))))
                      (setf (gethash name globals) (cons init-val is-const)))))))
       (dolist (child (ast-node-children ast))
         (when (ast-node-p child)

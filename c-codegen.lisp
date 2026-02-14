@@ -737,10 +737,70 @@
          (free-temp-reg addr-temp)
          (emit-load-64 result)))
 
+      (:parameter
+       ;; 64-bit parameters: first uses P0:P1, second uses P2:P3
+       ;; For leaf functions, read directly from registers
+       ;; For non-leaf functions, read from saved stack locations
+       (let ((idx (sym-entry-offset sym)))
+         (cond
+           ;; Leaf function with first two 64-bit params
+           ((and *is-leaf-function* (< idx 2))
+            ;; Param 0 -> P0:P1, Param 1 -> P2:P3
+            (let ((base-reg (* idx 2)))  ; 0 or 2
+              (emit `(A=Rx ,(nth base-reg *param-regs*)))  ; Low word from P0 or P2
+              (emit `(Rx=A ,(reg-pair-low result)))
+              (emit `(A=Rx ,(nth (1+ base-reg) *param-regs*)))  ; High word from P1 or P3
+              (emit `(Rx=A ,(reg-pair-high result)))))
+           ;; Non-leaf function: read from saved stack location
+           ((< idx 2)
+            (let ((base-offset (+ *param-save-offset* (* idx 8)))
+                  (temp (alloc-temp-reg)))
+              ;; Load low word from [SP + base-offset]
+              (emit `(A=Rx SP))
+              (emit `(Rx=M[A+n] ,base-offset ,temp))
+              (emit `(A=Rx ,temp))
+              (emit `(Rx=A ,(reg-pair-low result)))
+              ;; Load high word from [SP + base-offset + 4]
+              (emit `(A=Rx SP))
+              (emit `(Rx=M[A+n] ,(+ base-offset 4) ,temp))
+              (emit `(A=Rx ,temp))
+              (emit `(Rx=A ,(reg-pair-high result)))
+              (free-temp-reg temp)))
+           ;; Stack parameters (3rd+ 64-bit param)
+           (t
+            (compiler-error "64-bit stack parameters not yet supported")))))
+
       (otherwise
        (compiler-error "Cannot load 64-bit value from ~a storage"
                        (sym-entry-storage sym))))
 
+    (setf *current-64-result* result)))
+
+(defun generate-member-64 (node)
+  "Generate code for loading a 64-bit struct member"
+  (let ((result (alloc-reg-pair)))
+    (generate-member-address node)
+    (emit-load-64 result)
+    (setf *current-64-result* result)))
+
+(defun generate-subscript-64 (node)
+  "Generate code for loading a 64-bit array element"
+  (let ((result (alloc-reg-pair)))
+    (generate-subscript-address node)
+    (emit-load-64 result)
+    (setf *current-64-result* result)))
+
+(defun generate-call-64 (node)
+  "Generate code for a function call returning 64-bit value.
+   Result is returned in P0:P1 (low:high)."
+  (let ((result (alloc-reg-pair)))
+    ;; Generate the normal call - it handles all argument passing
+    (generate-call node)
+    ;; Result is in P0:P1, copy to our register pair
+    (emit `(A=Rx P0))
+    (emit `(Rx=A ,(reg-pair-low result)))
+    (emit `(A=Rx P1))
+    (emit `(Rx=A ,(reg-pair-high result)))
     (setf *current-64-result* result)))
 
 (defun generate-store-lvalue-64 (node src-pair)
@@ -780,6 +840,23 @@
          (otherwise
           (compiler-error "Cannot store 64-bit value to ~a storage"
                           (sym-entry-storage sym))))))
+
+    (unary-op
+     ;; *ptr = value64 - store through pointer dereference
+     (when (string= (ast-node-value node) "*")
+       (generate-expression (first (ast-node-children node)))  ; get pointer addr
+       (emit-store-64 src-pair)))
+
+    (subscript
+     ;; arr[i] = value64 - store to array element
+     (generate-subscript-address node)
+     (emit-store-64 src-pair))
+
+    (member
+     ;; struct.member = value64 or ptr->member = value64
+     (generate-member-address node)
+     (emit-store-64 src-pair))
+
     (otherwise
      (compiler-error "Cannot assign 64-bit value to ~a" (ast-node-type node)))))
 
@@ -1040,6 +1117,15 @@
          (free-reg-pair src-pair)
          (setf *current-64-result* nil)))
 
+      ((string= op "*")
+       ;; Pointer dereference - load 64-bit value from address
+       ;; Generate the address (pointer value) in A
+       (generate-expression operand)
+       ;; Load 64-bit value from address in A
+       (let ((result-pair (alloc-reg-pair)))
+         (emit-load-64 result-pair)
+         (setf *current-64-result* result-pair)))
+
       (t
        (compiler-error "Unknown 64-bit unary operator: ~a" op)))))
 
@@ -1056,6 +1142,9 @@
            (var-ref (generate-var-ref-64 node))
            (binary-op (generate-binary-op-64 node))
            (unary-op (generate-unary-op-64 node))
+           (member (generate-member-64 node))
+           (subscript (generate-subscript-64 node))
+           (call (generate-call-64 node))
            (cast
             ;; Cast to long long
             (let ((src-expr (first (ast-node-children node)))
@@ -3229,24 +3318,56 @@
                    (free-temp-reg value-temp)))
         (free-temp-reg const-temp)))
 
-    ;; Now evaluate args 0-3 and save to temp registers
-    ;; This ensures stack-relative parameter reads work correctly
-    (let ((arg-temps nil))
-      (loop for i from 0 below (min arg-count 4)
-            for arg = (nth i args)
-            do (let ((temp (alloc-temp-reg)))
-                 (generate-expression arg)
-                 (emit `(Rx=A ,temp))
-                 (push temp arg-temps)))
-      (setf arg-temps (nreverse arg-temps))
+    ;; Now evaluate args and pass in registers P0-P3
+    ;; 64-bit args take 2 register slots each (low:high)
+    (let ((arg-data nil)  ; list of (is-64-bit temp-low [temp-high])
+          (slot 0))       ; current register slot
+      ;; First pass: evaluate args and save to temp registers
+      (loop for arg in args
+            while (< slot 4)
+            do (let ((arg-type (get-expression-type arg)))
+                 (if (is-longlong-type arg-type)
+                     ;; 64-bit argument
+                     (when (<= slot 2)  ; need 2 slots, so must be at slot 0 or 2
+                       (let ((temp-low (alloc-temp-reg))
+                             (temp-high (alloc-temp-reg)))
+                         (generate-expression-64 arg)
+                         (let ((result *current-64-result*))
+                           (emit `(A=Rx ,(reg-pair-low result)))
+                           (emit `(Rx=A ,temp-low))
+                           (emit `(A=Rx ,(reg-pair-high result)))
+                           (emit `(Rx=A ,temp-high))
+                           (free-reg-pair result))
+                         (push (list t temp-low temp-high slot) arg-data)
+                         (incf slot 2)))
+                     ;; 32-bit argument
+                     (let ((temp (alloc-temp-reg)))
+                       (generate-expression arg)
+                       (emit `(Rx=A ,temp))
+                       (push (list nil temp nil slot) arg-data)
+                       (incf slot)))))
+      (setf arg-data (nreverse arg-data))
 
-      ;; Move evaluated args from temp regs to P0-P3
-      ;; Note: R0-R9 are callee-saved, so no need to save caller's temp regs
-      (loop for i from 0 below (min arg-count 4)
-            for temp in arg-temps
-            do (progn
-                 (emit `(A=Rx ,temp))
-                 (emit `(Rx=A ,(nth i *param-regs*)))))
+      ;; Second pass: move from temps to P0-P3
+      (loop for entry in arg-data
+            do (let ((is-64 (first entry))
+                     (temp-low (second entry))
+                     (temp-high (third entry))
+                     (slot-num (fourth entry)))
+                 (if is-64
+                     ;; 64-bit: move to Pn:P(n+1)
+                     (progn
+                       (emit `(A=Rx ,temp-low))
+                       (emit `(Rx=A ,(nth slot-num *param-regs*)))
+                       (emit `(A=Rx ,temp-high))
+                       (emit `(Rx=A ,(nth (1+ slot-num) *param-regs*)))
+                       (free-temp-reg temp-low)
+                       (free-temp-reg temp-high))
+                     ;; 32-bit: move to Pn
+                     (progn
+                       (emit `(A=Rx ,temp-low))
+                       (emit `(Rx=A ,(nth slot-num *param-regs*)))
+                       (free-temp-reg temp-low)))))
 
       ;; Call function
       (if func-label
@@ -3266,10 +3387,6 @@
           (emit `(Rx= ,stack-args R0))
           (emit '(A+=Rx R0))
           (emit '(Rx=A SP))))
-
-      ;; Free the arg temps
-      (dolist (temp arg-temps)
-        (free-temp-reg temp))
       (when indirect-temp
         (free-temp-reg indirect-temp))
 
@@ -3997,6 +4114,9 @@
                  (case elem-size
                    (1 (emit `(abyte 0)))
                    (2 (emit `(aword 0)))
+                   (8 ;; 64-bit: emit two dwords per element
+                    (emit `(adword 0))
+                    (emit `(adword 0)))
                    (otherwise (emit `(adword 0))))))
              ;; Non-array: emit single value
              (case size
@@ -4008,6 +4128,25 @@
                   (emit `(adword ,(logand val #xFFFFFFFF)))
                   (emit `(adword ,(logand (ash val -32) #xFFFFFFFF)))))
                (otherwise (emit `(adword ,init-value))))))))))
+
+(defun emit-global-element (val size)
+  "Emit data for a global element of given size. Handles 64-bit values."
+  (case size
+    (1 (emit `(abyte ,val)))
+    (2 (emit `(aword ,val)))
+    (8 ;; 64-bit: emit low word then high word (little-endian)
+     (let ((v (if (integerp val) val 0)))
+       (emit `(adword ,(logand v #xFFFFFFFF)))
+       (emit `(adword ,(logand (ash v -32) #xFFFFFFFF)))))
+    (otherwise (emit `(adword ,val)))))
+
+(defun emit-global-zero (size)
+  "Emit zeroed data for given size. Handles 64-bit."
+  (case size
+    (1 (emit `(abyte 0)))
+    (2 (emit `(aword 0)))
+    (8 (emit `(adword 0)) (emit `(adword 0)))
+    (otherwise (emit `(adword 0)))))
 
 (defun generate-global-init-list (init-list target-type)
   "Generate data section directives for a global init-list."
@@ -4058,16 +4197,10 @@
                                         (eq (ast-node-type elem) 'literal))
                                    (ast-node-value elem)
                                    (or (evaluate-constant-expression elem) 0))))
-                      (case element-size
-                        (1 (emit `(abyte ,val)))
-                        (2 (emit `(aword ,val)))
-                        (otherwise (emit `(adword ,val))))))
+                      (emit-global-element val element-size)))
                    ;; Zero for uninitialized
                    (t
-                    (case element-size
-                      (1 (emit `(abyte 0)))
-                      (2 (emit `(aword 0)))
-                      (otherwise (emit `(adword 0)))))))))
+                    (emit-global-zero element-size))))))
            ;; No designated initializers - simple case
            (let ((num-inits (length init-elements)))
              ;; Emit data for each initializer element
@@ -4080,27 +4213,17 @@
                  ;; Literal value
                  ((and (ast-node-p elem)
                        (eq (ast-node-type elem) 'literal))
-                  (let ((val (ast-node-value elem)))
-                    (case element-size
-                      (1 (emit `(abyte ,val)))
-                      (2 (emit `(aword ,val)))
-                      (otherwise (emit `(adword ,val))))))
+                  (emit-global-element (ast-node-value elem) element-size))
                  ;; Constant expression
                  (t
                   (let ((val (evaluate-constant-expression elem)))
                     (unless val
                       (compiler-error "Global array initializer must be a constant expression"))
-                    (case element-size
-                      (1 (emit `(abyte ,val)))
-                      (2 (emit `(aword ,val)))
-                      (otherwise (emit `(adword ,val))))))))
+                    (emit-global-element val element-size)))))
              ;; Zero-fill remaining elements
              (when (< num-inits array-size)
                (dotimes (i (- array-size num-inits))
-                 (case element-size
-                   (1 (emit `(abyte 0)))
-                   (2 (emit `(aword 0)))
-                   (otherwise (emit `(adword 0))))))))))
+                 (emit-global-zero element-size)))))))
 
     ;; Struct initialization
     ((type-desc-struct-tag target-type)
