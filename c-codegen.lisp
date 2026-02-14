@@ -927,6 +927,9 @@
                                              result-pair nil is-unsigned)))
 
             ;; Multiplication - call __MUL64 runtime
+            ;; Note: 64-bit mul/div/mod always use runtime functions regardless of
+            ;; optimize-size, because the inline versions would be 50+ instructions.
+            ;; Power-of-2 multiplications are already optimized to shifts by the parser.
             ((string= op "*")
              (setf (compiler-state-need-mul64-runtime *state*) t)
              ;; Setup: P0:P1 = left, P2:P3 = right

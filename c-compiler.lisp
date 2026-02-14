@@ -437,15 +437,12 @@
   (emit '(:comment "======== runtime: __mul64 ========"))
   (emit '(:comment "P0:P1 = P0:P1 * P2:P3 (64-bit shift-and-add)"))
   (emit '(label __MUL64))
-  ;; Save callee-saved registers
-  (emit '(push-r R6))
-  (emit '(push-r R7))
+  ;; Save R0-R8 (push-r Rn pushes R0 through Rn)
   (emit '(push-r R8))
-  (emit '(push-r R9))
   ;; R0:R1 = multiplicand (copy of P0:P1)
   ;; R2:R3 = multiplier (copy of P2:P3)
   ;; R4:R5 = result (starts at 0)
-  ;; R6 = temp
+  ;; R6 = 0 (for comparisons), R7/R8 = temps
   (emit '(A=Rx P0))
   (emit '(Rx=A R0))           ; R0 = multiplicand low
   (emit '(A=Rx P1))
@@ -454,10 +451,10 @@
   (emit '(Rx=A R2))           ; R2 = multiplier low
   (emit '(A=Rx P3))
   (emit '(Rx=A R3))           ; R3 = multiplier high
-  (emit '(A= 0))
-  (emit '(Rx=A R4))           ; R4 = result low = 0
-  (emit '(Rx=A R5))           ; R5 = result high = 0
-  (emit '(Rx=A R6))           ; R6 = 0 (for comparisons)
+  ;; Use explicit Rx= 0 to avoid peephole optimization removing A= 0
+  (emit '(Rx= 0 R4))           ; R4 = result low = 0
+  (emit '(Rx= 0 R5))           ; R5 = result high = 0
+  (emit '(Rx= 0 R6))           ; R6 = 0 (for comparisons)
   (emit '(label __MUL64_LOOP))
   ;; Check if multiplier (R2:R3) is zero
   (emit '(A=Rx R2))
@@ -540,11 +537,8 @@
   (emit '(Rx=A P0))
   (emit '(A=Rx R5))
   (emit '(Rx=A P1))
-  ;; Restore callee-saved registers and return
-  (emit '(pop-r R9))
+  ;; Restore R0-R8 and return
   (emit '(pop-r R8))
-  (emit '(pop-r R7))
-  (emit '(pop-r R6))
   (emit '(A=Rx SRP))
   (emit '(j-A)))
 
@@ -555,14 +549,12 @@
   (emit '(:comment "======== runtime: __div64 ========"))
   (emit '(:comment "P0:P1 = P0:P1 / P2:P3 (64-bit repeated subtraction)"))
   (emit '(label __DIV64))
-  ;; Save callee-saved registers
-  (emit '(push-r R6))
+  ;; Save R0-R7 (push-r Rn pushes R0 through Rn)
   (emit '(push-r R7))
   ;; R0:R1 = dividend (becomes remainder)
   ;; R2:R3 = divisor
   ;; R4:R5 = quotient (starts at 0)
-  ;; R6 = temp for one
-  ;; R7 = temp
+  ;; R6 = temp, R7 = 0 for comparisons
   (emit '(A=Rx P0))
   (emit '(Rx=A R0))           ; R0 = dividend low
   (emit '(A=Rx P1))
@@ -571,10 +563,10 @@
   (emit '(Rx=A R2))           ; R2 = divisor low
   (emit '(A=Rx P3))
   (emit '(Rx=A R3))           ; R3 = divisor high
-  (emit '(A= 0))
-  (emit '(Rx=A R4))           ; quotient low = 0
-  (emit '(Rx=A R5))           ; quotient high = 0
-  (emit '(Rx=A R7))           ; R7 = 0 for comparisons
+  ;; Use explicit Rx= 0 to avoid peephole optimization removing A= 0
+  (emit '(Rx= 0 R4))           ; quotient low = 0
+  (emit '(Rx= 0 R5))           ; quotient high = 0
+  (emit '(Rx= 0 R7))           ; R7 = 0 for comparisons
   ;; Check for division by zero - if divisor is 0, return 0
   (emit '(A=Rx R2))
   (emit '(A\|=Rx R3))
@@ -638,9 +630,8 @@
   (emit '(Rx=A P0))
   (emit '(A=Rx R5))
   (emit '(Rx=A P1))
-  ;; Restore and return
+  ;; Restore R0-R7 and return
   (emit '(pop-r R7))
-  (emit '(pop-r R6))
   (emit '(A=Rx SRP))
   (emit '(j-A)))
 
@@ -650,12 +641,11 @@
   (emit '(:comment "======== runtime: __mod64 ========"))
   (emit '(:comment "P0:P1 = P0:P1 % P2:P3 (64-bit modulo)"))
   (emit '(label __MOD64))
-  ;; Save callee-saved registers
-  (emit '(push-r R6))
+  ;; Save R0-R7 (push-r Rn pushes R0 through Rn)
   (emit '(push-r R7))
   ;; R0:R1 = dividend (becomes remainder)
   ;; R2:R3 = divisor
-  ;; R6, R7 = temps
+  ;; R6 = temp, R7 = 0 for comparisons
   (emit '(A=Rx P0))
   (emit '(Rx=A R0))
   (emit '(A=Rx P1))
@@ -664,8 +654,8 @@
   (emit '(Rx=A R2))
   (emit '(A=Rx P3))
   (emit '(Rx=A R3))
-  (emit '(A= 0))
-  (emit '(Rx=A R7))           ; R7 = 0 for comparisons
+  ;; Use explicit Rx= 0 for consistency with other runtime functions
+  (emit '(Rx= 0 R7))           ; R7 = 0 for comparisons
   ;; Check for division by zero - return dividend as-is
   (emit '(A=Rx R2))
   (emit '(A\|=Rx R3))
@@ -709,8 +699,8 @@
   (emit '(Rx=A P0))
   (emit '(A=Rx R1))
   (emit '(Rx=A P1))
+  ;; Restore R0-R7 and return
   (emit '(pop-r R7))
-  (emit '(pop-r R6))
   (emit '(A=Rx SRP))
   (emit '(j-A)))
 
