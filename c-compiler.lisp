@@ -10,6 +10,7 @@
            :compile-c-file
            :compile-c-to-asm
            :run-c-program
+           :run-c-program-ex
            :run-and-verify-registers
            :test-c-compiler
            :test-c-compiler-with-output
@@ -23,7 +24,11 @@
            :pretty-print-asm
            :pretty-print-asm-to-string
            :save-compilation-output
-           :compile-and-save))
+           :compile-and-save
+           ;; Memory inspection helpers
+           :get-label-address
+           :read-memory-value
+           :extract-memory-value))
 
 (in-package :c-compiler)
 
@@ -1061,6 +1066,97 @@
                            (lr-emulator:emulated-system-processor emul))
                           10)))
         (values result (reg-verifier:reg-verifier-violations verifier))))))
+
+;;; ===========================================================================
+;;; Memory Inspection for Test Observability
+;;; ===========================================================================
+
+(defun get-label-address (symtab label-name)
+  "Look up a label's address in the symbol table.
+   The symtab maps address -> label-name (uppercase)."
+  (let ((upper-name (string-upcase label-name)))
+    (maphash (lambda (addr name)
+               (when (string= name upper-name)
+                 (return-from get-label-address addr)))
+             symtab)
+    (error "Label ~S not found in symbol table" label-name)))
+
+(defun read-memory-value (dmem addr size)
+  "Read a value of given size (1, 2, 4, or 8 bytes) from memory"
+  (case size
+    (1 (lr-emulator:mem-read-byte dmem addr))
+    (2 (lr-emulator:mem-read-word dmem addr))
+    (4 (lr-emulator:mem-read-dword dmem addr))
+    (8 ;; 64-bit: read low and high dwords, combine (little-endian)
+     (let ((low (lr-emulator:mem-read-dword dmem addr))
+           (high (lr-emulator:mem-read-dword dmem (+ addr 4))))
+       (logior low (ash high 32))))
+    (otherwise (error "Unsupported memory read size: ~a" size))))
+
+(defun extract-memory-value (dmem symtab spec)
+  "Extract memory value(s) according to spec.
+   SPEC is a plist with keys:
+     :label - label name (string)
+     :size  - bytes per element (1, 2, 4, or 8; default 4)
+     :count - number of elements to read (default 1)
+     :index - starting index (default 0)
+   Returns (label-name . value) for count=1, or (label-name . (values...)) for count>1."
+  (let* ((label (getf spec :label))
+         (size (or (getf spec :size) 4))
+         (count (or (getf spec :count) 1))
+         (index (or (getf spec :index) 0))
+         (base-addr (get-label-address symtab label))
+         (addr (+ base-addr (* index size))))
+    (if (= count 1)
+        ;; Single value
+        (cons label (read-memory-value dmem addr size))
+        ;; Multiple values
+        (cons label
+              (loop for i from 0 below count
+                    for a = (+ addr (* i size))
+                    collect (read-memory-value dmem a size))))))
+
+(defun run-c-program-ex (source &key (verbose nil) (max-cycles 10000)
+                                     (optimize nil) (optimize-size t) (peephole nil)
+                                     (inspect-memory nil))
+  "Compile, assemble, and run a C program. Returns (values result memory-values).
+
+   INSPECT-MEMORY is a list of memory inspection specs:
+     (:label \"name\" :size 4)           - Read 4 bytes at label
+     (:label \"name\" :size 8)           - Read 8 bytes (64-bit) at label
+     (:label \"name\" :count 3 :size 4)  - Read 3 dwords starting at label
+     (:label \"arr\" :index 2 :size 4)   - Read arr[2] (4 bytes each)
+
+   Returns: (values return-value alist-of-memory-values)
+   where alist is ((\"name\" . value) ...) or ((\"name\" . (v0 v1 v2)) ...)"
+
+  (let* ((asm (compile-c source :verbose verbose :annotate nil
+                         :optimize optimize :optimize-size optimize-size
+                         :peephole peephole))
+         (symtab (make-hash-table :test 'eql))
+         (mcode (assemble (strip-asm-comments asm) verbose symtab))
+         (dmem (lr-emulator:make-dmem #x10000))
+         (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
+
+    ;; Run the program
+    (lr-emulator:run-emul emul max-cycles verbose)
+
+    ;; Extract return value
+    (let ((ret-val (aref (lr-emulator::processor-state-r
+                          (lr-emulator:emulated-system-processor emul)) 10)))
+
+      ;; Extract memory values if requested
+      (let ((mem-values
+              (when inspect-memory
+                (loop for spec in inspect-memory
+                      collect (extract-memory-value dmem symtab spec)))))
+
+        (when verbose
+          (format t "P0 = ~a~%" ret-val)
+          (when mem-values
+            (format t "Memory: ~S~%" mem-values)))
+
+        (values ret-val mem-values)))))
 
 ;;; ===========================================================================
 ;;; Pretty Print and Test Output

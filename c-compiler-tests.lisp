@@ -55,6 +55,30 @@
   "Compare expected vs actual, handling signed 32-bit values"
   (= expected (to-signed-32 actual)))
 
+;;; Memory inspection test helpers
+
+(defun run-and-check-memory (source inspect-specs &key (verbose nil) (max-cycles 10000)
+                                                       (optimize nil) (optimize-size t) (peephole nil))
+  "Run C program and return (values result memory-alist).
+   INSPECT-SPECS: list of (:label \"name\" :size N [:count M] [:index I])"
+  (run-c-program-ex source
+                    :verbose verbose
+                    :max-cycles max-cycles
+                    :optimize optimize
+                    :optimize-size optimize-size
+                    :peephole peephole
+                    :inspect-memory inspect-specs))
+
+(defun mem-value (mem-alist label)
+  "Get memory value for label from alist returned by run-and-check-memory"
+  (cdr (assoc label mem-alist :test #'string-equal)))
+
+(defun mem-values (mem-alist label)
+  "Get list of memory values for label (when :count was used).
+   Returns the value as a list even if it's a single value."
+  (let ((val (cdr (assoc label mem-alist :test #'string-equal))))
+    (if (listp val) val (list val))))
+
 ;;; ===========================================================================
 ;;; Phase 1 Tests: Minimal Compiler
 ;;; ===========================================================================
@@ -4943,6 +4967,111 @@ int main() {
     (test-longlong-divide)
     (test-longlong-modulo)))
 
+;;; ===========================================================================
+;;; Phase 27 Tests: Memory Inspection (Test Observability)
+;;; ===========================================================================
+
+(deftest test-longlong-memory-add ()
+  "Verify 64-bit value can be stored and read from memory"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+long long result;
+int main() {
+    result = 0x123456789ABCLL;
+    return 0;
+}"
+        '((:label "result" :size 8)))
+    (check
+      (= 0 ret)
+      (= #x123456789ABC (mem-value mem "result")))))
+
+(deftest test-array-fill-memory ()
+  "Verify array was filled correctly"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+int arr[5];
+int main() {
+    for (int i = 0; i < 5; i++) {
+        arr[i] = i * 10;
+    }
+    return arr[2];
+}"
+        '((:label "arr" :size 4 :count 5)))
+    (check
+      (= 20 ret)
+      (equal '(0 10 20 30 40) (mem-value mem "arr")))))
+
+(deftest test-pointer-write-memory ()
+  "Verify global variable write via memory inspection"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+int target;
+int main() {
+    target = 42;
+    return target;
+}"
+        '((:label "target" :size 4)))
+    (check
+      (= 42 ret)
+      (= 42 (mem-value mem "target")))))
+
+(deftest test-longlong-carry-memory ()
+  "Verify 64-bit value with all bits set can be stored and read"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+unsigned long long result;
+int main() {
+    result = 0xFEDCBA9876543210ULL;
+    return 0;
+}"
+        '((:label "result" :size 8)))
+    (check
+      (= 0 ret)
+      (= #xFEDCBA9876543210 (mem-value mem "result")))))
+
+(deftest test-longlong-array-memory ()
+  "Verify 64-bit array elements"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+long long arr[3];
+int main() {
+    arr[0] = 0x100000000LL;
+    arr[1] = 0x200000000LL;
+    arr[2] = 0x300000000LL;
+    return 0;
+}"
+        '((:label "arr" :size 8 :count 3)))
+    (check
+      (= 0 ret)
+      (equal (list #x100000000 #x200000000 #x300000000)
+             (mem-value mem "arr")))))
+
+(deftest test-struct-memory ()
+  "Verify struct member writes via memory inspection"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+struct Point { int x; int y; };
+struct Point p;
+int main() {
+    p.x = 10;
+    p.y = 20;
+    return 0;
+}"
+        '((:label "p" :size 4 :count 2)))
+    (check
+      (= 0 ret)
+      (equal '(10 20) (mem-value mem "p")))))
+
+(deftest test-phase27-memory-inspection ()
+  "Run all memory inspection tests"
+  (combine-results
+    (test-longlong-memory-add)
+    (test-array-fill-memory)
+    (test-pointer-write-memory)
+    (test-longlong-carry-memory)
+    (test-longlong-array-memory)
+    (test-struct-memory)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -4971,7 +5100,8 @@ int main() {
     (test-phase23-initializers)
     (test-phase24-integer-suffixes)
     (test-phase25-multidim-arrays)
-    (test-phase26-longlong)))
+    (test-phase26-longlong)
+    (test-phase27-memory-inspection)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
