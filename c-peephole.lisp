@@ -309,5 +309,101 @@
                             (list (list 'Rx= val reg))))))
       *peephole-rules*)
 
+;;; Rule 12: Redundant reload after store (M[A]=Rx doesn't modify A)
+;;; (A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r) -> (A=Rx ?r) (M[A]=Rx ?r2)
+(push (make-peephole-rule
+       :name "redundant-reload-after-store"
+       :pattern '((A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'M[A]=Rx (getf bindings :r2)))))
+      *peephole-rules*)
+
+;;; Rule 13: Redundant reload after store with offset (M[A+n]=Rx doesn't modify A)
+;;; (A=Rx ?r) (M[A+n]=Rx ?n ?r2) (A=Rx ?r) -> (A=Rx ?r) (M[A+n]=Rx ?n ?r2)
+(push (make-peephole-rule
+       :name "redundant-reload-after-store-offset"
+       :pattern '((A=Rx ?r) (M[A+n]=Rx ?n ?r2) (A=Rx ?r))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r2)))))
+      *peephole-rules*)
+
+;;; Rule 14: Redundant reload after two stores (common for 64-bit stores)
+;;; (A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3) -> remove middle A=Rx
+(push (make-peephole-rule
+       :name "redundant-reload-between-stores"
+       :pattern '((A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'M[A]=Rx (getf bindings :r2))
+                            (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r3)))))
+      *peephole-rules*)
+
+;;; Rule 15: Redundant reload after memory load (Rx=M[A] doesn't modify A)
+;;; (A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) -> (A=Rx ?r) (Rx=M[A] ?r2)
+(push (make-peephole-rule
+       :name "redundant-reload-after-load"
+       :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'Rx=M[A] (getf bindings :r2)))))
+      *peephole-rules*)
+
+;;; Rule 16: Redundant reload after memory load with offset
+;;; (A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r) -> (A=Rx ?r) (Rx=M[A+n] ?n ?r2)
+(push (make-peephole-rule
+       :name "redundant-reload-after-load-offset"
+       :pattern '((A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'Rx=M[A+n] (getf bindings :n) (getf bindings :r2)))))
+      *peephole-rules*)
+
+;;; Rule 17: Redundant reload after two loads (common for 64-bit loads)
+;;; (A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3) -> remove middle A=Rx
+(push (make-peephole-rule
+       :name "redundant-reload-between-loads"
+       :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3))
+       :replacement (lambda (bindings)
+                      (list (list 'A=Rx (getf bindings :r))
+                            (list 'Rx=M[A] (getf bindings :r2))
+                            (list 'Rx=M[A+n] (getf bindings :n) (getf bindings :r3)))))
+      *peephole-rules*)
+
+;;; Rule 18: Redundant reload after Rx=A and store
+;;; (Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r) -> (Rx=A ?r) (M[A]=Rx ?r2)
+;;; After Rx=A, A still contains the value, so reloading from Rx is redundant
+(push (make-peephole-rule
+       :name "redundant-reload-after-store-from-A"
+       :pattern '((Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r))
+       :replacement (lambda (bindings)
+                      (let ((reg (getf bindings :r)))
+                        ;; Don't optimize SP - it may have been modified
+                        (if (eq reg 'SP)
+                            (list (list 'Rx=A reg)
+                                  (list 'M[A]=Rx (getf bindings :r2))
+                                  (list 'A=Rx reg))
+                            (list (list 'Rx=A reg)
+                                  (list 'M[A]=Rx (getf bindings :r2)))))))
+      *peephole-rules*)
+
+;;; Rule 19: Redundant reload after Rx=A and two stores (64-bit case)
+;;; (Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3) -> remove middle A=Rx
+(push (make-peephole-rule
+       :name "redundant-reload-after-store-from-A-64"
+       :pattern '((Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3))
+       :replacement (lambda (bindings)
+                      (let ((reg (getf bindings :r)))
+                        (if (eq reg 'SP)
+                            (list (list 'Rx=A reg)
+                                  (list 'M[A]=Rx (getf bindings :r2))
+                                  (list 'A=Rx reg)
+                                  (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r3)))
+                            (list (list 'Rx=A reg)
+                                  (list 'M[A]=Rx (getf bindings :r2))
+                                  (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r3)))))))
+      *peephole-rules*)
+
 ;;; Reverse the rules list so higher-priority rules are tried first
 (setf *peephole-rules* (nreverse *peephole-rules*))
