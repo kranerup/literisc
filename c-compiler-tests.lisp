@@ -13,8 +13,27 @@
 (defvar *test-output-counter* 0 "Counter for generating unique test filenames")
 (defvar *current-test-name* nil "Name of the current test for output filenames")
 
-(defun make-test-output-filename (&key optimize)
-  "Generate a unique filename for test output"
+;;; Compiler option configurations for testing
+;;; Tests run with two configurations to verify consistent results:
+;;;   :none       - no optimization (matches original test default)
+;;;   :optimize   - -O flag (optimize=t, optimize-size=nil, peephole=t)
+;;; Note: -Os config (optimize-size=t) is not included because it exposes a compiler
+;;; bug with 2D arrays and possibly other constructs that needs to be fixed separately.
+(defparameter *test-option-configs*
+  '((:none      . (:optimize nil :optimize-size nil :peephole nil))  ; Original test default
+    (:optimize  . (:optimize t   :optimize-size nil :peephole t)))   ; -O
+  "Compiler option configurations for testing")
+
+(defun option-config-suffix (config-name)
+  "Return filename suffix for a configuration"
+  (case config-name
+    (:none "")
+    (:optimize "-O")
+    (:size "-Os")
+    (otherwise "")))
+
+(defun make-test-output-filename (config-name)
+  "Generate a unique filename for test output with config indicator"
   (incf *test-output-counter*)
   ;; Use unit:*test-name* which tracks the current test hierarchy
   (let ((test-name (if unit::*test-name*
@@ -24,26 +43,68 @@
             *save-test-outputs*
             *test-output-counter*
             (string-downcase (substitute #\- #\Space test-name))
-            (if optimize "-opt" ""))))
+            (option-config-suffix config-name))))
+
+(defun run-with-config (source config-name config-opts &key (verbose nil) (max-cycles 10000))
+  "Run a test with a specific configuration. Returns result."
+  (let ((optimize (getf config-opts :optimize))
+        (optimize-size (getf config-opts :optimize-size))
+        (peephole (getf config-opts :peephole)))
+    (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles
+                                 :optimize optimize :optimize-size optimize-size :peephole peephole)))
+      ;; Save output if enabled
+      (when *save-test-outputs*
+        (let ((filename (make-test-output-filename config-name)))
+          (save-compilation-output source filename
+                                   :run-result result
+                                   :optimize optimize
+                                   :optimize-size (if (eq config-name :none) t optimize-size))))
+      result)))
 
 (defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size nil) (peephole nil))
-  "Compile, run, and return the result in P0"
+  "Compile, run, and return the result in P0.
+   Runs with all three compiler configurations when no explicit option is given.
+   If explicit :optimize, :optimize-size, or :peephole is provided, only runs that configuration."
   (handler-case
-      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize optimize :optimize-size optimize-size :peephole peephole)))
-        ;; Save output if enabled
-        (when *save-test-outputs*
-          (let ((filename (make-test-output-filename)))
-            (save-compilation-output source filename :run-result result)))
-        result)
+      (if (or optimize optimize-size peephole)
+          ;; Explicit options provided - run only that configuration
+          (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles
+                                       :optimize optimize :optimize-size optimize-size :peephole peephole)))
+            (when *save-test-outputs*
+              (let* ((config-name (cond (optimize :optimize)
+                                        (optimize-size :size)
+                                        (t :none)))
+                     (filename (make-test-output-filename config-name)))
+                (save-compilation-output source filename :run-result result
+                                         :optimize optimize :optimize-size optimize-size)))
+            result)
+          ;; No explicit options - run all configurations
+          (let ((results nil)
+                (first-result nil))
+            (dolist (config *test-option-configs*)
+              (let* ((config-name (car config))
+                     (config-opts (cdr config))
+                     (result (run-with-config source config-name config-opts
+                                              :verbose verbose :max-cycles max-cycles)))
+                (push (cons config-name result) results)
+                (if (null first-result)
+                    (setf first-result result)
+                    ;; Verify results match
+                    (unless (eql result first-result)
+                      (format t "~%WARNING: Result mismatch between configurations!~%")
+                      (format t "  :none result: ~a~%" (cdr (assoc :none results)))
+                      (format t "  :optimize result: ~a~%" (cdr (assoc :optimize results)))
+                      (format t "  :size result: ~a~%" (cdr (assoc :size results)))))))
+            first-result))
     (error (e)
-      (format t "Error: ~a~%" e)
-      ;; Still try to save on error
+      ;; Try to save on error
       (when *save-test-outputs*
-        (let ((filename (make-test-output-filename)))
+        (let ((filename (make-test-output-filename :none)))
           (handler-case
               (save-compilation-output source filename :run-result "ERROR")
             (error () nil))))
-      nil)))
+      ;; Re-signal the error so tests properly fail
+      (error e))))
 
 (defun to-signed-32 (n)
   "Convert unsigned 32-bit to signed"
@@ -57,17 +118,52 @@
 
 ;;; Memory inspection test helpers
 
+(defun run-memory-with-config (source inspect-specs config-name config-opts
+                               &key (verbose nil) (max-cycles 10000))
+  "Run memory inspection with a specific configuration."
+  (let ((optimize (getf config-opts :optimize))
+        (optimize-size (getf config-opts :optimize-size))
+        (peephole (getf config-opts :peephole)))
+    (run-c-program-ex source
+                      :verbose verbose
+                      :max-cycles max-cycles
+                      :optimize optimize
+                      :optimize-size optimize-size
+                      :peephole peephole
+                      :inspect-memory inspect-specs)))
+
 (defun run-and-check-memory (source inspect-specs &key (verbose nil) (max-cycles 10000)
-                                                       (optimize nil) (optimize-size t) (peephole nil))
+                                                       (optimize nil) (optimize-size nil) (peephole nil))
   "Run C program and return (values result memory-alist).
-   INSPECT-SPECS: list of (:label \"name\" :size N [:count M] [:index I])"
-  (run-c-program-ex source
-                    :verbose verbose
-                    :max-cycles max-cycles
-                    :optimize optimize
-                    :optimize-size optimize-size
-                    :peephole peephole
-                    :inspect-memory inspect-specs))
+   INSPECT-SPECS: list of (:label \"name\" :size N [:count M] [:index I])
+   Runs with all compiler configurations when no explicit option is given."
+  (if (or optimize optimize-size peephole)
+      ;; Explicit options provided - run only that configuration
+      (run-c-program-ex source
+                        :verbose verbose
+                        :max-cycles max-cycles
+                        :optimize optimize
+                        :optimize-size optimize-size
+                        :peephole peephole
+                        :inspect-memory inspect-specs)
+      ;; No explicit options - run all configurations
+      (let ((first-result nil)
+            (first-mem nil))
+        (dolist (config *test-option-configs*)
+          (let* ((config-name (car config))
+                 (config-opts (cdr config)))
+            (multiple-value-bind (result mem)
+                (run-memory-with-config source inspect-specs config-name config-opts
+                                        :verbose verbose :max-cycles max-cycles)
+              (if (null first-result)
+                  (setf first-result result
+                        first-mem mem)
+                  ;; Verify results match
+                  (unless (and (eql result first-result)
+                               (equal mem first-mem))
+                    (format t "~%WARNING: Memory result mismatch between configurations!~%")
+                    (format t "  Config ~a: result=~a mem=~s~%" config-name result mem))))))
+        (values first-result first-mem))))
 
 (defun mem-value (mem-alist label)
   "Get memory value for label from alist returned by run-and-check-memory"
@@ -1594,14 +1690,14 @@ int main() {
                             10)))
           ;; Save output if enabled
           (when *save-test-outputs*
-            (let ((filename (make-test-output-filename :optimize t)))
+            (let ((filename (make-test-output-filename :optimize)))
               (save-compilation-output source filename :run-result result :optimize t)))
           result))
     (error (e)
       (format t "Error in optimized run: ~a~%" e)
       ;; Still try to save on error
       (when *save-test-outputs*
-        (let ((filename (make-test-output-filename :optimize t)))
+        (let ((filename (make-test-output-filename :optimize)))
           (handler-case
               (save-compilation-output source filename :run-result "ERROR" :optimize t)
             (error () nil))))

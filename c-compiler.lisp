@@ -1200,14 +1200,17 @@
   (with-output-to-string (s)
     (pretty-print-asm code s)))
 
-(defun save-compilation-output (source filename &key (run-result nil run-result-p) (optimize nil))
+(defun save-compilation-output (source filename &key (run-result nil run-result-p)
+                                                      (optimize nil) (optimize-size t))
   "Save C source and annotated assembly to a file"
-  (let ((asm (compile-c source :annotate t :optimize optimize)))
+  (let* ((opt-label (cond ((and optimize (not optimize-size)) " (-O)")
+                          (optimize " (-Os)")
+                          (t "")))
+         (asm (compile-c source :annotate t :optimize optimize :optimize-size optimize-size)))
     (with-open-file (out filename :direction :output :if-exists :supersede)
       ;; Write header
       (format out ";;; =============================================================~%")
-      (format out ";;; C Compiler Output~a~%"
-              (if optimize " (Optimized)" ""))
+      (format out ";;; C Compiler Output~a~%" opt-label)
       (format out ";;; =============================================================~%~%")
 
       ;; Write C source
@@ -1228,8 +1231,7 @@
 
       ;; Write annotated assembly
       (format out ";;; -------------------------------------------------------------~%")
-      (format out ";;; Generated Assembly~a~%"
-              (if optimize " (Optimized)" " (Annotated)"))
+      (format out ";;; Generated Assembly~a~%" opt-label)
       (format out ";;; -------------------------------------------------------------~%~%")
       (pretty-print-asm asm out))
 
