@@ -1125,3 +1125,320 @@
                                          child))
                                    (ast-node-children ast))
                  :source-loc (ast-node-source-loc ast)))
+
+;;; ===========================================================================
+;;; Loop Unrolling
+;;; ===========================================================================
+
+;;; Configuration parameters
+(defparameter *unroll-max-iterations* 8
+  "Maximum iterations for full loop unrolling")
+
+(defparameter *unroll-max-body-stmts* 10
+  "Maximum statements in loop body for unrolling (per iteration)")
+
+(defun extract-loop-variable (init-node)
+  "Extract loop variable name and initial value from init clause.
+   Returns (values var-name init-value) or (values nil nil).
+   Handles: decl-list > var-decl with constant initializer"
+  (when (and (ast-node-p init-node)
+             (eq (ast-node-type init-node) 'decl-list))
+    (let ((var-decl (first (ast-node-children init-node))))
+      (when (and (ast-node-p var-decl)
+                 (eq (ast-node-type var-decl) 'var-decl))
+        (let ((var-name (ast-node-value var-decl))
+              (init-expr (first (ast-node-children var-decl))))
+          (when (and var-name (is-constant-node init-expr))
+            (values var-name (get-constant-value init-expr))))))))
+
+(defun extract-loop-bound (condition-node var-name)
+  "Extract loop bound and comparison operator from condition.
+   Returns (values bound-value comparison-op) or (values nil nil).
+   Handles: var < const, var <= const, var != const, var > const, var >= const"
+  (when (and (ast-node-p condition-node)
+             (eq (ast-node-type condition-node) 'binary-op))
+    (let ((op (ast-node-value condition-node))
+          (left (first (ast-node-children condition-node)))
+          (right (second (ast-node-children condition-node))))
+      (when (member op '("<" "<=" "!=" ">" ">=") :test #'string=)
+        (cond
+          ;; var OP const
+          ((and (ast-node-p left)
+                (eq (ast-node-type left) 'var-ref)
+                (string= (ast-node-value left) var-name)
+                (is-constant-node right))
+           (values (get-constant-value right) op))
+          ;; const OP var (reverse the comparison)
+          ((and (is-constant-node left)
+                (ast-node-p right)
+                (eq (ast-node-type right) 'var-ref)
+                (string= (ast-node-value right) var-name))
+           (let ((reversed-op (cond ((string= op "<") ">")
+                                    ((string= op "<=") ">=")
+                                    ((string= op ">") "<")
+                                    ((string= op ">=") "<=")
+                                    (t op))))  ; != stays the same
+             (values (get-constant-value left) reversed-op))))))))
+
+(defun extract-loop-step (update-node var-name)
+  "Extract step value from update expression.
+   Returns step-value (positive for increment, negative for decrement) or nil.
+   Handles: i++, ++i, i--, --i, i += const, i -= const"
+  (when (ast-node-p update-node)
+    (case (ast-node-type update-node)
+      ;; Post-increment/decrement: i++, i--
+      (post-op
+       (let ((operand (first (ast-node-children update-node)))
+             (op (ast-node-value update-node)))
+         (when (and (ast-node-p operand)
+                    (eq (ast-node-type operand) 'var-ref)
+                    (string= (ast-node-value operand) var-name))
+           (cond ((string= op "++") 1)
+                 ((string= op "--") -1)))))
+      ;; Pre-increment/decrement: ++i, --i
+      (unary-op
+       (let ((operand (first (ast-node-children update-node)))
+             (op (ast-node-value update-node)))
+         (when (and (ast-node-p operand)
+                    (eq (ast-node-type operand) 'var-ref)
+                    (string= (ast-node-value operand) var-name))
+           (cond ((string= op "++") 1)
+                 ((string= op "--") -1)))))
+      ;; Compound assignment: i += const, i -= const
+      (assign
+       (let ((op (ast-node-value update-node))
+             (lhs (first (ast-node-children update-node)))
+             (rhs (second (ast-node-children update-node))))
+         (when (and (ast-node-p lhs)
+                    (eq (ast-node-type lhs) 'var-ref)
+                    (string= (ast-node-value lhs) var-name)
+                    (is-constant-node rhs))
+           (let ((val (get-constant-value rhs)))
+             (cond ((string= op "+=") val)
+                   ((string= op "-=") (- val))))))))))
+
+(defun loop-var-modified-in-body-p (body var-name)
+  "Check if loop variable is assigned or has address taken in body."
+  (when (ast-node-p body)
+    (case (ast-node-type body)
+      ;; Assignment to loop variable
+      (assign
+       (let ((lhs (first (ast-node-children body))))
+         (or (and (ast-node-p lhs)
+                  (eq (ast-node-type lhs) 'var-ref)
+                  (string= (ast-node-value lhs) var-name))
+             (some (lambda (c) (loop-var-modified-in-body-p c var-name))
+                   (ast-node-children body)))))
+      ;; Post-op on loop variable
+      (post-op
+       (let ((operand (first (ast-node-children body))))
+         (or (and (ast-node-p operand)
+                  (eq (ast-node-type operand) 'var-ref)
+                  (string= (ast-node-value operand) var-name))
+             (some (lambda (c) (loop-var-modified-in-body-p c var-name))
+                   (ast-node-children body)))))
+      ;; Pre-increment/decrement on loop variable
+      (unary-op
+       (let ((operand (first (ast-node-children body)))
+             (op (ast-node-value body)))
+         (or (and (member op '("++" "--") :test #'string=)
+                  (ast-node-p operand)
+                  (eq (ast-node-type operand) 'var-ref)
+                  (string= (ast-node-value operand) var-name))
+             ;; Address-of on loop variable
+             (and (string= op "&")
+                  (ast-node-p operand)
+                  (eq (ast-node-type operand) 'var-ref)
+                  (string= (ast-node-value operand) var-name))
+             (some (lambda (c) (loop-var-modified-in-body-p c var-name))
+                   (ast-node-children body)))))
+      ;; Recurse into children
+      (otherwise
+       (some (lambda (c) (loop-var-modified-in-body-p c var-name))
+             (ast-node-children body))))))
+
+(defun body-has-control-flow-p (body)
+  "Check if body contains break/continue/goto/return."
+  (when (ast-node-p body)
+    (case (ast-node-type body)
+      ((break continue return goto) t)
+      (otherwise
+       (some #'body-has-control-flow-p (ast-node-children body))))))
+
+(defun count-body-statements (body)
+  "Count approximate number of statements in body."
+  (if (not (ast-node-p body))
+      0
+      (case (ast-node-type body)
+        (block
+         (reduce #'+ (ast-node-children body)
+                 :key #'count-body-statements :initial-value 0))
+        ((expr-stmt decl-list return if while for do-while) 1)
+        (otherwise
+         (reduce #'+ (ast-node-children body)
+                 :key #'count-body-statements :initial-value 0)))))
+
+(defun compute-iteration-count (start end step comparison)
+  "Calculate number of iterations for the loop.
+   Returns iteration count or nil if cannot be determined."
+  (when (and start end step (not (zerop step)))
+    (cond
+      ;; Ascending loop (step > 0)
+      ((> step 0)
+       (cond
+         ((string= comparison "<")
+          (if (< start end)
+              (ceiling (- end start) step)
+              0))
+         ((string= comparison "<=")
+          (if (<= start end)
+              (1+ (floor (- end start) step))
+              0))
+         ((string= comparison "!=")
+          (if (and (< start end) (zerop (mod (- end start) step)))
+              (/ (- end start) step)
+              nil))  ; May not terminate or complex
+         (t nil)))
+      ;; Descending loop (step < 0)
+      ((< step 0)
+       (let ((abs-step (- step)))
+         (cond
+           ((string= comparison ">")
+            (if (> start end)
+                (ceiling (- start end) abs-step)
+                0))
+           ((string= comparison ">=")
+            (if (>= start end)
+                (1+ (floor (- start end) abs-step))
+                0))
+           ((string= comparison "!=")
+            (if (and (> start end) (zerop (mod (- start end) abs-step)))
+                (/ (- start end) abs-step)
+                nil))
+           (t nil)))))))
+
+(defun copy-ast (node)
+  "Create a deep copy of an AST node."
+  (if (not (ast-node-p node))
+      node
+      (make-ast-node :type (ast-node-type node)
+                     :value (ast-node-value node)
+                     :children (mapcar #'copy-ast (ast-node-children node))
+                     :result-type (ast-node-result-type node)
+                     :source-loc (ast-node-source-loc node)
+                     :data (ast-node-data node))))
+
+(defun substitute-loop-var (body var-name value)
+  "Replace all references to var-name with constant value."
+  (if (not (ast-node-p body))
+      body
+      (case (ast-node-type body)
+        (var-ref
+         (if (string= (ast-node-value body) var-name)
+             (make-constant-node value
+                                 (or (ast-node-result-type body) (make-int-type))
+                                 (ast-node-source-loc body))
+             body))
+        (otherwise
+         (make-ast-node :type (ast-node-type body)
+                        :value (ast-node-value body)
+                        :children (mapcar (lambda (c)
+                                            (substitute-loop-var c var-name value))
+                                          (ast-node-children body))
+                        :result-type (ast-node-result-type body)
+                        :source-loc (ast-node-source-loc body)
+                        :data (ast-node-data body))))))
+
+(defun unroll-for-loop (node)
+  "Attempt to fully unroll a for loop.
+   Returns the unrolled block or the original node if not unrollable."
+  (let* ((children (ast-node-children node))
+         (init (first children))
+         (condition (second children))
+         (update (third children))
+         (body (fourth children)))
+
+    ;; Extract loop parameters
+    (multiple-value-bind (var-name start)
+        (extract-loop-variable init)
+      (unless var-name
+        (return-from unroll-for-loop node))
+
+      (multiple-value-bind (end comparison)
+          (extract-loop-bound condition var-name)
+        (unless end
+          (return-from unroll-for-loop node))
+
+        (let ((step (extract-loop-step update var-name)))
+          (unless step
+            (return-from unroll-for-loop node))
+
+          ;; Check body constraints
+          (when (loop-var-modified-in-body-p body var-name)
+            (return-from unroll-for-loop node))
+
+          (when (body-has-control-flow-p body)
+            (return-from unroll-for-loop node))
+
+          ;; Compute iteration count
+          (let ((iterations (compute-iteration-count start end step comparison)))
+            (unless iterations
+              (return-from unroll-for-loop node))
+
+            ;; Check size limits
+            (when (> iterations *unroll-max-iterations*)
+              (return-from unroll-for-loop node))
+
+            (let ((body-stmts (count-body-statements body)))
+              (when (> (* iterations body-stmts)
+                       (* *unroll-max-iterations* *unroll-max-body-stmts*))
+                (return-from unroll-for-loop node)))
+
+            ;; Zero iterations - return empty block
+            (when (zerop iterations)
+              (return-from unroll-for-loop
+                (make-ast-node :type 'block
+                               :children nil
+                               :source-loc (ast-node-source-loc node))))
+
+            ;; Generate unrolled body
+            (let ((unrolled-stmts
+                    (loop for i from 0 below iterations
+                          for val = (+ start (* i step))
+                          collect (substitute-loop-var (copy-ast body) var-name val))))
+              (make-ast-node :type 'block
+                             :children unrolled-stmts
+                             :source-loc (ast-node-source-loc node)))))))))
+
+(defun unroll-loops-in-node (node)
+  "Recursively process AST and unroll eligible for loops."
+  (if (not (ast-node-p node))
+      node
+      (case (ast-node-type node)
+        ;; For loop - attempt to unroll
+        (for
+         (let ((unrolled (unroll-for-loop node)))
+           (if (eq unrolled node)
+               ;; Not unrolled - still process children (body might have nested loops)
+               (make-ast-node :type 'for
+                              :children (mapcar #'unroll-loops-in-node
+                                                (ast-node-children node))
+                              :source-loc (ast-node-source-loc node))
+               ;; Unrolled - process the result for nested loops
+               (unroll-loops-in-node unrolled))))
+        ;; Other nodes - recurse into children
+        (otherwise
+         (make-ast-node :type (ast-node-type node)
+                        :value (ast-node-value node)
+                        :children (mapcar #'unroll-loops-in-node
+                                          (ast-node-children node))
+                        :result-type (ast-node-result-type node)
+                        :source-loc (ast-node-source-loc node)
+                        :data (ast-node-data node))))))
+
+(defun unroll-loops (ast)
+  "Main entry point for loop unrolling optimization.
+   Walks the AST and unrolls eligible for loops."
+  (when (null ast)
+    (return-from unroll-loops nil))
+  (unroll-loops-in-node ast))

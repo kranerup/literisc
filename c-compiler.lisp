@@ -20,6 +20,7 @@
            :generate-program
            ;; Optimization
            :fold-constants
+           :unroll-loops
            ;; Pretty printing and test output
            :pretty-print-asm
            :pretty-print-asm-to-string
@@ -1000,6 +1001,18 @@
       (when verbose
         (format t "~%AST (after constant folding):~%")
         (print-ast ast))
+
+      ;; Loop unrolling (after constant folding so bounds are known)
+      (when optimize
+        (setf ast (unroll-loops ast))
+        (when verbose
+          (format t "~%AST (after loop unrolling):~%")
+          (print-ast ast))
+        ;; Re-fold constants after unrolling (loop var substitution creates new constants)
+        (setf ast (fold-constants ast))
+        (when verbose
+          (format t "~%AST (after re-folding):~%")
+          (print-ast ast)))
 
       ;; Dead code elimination (removes unused variables after constant propagation)
       (setf ast (dead-code-elimination ast))

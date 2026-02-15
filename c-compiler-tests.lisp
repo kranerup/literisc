@@ -26,10 +26,10 @@
             (string-downcase (substitute #\- #\Space test-name))
             (if optimize "-opt" ""))))
 
-(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize-size nil) (peephole nil))
+(defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size nil) (peephole nil))
   "Compile, run, and return the result in P0"
   (handler-case
-      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize-size optimize-size :peephole peephole)))
+      (let ((result (run-c-program source :verbose verbose :max-cycles max-cycles :optimize optimize :optimize-size optimize-size :peephole peephole)))
         ;; Save output if enabled
         (when *save-test-outputs*
           (let ((filename (make-test-output-filename)))
@@ -5072,6 +5072,143 @@ int main() {
     (test-longlong-array-memory)
     (test-struct-memory)))
 
+;;; ===========================================================================
+;;; Phase 28 Tests: Loop Unrolling
+;;; ===========================================================================
+
+(deftest test-loop-unroll-basic ()
+  "Test basic for loop unrolling"
+  (check "unroll simple array fill"
+    (= 2 (run-and-get-result "
+int arr[4];
+int main() {
+    for (int i = 0; i < 4; i++) {
+        arr[i] = i;
+    }
+    return arr[2];
+}" :optimize t))))
+
+(deftest test-loop-unroll-sum ()
+  "Test loop unrolling with accumulator"
+  (check "unroll sum loop"
+    (= 15 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 1; i <= 5; i++) {
+        sum += i;
+    }
+    return sum;
+}" :optimize t))))
+
+(deftest test-loop-unroll-step ()
+  "Test loop unrolling with step > 1"
+  (check "unroll loop with step 2"
+    (= 12 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 0; i < 8; i += 2) {
+        sum += i;
+    }
+    return sum;  // 0 + 2 + 4 + 6 = 12
+}" :optimize t))))
+
+(deftest test-loop-unroll-descending ()
+  "Test loop unrolling with descending loop"
+  (check "unroll descending loop"
+    (= 10 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 4; i > 0; i--) {
+        sum += i;
+    }
+    return sum;  // 4 + 3 + 2 + 1 = 10
+}" :optimize t))))
+
+(deftest test-loop-unroll-expression ()
+  "Test loop unrolling with expression in body"
+  (check "unroll with multiply"
+    (= 20 (run-and-get-result "
+int arr[5];
+int main() {
+    for (int i = 0; i < 5; i++) {
+        arr[i] = i * 2;
+    }
+    return arr[0] + arr[1] + arr[2] + arr[3] + arr[4];  // 0+2+4+6+8=20
+}" :optimize t))))
+
+(deftest test-loop-unroll-zero-iterations ()
+  "Test loop with zero iterations"
+  (check "zero iterations loop"
+    (= 0 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 5; i < 5; i++) {
+        sum += i;
+    }
+    return sum;
+}" :optimize t))))
+
+(deftest test-loop-unroll-not-unrolled ()
+  "Test loops that should NOT be unrolled still work"
+  (check "variable bound - not unrolled"
+    (= 10 (run-and-get-result "
+int main() {
+    int n = 5;
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        sum += i;
+    }
+    return sum;
+}" :optimize t)))
+  (check "too many iterations - not unrolled"
+    (= 45 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 0; i < 10; i++) {
+        sum += i;
+    }
+    return sum;
+}" :optimize t)))
+  (check "break in body - not unrolled"
+    (= 10 (run-and-get-result "
+int main() {
+    int sum = 0;
+    for (int i = 0; i < 100; i++) {
+        if (i >= 5) break;
+        sum += i;
+    }
+    return sum;
+}" :optimize t))))
+
+(deftest test-loop-unroll-memory ()
+  "Test loop unrolling with memory inspection"
+  (multiple-value-bind (ret mem)
+      (run-and-check-memory "
+int arr[4];
+int main() {
+    for (int i = 0; i < 4; i++) {
+        arr[i] = i * 10;
+    }
+    return 0;
+}"
+        '((:label "arr" :size 4 :count 4))
+        :optimize t)
+    (check
+      (= 0 ret)
+      (equal '(0 10 20 30) (mem-value mem "arr")))))
+
+(deftest test-phase28-loop-unrolling ()
+  "Run all loop unrolling tests"
+  (combine-results
+    (test-loop-unroll-basic)
+    (test-loop-unroll-sum)
+    (test-loop-unroll-step)
+    (test-loop-unroll-descending)
+    (test-loop-unroll-expression)
+    (test-loop-unroll-zero-iterations)
+    (test-loop-unroll-not-unrolled)
+    (test-loop-unroll-memory)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -5101,7 +5238,8 @@ int main() {
     (test-phase24-integer-suffixes)
     (test-phase25-multidim-arrays)
     (test-phase26-longlong)
-    (test-phase27-memory-inspection)))
+    (test-phase27-memory-inspection)
+    (test-phase28-loop-unrolling)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
