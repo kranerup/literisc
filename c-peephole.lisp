@@ -342,33 +342,64 @@
 
 ;;; Rule 15: Redundant reload after memory load (Rx=M[A] doesn't modify A)
 ;;; (A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) -> (A=Rx ?r) (Rx=M[A] ?r2)
+;;; BUT ONLY when ?r != ?r2 - if same register, the third A=Rx copies the loaded value
 (push (make-peephole-rule
        :name "redundant-reload-after-load"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r))
        :replacement (lambda (bindings)
-                      (list (list 'A=Rx (getf bindings :r))
-                            (list 'Rx=M[A] (getf bindings :r2)))))
+                      (let ((reg1 (getf bindings :r))
+                            (reg2 (getf bindings :r2)))
+                        (if (eq reg1 reg2)
+                            ;; Same register - third A=Rx is NOT redundant, keep all 3
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A] reg2)
+                                  (list 'A=Rx reg1))
+                            ;; Different registers - third A=Rx is redundant
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A] reg2))))))
       *peephole-rules*)
 
 ;;; Rule 16: Redundant reload after memory load with offset
 ;;; (A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r) -> (A=Rx ?r) (Rx=M[A+n] ?n ?r2)
+;;; BUT ONLY when ?r != ?r2 - if same register, the third A=Rx copies the loaded value
 (push (make-peephole-rule
        :name "redundant-reload-after-load-offset"
        :pattern '((A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r))
        :replacement (lambda (bindings)
-                      (list (list 'A=Rx (getf bindings :r))
-                            (list 'Rx=M[A+n] (getf bindings :n) (getf bindings :r2)))))
+                      (let ((reg1 (getf bindings :r))
+                            (reg2 (getf bindings :r2))
+                            (offs (getf bindings :n)))
+                        (if (eq reg1 reg2)
+                            ;; Same register - third A=Rx is NOT redundant, keep all 3
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A+n] offs reg2)
+                                  (list 'A=Rx reg1))
+                            ;; Different registers - third A=Rx is redundant
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A+n] offs reg2))))))
       *peephole-rules*)
 
 ;;; Rule 17: Redundant reload after two loads (common for 64-bit loads)
 ;;; (A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3) -> remove middle A=Rx
+;;; BUT ONLY when ?r != ?r2 - if same register, the middle A=Rx copies the loaded value
 (push (make-peephole-rule
        :name "redundant-reload-between-loads"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3))
        :replacement (lambda (bindings)
-                      (list (list 'A=Rx (getf bindings :r))
-                            (list 'Rx=M[A] (getf bindings :r2))
-                            (list 'Rx=M[A+n] (getf bindings :n) (getf bindings :r3)))))
+                      (let ((reg1 (getf bindings :r))
+                            (reg2 (getf bindings :r2))
+                            (reg3 (getf bindings :r3))
+                            (offs (getf bindings :n)))
+                        (if (eq reg1 reg2)
+                            ;; Same register - middle A=Rx is NOT redundant, keep all 4
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A] reg2)
+                                  (list 'A=Rx reg1)
+                                  (list 'Rx=M[A+n] offs reg3))
+                            ;; Different registers - middle A=Rx is redundant
+                            (list (list 'A=Rx reg1)
+                                  (list 'Rx=M[A] reg2)
+                                  (list 'Rx=M[A+n] offs reg3))))))
       *peephole-rules*)
 
 ;;; Rule 18: Redundant reload after Rx=A and store

@@ -1862,6 +1862,26 @@ int main() {
   return sum;
 }" :max-cycles 50000))))
 
+(deftest test-volatile-no-fold ()
+  "Test: volatile variables are not constant-folded"
+  (check
+    ;; Volatile global should not be folded - returns 20 because x==2
+    (= 20 (run-and-get-result "
+volatile int x = 2;
+int main() { return x == 1 ? 10 : x == 2 ? 20 : 30; }"))
+    ;; Volatile should be read from memory each time
+    (= 30 (run-and-get-result "
+volatile int x = 3;
+int main() { return x == 1 ? 10 : x == 2 ? 20 : 30; }"))
+    ;; Non-volatile const global can be folded but volatile cannot
+    (= 42 (run-and-get-result "
+volatile int x = 42;
+int main() { return x; }"))
+    ;; Volatile in expression - ensure it's not constant-propagated
+    (= 12 (run-and-get-result "
+volatile int x = 3;
+int main() { int y = x + 1; return y + x + 5; }"))))
+
 (deftest test-phase10-constant-folding ()
   "Run Phase 10 constant folding tests"
   (combine-results
@@ -1874,7 +1894,8 @@ int main() {
     ;; Ternary constant folding tested in Phase 14
     (test-fold-cast)
     (test-fold-mixed)
-    (test-fold-preserves-behavior)))
+    (test-fold-preserves-behavior)
+    (test-volatile-no-fold)))
 
 ;;; ===========================================================================
 ;;; Phase 11 Tests: Function Inlining

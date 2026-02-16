@@ -59,10 +59,13 @@
                  (let* ((name (ast-node-value node))
                         (init-val (ast-node-data node))
                         (var-type (ast-node-result-type node))
-                        (is-const (and var-type (type-desc-p var-type) (type-desc-const-p var-type))))
-                   ;; Only collect if it has an initializer and is not an array
+                        (is-const (and var-type (type-desc-p var-type) (type-desc-const-p var-type)))
+                        (is-volatile (and var-type (type-desc-p var-type) (type-desc-volatile-p var-type))))
+                   ;; Only collect if it has an initializer, is not an array, and is not volatile
                    ;; Arrays cannot be constant-propagated since array names represent addresses
+                   ;; Volatile variables must always be read from memory
                    (when (and init-val (integerp init-val)
+                              (not is-volatile)
                               (not (and var-type (type-desc-array-size var-type))))
                      (setf (gethash name globals) (cons init-val is-const)))))))
       (dolist (child (ast-node-children ast))
@@ -300,8 +303,14 @@
     (var-ref
      ;; Check if var-ref can be folded to a constant
      (let* ((name (ast-node-value node))
-            (sym (lookup-symbol name)))
+            (sym (lookup-symbol name))
+            ;; Never fold volatile variables - they must always be read from memory
+            (is-volatile (and sym
+                              (sym-entry-type sym)
+                              (type-desc-volatile-p (sym-entry-type sym)))))
        (cond
+         ;; Never fold volatile variables
+         (is-volatile node)
          ;; Fold enum constant to literal
          ((and sym (eq (sym-entry-storage sym) :enum-constant))
           (make-constant-node (sym-entry-offset sym)
