@@ -698,6 +698,178 @@ int main() {
     (test-increment-decrement)
     (test-compound-assignment)))
 
+;;; ===========================================================================
+;;; Volatile Tests to Prevent Constant Propagation
+;;; ===========================================================================
+
+(deftest test-return-literal-volatile ()
+  "Test: int main() { return 42; } with volatile"
+  (check
+    (= 42 (run-and-get-result "volatile int x = 42; int main() { return x; }"))
+    (= 0 (run-and-get-result "volatile int x = 0; int main() { return x; }"))
+    (= 1 (run-and-get-result "volatile int x = 1; int main() { return x; }"))
+    (= 255 (run-and-get-result "volatile int x = 255; int main() { return x; }"))))
+
+(deftest test-return-negative-volatile ()
+  "Test: return negative numbers with volatile"
+  (check
+    (result= -1 (run-and-get-result "volatile int x = -1; int main() { return x; }"
+                                    :verbose nil))))
+
+(deftest test-addition-volatile ()
+  "Test: addition with volatile variables"
+  (check
+    (= 5 (run-and-get-result "volatile int a = 2; volatile int b = 3; int main() { return a + b; }"))
+    (= 10 (run-and-get-result "volatile int a = 1; volatile int b = 2; volatile int c = 3; volatile int d = 4; int main() { return a + b + c + d; }"))
+    (= 100 (run-and-get-result "volatile int a = 50; volatile int b = 50; int main() { return a + b; }"))))
+
+(deftest test-subtraction-volatile ()
+  "Test: subtraction with volatile variables"
+  (check
+    (= 3 (run-and-get-result "volatile int a = 5; volatile int b = 2; int main() { return a - b; }"))
+    (= 0 (run-and-get-result "volatile int a = 5; volatile int b = 5; int main() { return a - b; }"))
+    (= 10 (run-and-get-result "volatile int a = 20; volatile int b = 5; volatile int c = 5; int main() { return a - b - c; }"))))
+
+(deftest test-multiplication-volatile ()
+  "Test: multiplication with volatile variables"
+  (check
+    (= 6 (run-and-get-result "volatile int a = 2; volatile int b = 3; int main() { return a * b; }"))
+    (= 24 (run-and-get-result "volatile int a = 2; volatile int b = 3; volatile int c = 4; int main() { return a * b * c; }"))
+    (= 100 (run-and-get-result "volatile int a = 10; volatile int b = 10; int main() { return a * b; }"))))
+
+(deftest test-division-volatile ()
+  "Test: division with volatile variables"
+  (check
+    (= 5 (run-and-get-result "volatile int a = 10; volatile int b = 2; int main() { return a / b; }"))
+    (= 3 (run-and-get-result "volatile int a = 10; volatile int b = 3; int main() { return a / b; }"))  ; integer division
+    (= 2 (run-and-get-result "volatile int a = 100; volatile int b = 50; int main() { return a / b; }"))))
+
+(deftest test-modulo-volatile ()
+  "Test: modulo with volatile variables"
+  (check
+    (= 1 (run-and-get-result "volatile int a = 10; volatile int b = 3; int main() { return a % b; }"))
+    (= 0 (run-and-get-result "volatile int a = 10; volatile int b = 5; int main() { return a % b; }"))
+    (= 2 (run-and-get-result "volatile int a = 17; volatile int b = 5; int main() { return a % b; }"))))
+
+(deftest test-bitwise-volatile ()
+  "Test: bitwise operations with volatile variables"
+  (check
+    (= 2 (run-and-get-result "volatile int a = 3; volatile int b = 2; int main() { return a & b; }"))
+    (= 3 (run-and-get-result "volatile int a = 1; volatile int b = 2; int main() { return a | b; }"))
+    (= 1 (run-and-get-result "volatile int a = 3; volatile int b = 2; int main() { return a ^ b; }"))
+    (result= -1 (run-and-get-result "volatile int a = 0; int main() { return ~a; }"))))
+
+(deftest test-shifts-volatile ()
+  "Test: shift operations with volatile variables"
+  (check
+    (= 8 (run-and-get-result "volatile int a = 2; volatile int b = 2; int main() { return a << b; }"))
+    (= 2 (run-and-get-result "volatile int a = 8; volatile int b = 2; int main() { return a >> b; }"))))
+
+(deftest test-comparisons-volatile ()
+  "Test: comparison operations with volatile variables"
+  (check
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 5; int main() { return a == b; }"))
+    (= 0 (run-and-get-result "volatile int a = 5; volatile int b = 6; int main() { return a == b; }"))
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 6; int main() { return a != b; }"))
+    (= 0 (run-and-get-result "volatile int a = 5; volatile int b = 5; int main() { return a != b; }"))
+    (= 1 (run-and-get-result "volatile int a = 3; volatile int b = 5; int main() { return a < b; }"))
+    (= 0 (run-and-get-result "volatile int a = 5; volatile int b = 3; int main() { return a < b; }"))
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 3; int main() { return a > b; }"))
+    (= 0 (run-and-get-result "volatile int a = 3; volatile int b = 5; int main() { return a > b; }"))
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 5; int main() { return a <= b; }"))
+    (= 1 (run-and-get-result "volatile int a = 3; volatile int b = 5; int main() { return a <= b; }"))
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 5; int main() { return a >= b; }"))
+    (= 1 (run-and-get-result "volatile int a = 5; volatile int b = 3; int main() { return a >= b; }"))))
+
+(deftest test-logical-volatile ()
+  "Test: logical operations with volatile variables"
+  (check
+    (= 1 (run-and-get-result "volatile int a = 1; volatile int b = 1; int main() { return a && b; }"))
+    (= 0 (run-and-get-result "volatile int a = 1; volatile int b = 0; int main() { return a && b; }"))
+    (= 0 (run-and-get-result "volatile int a = 0; volatile int b = 1; int main() { return a && b; }"))
+    (= 1 (run-and-get-result "volatile int a = 1; volatile int b = 0; int main() { return a || b; }"))
+    (= 1 (run-and-get-result "volatile int a = 0; volatile int b = 1; int main() { return a || b; }"))
+    (= 0 (run-and-get-result "volatile int a = 0; volatile int b = 0; int main() { return a || b; }"))
+    (= 1 (run-and-get-result "volatile int a = 0; int main() { return !a; }"))
+    (= 0 (run-and-get-result "volatile int a = 1; int main() { return !a; }"))
+    (= 0 (run-and-get-result "volatile int a = 42; int main() { return !a; }"))))
+
+(deftest test-logical-chaining-volatile ()
+  "Test: chained && and || operators with volatile variables"
+  (check
+    ;; Chained AND - all must be true
+    (= 1 (run-and-get-result "volatile int a=1,b=1,c=1; int main() { return a && b && c; }"))
+    (= 0 (run-and-get-result "volatile int a=1,b=1,c=0; int main() { return a && b && c; }"))
+    (= 0 (run-and-get-result "volatile int a=1,b=0,c=1; int main() { return a && b && c; }"))
+    (= 0 (run-and-get-result "volatile int a=0,b=1,c=1; int main() { return a && b && c; }"))
+    ;; Chained OR - any must be true
+    (= 1 (run-and-get-result "volatile int a=1,b=0,c=0; int main() { return a || b || c; }"))
+    (= 1 (run-and-get-result "volatile int a=0,b=1,c=0; int main() { return a || b || c; }"))
+    (= 1 (run-and-get-result "volatile int a=0,b=0,c=1; int main() { return a || b || c; }"))
+    (= 0 (run-and-get-result "volatile int a=0,b=0,c=0; int main() { return a || b || c; }"))
+    ;; Mixed operators - && has higher precedence than ||
+    ;; a || b && c  means  a || (b && c)
+    (= 1 (run-and-get-result "volatile int a=1,b=0,c=0; int main() { return a || b && c; }"))  ; 1 || (0 && 0) = 1 || 0 = 1
+    (= 0 (run-and-get-result "volatile int a=0,b=0,c=1; int main() { return a || b && c; }"))  ; 0 || (0 && 1) = 0 || 0 = 0
+    (= 1 (run-and-get-result "volatile int a=0,b=1,c=1; int main() { return a || b && c; }"))  ; 0 || (1 && 1) = 0 || 1 = 1
+    ;; a && b || c  means  (a && b) || c
+    (= 1 (run-and-get-result "volatile int a=0,b=0,c=1; int main() { return a && b || c; }"))  ; (0 && 0) || 1 = 0 || 1 = 1
+    (= 0 (run-and-get-result "volatile int a=0,b=1,c=0; int main() { return a && b || c; }"))  ; (0 && 1) || 0 = 0 || 0 = 0
+    (= 1 (run-and-get-result "volatile int a=1,b=1,c=0; int main() { return a && b || c; }"))  ; (1 && 1) || 0 = 1 || 0 = 1
+    ;; Longer chains
+    (= 1 (run-and-get-result "volatile int a=1,b=1,c=1,d=1; int main() { return a && b && c && d; }"))
+    (= 0 (run-and-get-result "volatile int a=1,b=1,c=1,d=0; int main() { return a && b && c && d; }"))
+    (= 1 (run-and-get-result "volatile int a=0,b=0,c=0,d=1; int main() { return a || b || c || d; }"))
+    (= 0 (run-and-get-result "volatile int a=0,b=0,c=0,d=0; int main() { return a || b || c || d; }"))
+    ;; Complex mixed chains
+    (= 1 (run-and-get-result "volatile int a=1,b=0,c=0,d=0; int main() { return a || b && c || d; }"))  ; 1 || (0&&0) || 0 = 1
+    (= 1 (run-and-get-result "volatile int a=0,b=1,c=1,d=1; int main() { return a && b || c && d; }"))  ; (0&&1) || (1&&1) = 0 || 1 = 1
+    (= 0 (run-and-get-result "volatile int a=0,b=1,c=0,d=1; int main() { return a && b || c && d; }")))) ; (0&&1) || (0&&1) = 0 || 0 = 0
+
+(deftest test-unary-volatile ()
+  "Test: unary operations with volatile variables"
+  (check
+    (result= -5 (run-and-get-result "volatile int a = 5; int main() { return -a; }"
+                                    :verbose nil))
+    (= 5 (run-and-get-result "volatile int a = -5; int main() { return -a; }"))))
+
+
+(deftest test-precedence-volatile ()
+  "Test: operator precedence with volatile variables"
+  (check
+    (= 14 (run-and-get-result "volatile int a=2,b=3,c=4; int main() { return a + b * c; }"))  ; 2 + 12
+    (= 20 (run-and-get-result "volatile int a=2,b=3,c=4; int main() { return (a + b) * c; }"))
+    (= 7 (run-and-get-result "volatile int a=1,b=2,c=3; int main() { return a + b * c; }")))) ; 1 + 6
+
+(deftest test-complex-expressions-volatile ()
+  "Test: complex expressions with nested subexpressions with volatile variables"
+  (check
+    ;; Nested arithmetic
+    (= 47 (run-and-get-result "volatile int a=1,b=2,c=3,d=4,e=5,f=6,g=7,h=8; int main() { return (a + b) * (c + d) + (e + f) + (g + h); }"))))
+
+(deftest test-phase1-volatile ()
+  "Run Phase 1 volatile tests"
+  (combine-results
+    (test-return-literal-volatile)
+    (test-return-negative-volatile)))
+
+(deftest test-phase2-volatile ()
+  "Run Phase 2 volatile tests"
+  (combine-results
+    (test-addition-volatile)
+    (test-subtraction-volatile)
+    (test-multiplication-volatile)
+    (test-division-volatile)
+    (test-modulo-volatile)
+    (test-bitwise-volatile)
+    (test-shifts-volatile)
+    (test-comparisons-volatile)
+    (test-logical-volatile)
+    (test-logical-chaining-volatile)
+    (test-unary-volatile)
+    (test-precedence-volatile)
+    (test-complex-expressions-volatile)))
+
 (deftest test-phase3 ()
   "Run Phase 3 tests"
   (combine-results
@@ -5330,7 +5502,9 @@ int main() {
   "Run all C compiler tests"
   (combine-results
     (test-phase1)
+    (test-phase1-volatile)
     (test-phase2)
+    (test-phase2-volatile)
     (test-phase3)
     (test-phase4)
     (test-phase5)
