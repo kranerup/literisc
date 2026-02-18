@@ -870,6 +870,154 @@ int main() {
     (test-precedence-volatile)
     (test-complex-expressions-volatile)))
 
+(deftest test-if-volatile ()
+  "Test: if statements with volatile variables"
+  (check
+    (= 1 (run-and-get-result "volatile int c = 1; int main() { if (c) return 1; return 0; }"))
+    (= 0 (run-and-get-result "volatile int c = 0; int main() { if (c) return 1; return 0; }"))
+    (= 2 (run-and-get-result "volatile int c = 1; int main() { if (c) return 2; else return 3; }"))
+    (= 3 (run-and-get-result "volatile int c = 0; int main() { if (c) return 2; else return 3; }"))))
+
+(deftest test-if-else-chain-volatile ()
+  "Test: if-else-if chain with volatile variables"
+  (check
+    (= 1 (run-and-get-result "
+volatile int v[] = {5, 10, 0, 1, 2};
+int main() {
+  int x;
+  x = v[1];
+  if (x == v[0]) return v[2];
+  else if (x == v[1]) return v[3];
+  else return v[4];
+}"))))
+
+(deftest test-while-volatile ()
+  "Test: while loops with volatile variables"
+  (check
+    (= 10 (run-and-get-result "
+volatile int limit = 5;
+int main() {
+  int i;
+  int sum;
+  i = 0;
+  sum = 0;
+  while (i < limit) {
+    sum = sum + i;
+    i = i + 1;
+  }
+  return sum;
+}"))))
+
+(deftest test-for-volatile ()
+  "Test: for loops with volatile variables"
+  (check
+    (= 10 (run-and-get-result "
+volatile int limit = 5;
+int main() {
+  int sum;
+  int i;
+  sum = 0;
+  for (i = 0; i < limit; i = i + 1) {
+    sum = sum + i;
+  }
+  return sum;
+}"))))
+
+(deftest test-nested-loops-volatile ()
+  "Test: nested for and while loops with volatile variables"
+  (check
+    ;; Nested for loops
+    (= 45 (run-and-get-result "
+volatile int limit = 10;
+int main() {
+  int sum = 0;
+  int i;
+  int j;
+  for (i = 0; i < limit; i = i + 1) {
+    for (j = 0; j < i; j = j + 1) {
+      sum = sum + 1;
+    }
+  }
+  return sum;
+}" :max-cycles 50000))
+    ;; Nested while loops
+    (= 10 (run-and-get-result "
+volatile int limits[] = {5, 2};
+int main() {
+    int i = 0;
+    int j;
+    int sum = 0;
+    while (i < limits[0]) {
+        j = 0;
+        while (j < limits[1]) {
+            sum = sum + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return sum;
+}" :max-cycles 50000))
+    ;; Mixed for and while loops
+    (= 10 (run-and-get-result "
+volatile int limits[] = {5, 2};
+int main() {
+    int i;
+    int j;
+    int sum = 0;
+    for (i = 0; i < limits[0]; i = i + 1) {
+        j = 0;
+        while (j < limits[1]) {
+            sum = sum + 1;
+            j = j + 1;
+        }
+    }
+    return sum;
+}" :max-cycles 50000))))
+
+(deftest test-break-volatile ()
+  "Test: break statement with volatile variables"
+  (check
+    (= 3 (run-and-get-result "
+volatile int break_val = 3;
+int main() {
+  int i;
+  i = 0;
+  while (1) {
+    if (i == break_val) break;
+    i = i + 1;
+  }
+  return i;
+}"))))
+
+(deftest test-continue-volatile ()
+  "Test: continue statement with volatile variables"
+  (check
+    (= 25 (run-and-get-result "
+volatile int v[] = {10, 2};
+int main() {
+  int i;
+  int sum;
+  i = 0;
+  sum = 0;
+  while (i < v[0]) {
+    i = i + 1;
+    if (i % v[1] == 0) continue;
+    sum = sum + i;
+  }
+  return sum;
+}"))))
+
+(deftest test-phase3-volatile ()
+  "Run Phase 3 volatile tests"
+  (combine-results
+    (test-if-volatile)
+    (test-if-else-chain-volatile)
+    (test-while-volatile)
+    (test-for-volatile)
+    (test-nested-loops-volatile)
+    (test-break-volatile)
+    (test-continue-volatile)))
+
 (deftest test-phase3 ()
   "Run Phase 3 tests"
   (combine-results
@@ -5506,6 +5654,7 @@ int main() {
     (test-phase2)
     (test-phase2-volatile)
     (test-phase3)
+    (test-phase3-volatile)
     (test-phase4)
     (test-phase5)
     (test-phase6)
