@@ -1018,6 +1018,274 @@ int main() {
     (test-break-volatile)
     (test-continue-volatile)))
 
+(deftest test-uint8-boundaries-volatile ()
+  "Test: uint8_t boundary conditions with volatile variables"
+  (check
+    ;; Max value
+    (= 255 (run-and-get-result "
+volatile uint8_t v = 255;
+int main() {
+  uint8_t x;
+  x = v;
+  return x;
+}"))
+    ;; Overflow wraps
+    (= 0 (run-and-get-result "
+volatile uint8_t v = 255;
+int main() {
+  uint8_t x;
+  x = v;
+  x = x + 1;
+  return x;
+}"))
+    ;; Min value
+    (= 0 (run-and-get-result "
+volatile uint8_t v = 0;
+int main() {
+  uint8_t x;
+  x = v;
+  return x;
+}"))))
+
+(deftest test-int8-boundaries-volatile ()
+  "Test: int8_t boundary conditions with volatile variables"
+  (check
+    ;; Positive max
+    (= 127 (run-and-get-result "
+volatile int8_t v = 127;
+int main() {
+  int8_t x;
+  x = v;
+  return x;
+}"))
+    ;; Negative value
+    (result= -1 (run-and-get-result "
+volatile int8_t v = -1;
+int main() {
+  int8_t x;
+  x = v;
+  return x;
+}"))
+    ;; Negative 50
+    (result= -50 (run-and-get-result "
+volatile int8_t v = -50;
+int main() {
+  int8_t x;
+  x = v;
+  return x;
+}"))))
+
+(deftest test-uint16-boundaries-volatile ()
+  "Test: uint16_t boundary conditions with volatile variables"
+  (check
+    ;; Max value
+    (= 65535 (run-and-get-result "
+volatile uint16_t v = 65535;
+int main() {
+  uint16_t x;
+  x = v;
+  return x;
+}"))
+    ;; Overflow wraps
+    (= 0 (run-and-get-result "
+volatile uint16_t v = 65535;
+int main() {
+  uint16_t x;
+  x = v;
+  x = x + 1;
+  return x;
+}"))))
+
+(deftest test-int16-boundaries-volatile ()
+  "Test: int16_t boundary conditions with volatile variables"
+  (check
+    ;; Positive max
+    (= 32767 (run-and-get-result "
+volatile int16_t v = 32767;
+int main() {
+  int16_t x;
+  x = v;
+  return x;
+}"))
+    ;; Negative value
+    (result= -1 (run-and-get-result "
+volatile int16_t v = -1;
+int main() {
+  int16_t x;
+  x = v;
+  return x;
+}"))
+    ;; Negative 1000
+    (result= -1000 (run-and-get-result "
+volatile int16_t v = -1000;
+int main() {
+  int16_t x;
+  x = v;
+  return x;
+}"))))
+
+(deftest test-sign-extension-volatile ()
+  "Test: sign extension when assigning to larger types with volatile variables"
+  (check
+    ;; Negative int8_t to int
+    (result= -50 (run-and-get-result "
+volatile int8_t v = -50;
+int main() {
+  int8_t x;
+  int y;
+  x = v;
+  y = x;
+  return y;
+}"))
+    ;; Positive int8_t to int (no sign extension needed)
+    (= 50 (run-and-get-result "
+volatile int8_t v = 50;
+int main() {
+  int8_t x;
+  int y;
+  x = v;
+  y = x;
+  return y;
+}"))
+    ;; Negative int16_t to int
+    (result= -1000 (run-and-get-result "
+volatile int16_t v = -1000;
+int main() {
+  int16_t x;
+  int y;
+  x = v;
+  y = x;
+  return y;
+}"))))
+
+(deftest test-char-array-volatile ()
+  "Test: char arrays with volatile variables"
+  (check
+    (= 3 (run-and-get-result "
+volatile char v[] = {1, 2, 3, 4};
+int main() {
+  char arr[4];
+  arr[0] = v[0];
+  arr[1] = v[1];
+  arr[2] = v[2];
+  arr[3] = v[3];
+  return arr[2];
+}" :max-cycles 20000))
+    ;; Sum of elements
+    (= 10 (run-and-get-result "
+volatile char v[] = {1, 2, 3, 4, 0};
+int main() {
+  char arr[4];
+  int sum;
+  int i;
+  arr[0] = v[0];
+  arr[1] = v[1];
+  arr[2] = v[2];
+  arr[3] = v[3];
+  sum = v[4];
+  for (i = 0; i < 4; i = i + 1) {
+    sum = sum + arr[i];
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-short-array-volatile ()
+  "Test: short arrays with volatile variables"
+  (check
+    (= 300 (run-and-get-result "
+volatile short v[] = {100, 200, 300, 400};
+int main() {
+  short arr[4];
+  arr[0] = v[0];
+  arr[1] = v[1];
+  arr[2] = v[2];
+  arr[3] = v[3];
+  return arr[2];
+}" :max-cycles 20000))
+    ;; Sum of elements
+    (= 1000 (run-and-get-result "
+volatile short v[] = {100, 200, 300, 400, 0};
+int main() {
+  short arr[4];
+  int sum;
+  int i;
+  arr[0] = v[0];
+  arr[1] = v[1];
+  arr[2] = v[2];
+  arr[3] = v[3];
+  sum = v[4];
+  for (i = 0; i < 4; i = i + 1) {
+    sum = sum + arr[i];
+  }
+  return sum;
+}" :max-cycles 50000))))
+
+(deftest test-unsigned-comparison-volatile ()
+  "Test: unsigned value comparisons with volatile variables"
+  (check
+    ;; uint8_t comparison
+    (= 1 (run-and-get-result "
+volatile uint8_t va = 200;
+volatile uint8_t vb = 100;
+int main() {
+  uint8_t a;
+  uint8_t b;
+  a = va;
+  b = vb;
+  return a > b;
+}"))
+    ;; uint8_t equal
+    (= 1 (run-and-get-result "
+volatile uint8_t va = 255;
+volatile uint8_t vb = 255;
+int main() {
+  uint8_t a;
+  uint8_t b;
+  a = va;
+  b = vb;
+  return a == b;
+}"))))
+
+(deftest test-mixed-size-arithmetic-volatile ()
+  "Test: arithmetic with mixed-size types with volatile variables"
+  (check
+    ;; int8_t + int8_t
+    (= 10 (run-and-get-result "
+volatile int8_t va = 3;
+volatile int8_t vb = 7;
+int main() {
+  int8_t a;
+  int8_t b;
+  a = va;
+  b = vb;
+  return a + b;
+}"))
+    ;; int16_t + int16_t
+    (= 1500 (run-and-get-result "
+volatile int16_t va = 500;
+volatile int16_t vb = 1000;
+int main() {
+  int16_t a;
+  int16_t b;
+  a = va;
+  b = vb;
+  return a + b;
+}"))))
+
+(deftest test-phase7-volatile ()
+  "Run Phase 7 volatile tests (Extended Integer Types)"
+  (combine-results
+    (test-uint8-boundaries-volatile)
+    (test-int8-boundaries-volatile)
+    (test-uint16-boundaries-volatile)
+    (test-int16-boundaries-volatile)
+    (test-sign-extension-volatile)
+    (test-char-array-volatile)
+    (test-short-array-volatile)
+    (test-unsigned-comparison-volatile)
+    (test-mixed-size-arithmetic-volatile)))
+
+
 (deftest test-phase3 ()
   "Run Phase 3 tests"
   (combine-results
@@ -5659,6 +5927,7 @@ int main() {
     (test-phase5)
     (test-phase6)
     (test-phase7)
+    (test-phase7-volatile)
     (test-phase8-params)
     (test-phase9-pointers)
     (test-phase10-constant-folding)
