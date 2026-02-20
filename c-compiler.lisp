@@ -1201,12 +1201,12 @@
     (pretty-print-asm code s)))
 
 (defun save-compilation-output (source filename &key (run-result nil run-result-p)
-                                                      (optimize nil) (optimize-size t))
+                                                      (optimize nil) (optimize-size t) (peephole nil))
   "Save C source and annotated assembly to a file"
   (let* ((opt-label (cond ((and optimize (not optimize-size)) " (-O)")
                           (optimize " (-Os)")
                           (t "")))
-         (asm (compile-c source :annotate t :optimize optimize :optimize-size optimize-size)))
+         (asm (compile-c source :annotate t :optimize optimize :optimize-size optimize-size :peephole peephole)))
     (with-open-file (out filename :direction :output :if-exists :supersede)
       ;; Write header
       (format out ";;; =============================================================~%")

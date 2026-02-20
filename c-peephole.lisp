@@ -124,7 +124,10 @@
            (replacement (if (functionp replacement-spec)
                             (funcall replacement-spec bindings)
                             (instantiate-replacement replacement-spec bindings))))
-      (values t consumed replacement))))
+      ;; If replacement function returns :no-match, treat as no match
+      (if (eq replacement :no-match)
+          nil
+          (values t consumed replacement)))))
 
 (defun instantiate-replacement (template bindings)
   "Instantiate a replacement template with bound values"
@@ -347,13 +350,11 @@
        :name "redundant-reload-after-load"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r))
        :replacement (lambda (bindings)
-                      (let ((reg1 (getf bindings :r))
-                            (reg2 (getf bindings :r2)))
+                      (let ((reg1 (getf bindings :R))
+                            (reg2 (getf bindings :R2)))
                         (if (eq reg1 reg2)
-                            ;; Same register - third A=Rx is NOT redundant, keep all 3
-                            (list (list 'A=Rx reg1)
-                                  (list 'Rx=M[A] reg2)
-                                  (list 'A=Rx reg1))
+                            ;; Same register - third A=Rx is NOT redundant, don't match
+                            :no-match
                             ;; Different registers - third A=Rx is redundant
                             (list (list 'A=Rx reg1)
                                   (list 'Rx=M[A] reg2))))))
@@ -366,14 +367,12 @@
        :name "redundant-reload-after-load-offset"
        :pattern '((A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r))
        :replacement (lambda (bindings)
-                      (let ((reg1 (getf bindings :r))
-                            (reg2 (getf bindings :r2))
-                            (offs (getf bindings :n)))
+                      (let ((reg1 (getf bindings :R))
+                            (reg2 (getf bindings :R2))
+                            (offs (getf bindings :N)))
                         (if (eq reg1 reg2)
-                            ;; Same register - third A=Rx is NOT redundant, keep all 3
-                            (list (list 'A=Rx reg1)
-                                  (list 'Rx=M[A+n] offs reg2)
-                                  (list 'A=Rx reg1))
+                            ;; Same register - third A=Rx is NOT redundant, don't match
+                            :no-match
                             ;; Different registers - third A=Rx is redundant
                             (list (list 'A=Rx reg1)
                                   (list 'Rx=M[A+n] offs reg2))))))
@@ -386,16 +385,13 @@
        :name "redundant-reload-between-loads"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3))
        :replacement (lambda (bindings)
-                      (let ((reg1 (getf bindings :r))
-                            (reg2 (getf bindings :r2))
-                            (reg3 (getf bindings :r3))
-                            (offs (getf bindings :n)))
+                      (let ((reg1 (getf bindings :R))
+                            (reg2 (getf bindings :R2))
+                            (reg3 (getf bindings :R3))
+                            (offs (getf bindings :N)))
                         (if (eq reg1 reg2)
-                            ;; Same register - middle A=Rx is NOT redundant, keep all 4
-                            (list (list 'A=Rx reg1)
-                                  (list 'Rx=M[A] reg2)
-                                  (list 'A=Rx reg1)
-                                  (list 'Rx=M[A+n] offs reg3))
+                            ;; Same register - middle A=Rx is NOT redundant, don't match
+                            :no-match
                             ;; Different registers - middle A=Rx is redundant
                             (list (list 'A=Rx reg1)
                                   (list 'Rx=M[A] reg2)
@@ -434,6 +430,38 @@
                             (list (list 'Rx=A reg)
                                   (list 'M[A]=Rx (getf bindings :r2))
                                   (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r3)))))))
+      *peephole-rules*)
+
+;;; Rule 20: Redundant copy back to same register after memory load
+;;; (Rx=M[A] ?r) (A=Rx ?r) (Rx=A ?r) -> (Rx=M[A] ?r) (A=Rx ?r)
+;;; When loading to a register, copying to A, then copying A back to the same register,
+;;; the third instruction is redundant since the register already has the value.
+(push (make-peephole-rule
+       :name "redundant-copy-back-after-load"
+       :pattern '((Rx=M[A] ?r) (A=Rx ?r) (Rx=A ?r))
+       :replacement (lambda (bindings)
+                      (let ((reg (getf bindings :R)))
+                        (list (list 'Rx=M[A] reg)
+                              (list 'A=Rx reg)))))
+      *peephole-rules*)
+
+;;; Rule 21: Load through temp register to different target
+;;; (Rx=M[A] ?r1) (A=Rx ?r1) (Rx=A ?r2) -> (Rx=M[A] ?r2) when r1 != r2
+;;; When loading to a temp register, copying to A, then copying A to a different
+;;; target register, we can load directly into the target register.
+;;; NOTE: When r1 == r2, this rule returns nil to indicate no match, allowing
+;;; rule 20 to handle that case.
+(push (make-peephole-rule
+       :name "load-through-temp-to-target"
+       :pattern '((Rx=M[A] ?r1) (A=Rx ?r1) (Rx=A ?r2))
+       :replacement (lambda (bindings)
+                      (let ((reg1 (getf bindings :R1))
+                            (reg2 (getf bindings :R2)))
+                        (if (eq reg1 reg2)
+                            ;; Same register - return :no-match to let rule 20 handle it
+                            :no-match
+                            ;; Different registers - load directly into target
+                            (list (list 'Rx=M[A] reg2))))))
       *peephole-rules*)
 
 ;;; Reverse the rules list so higher-priority rules are tried first

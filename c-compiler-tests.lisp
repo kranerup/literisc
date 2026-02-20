@@ -58,7 +58,8 @@
           (save-compilation-output source filename
                                    :run-result result
                                    :optimize optimize
-                                   :optimize-size (if (eq config-name :none) t optimize-size))))
+                                   :optimize-size (if (eq config-name :none) t optimize-size)
+                                   :peephole peephole)))
       result)))
 
 (defun run-and-get-result (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size nil) (peephole nil))
@@ -76,7 +77,8 @@
                                         (t :none)))
                      (filename (make-test-output-filename config-name)))
                 (save-compilation-output source filename :run-result result
-                                         :optimize optimize :optimize-size optimize-size)))
+                                         :optimize optimize :optimize-size optimize-size
+                                         :peephole peephole)))
             result)
           ;; No explicit options - run all configurations
           (let ((results nil)
