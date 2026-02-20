@@ -464,5 +464,17 @@
                             (list (list 'Rx=M[A] reg2))))))
       *peephole-rules*)
 
+;;; Rule 22: Dead A store before immediate load and A overwrite
+;;; (A=Rx ?r1) (Rx= ?v ?r2) (A=Rx ?r3) -> (Rx= ?v ?r2) (A=Rx ?r3)
+;;; When A is written, then a register is loaded with an immediate (not using A),
+;;; then A is overwritten, the first A write is dead.
+(push (make-peephole-rule
+       :name "dead-A-before-immediate-load"
+       :pattern '((A=Rx ?r1) (Rx= ?v ?r2) (A=Rx ?r3))
+       :replacement (lambda (bindings)
+                      (list (list 'Rx= (getf bindings :V) (getf bindings :R2))
+                            (list 'A=Rx (getf bindings :R3)))))
+      *peephole-rules*)
+
 ;;; Reverse the rules list so higher-priority rules are tried first
 (setf *peephole-rules* (nreverse *peephole-rules*))
