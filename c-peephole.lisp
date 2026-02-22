@@ -247,14 +247,54 @@
                   (return-from reg-read-after-p t)))))
         finally (return nil)))
 
+(defun A-dead-before-next-write-p (code-vec from-idx)
+  "Return T if the accumulator A is definitely overwritten before being read,
+   scanning forward from FROM-IDX.
+
+   Strategy:
+   - A=Rx instruction: unconditional A write (doesn't read old A) — A is dead, return T.
+   - Label/comment/data directives: skip (cross labels freely; a label's first instruction
+     overwrites A on all paths into it when that instruction is A=Rx).
+   - Branches and calls (opname starts with J, or JSR): conservatively return NIL.
+   - Any other instruction whose opname contains 'A': A might be read, return NIL.
+   - Instructions whose opname has no 'A': skip."
+  (loop for i from from-idx below (length code-vec)
+        for instr = (aref code-vec i)
+        when (and (consp instr) (symbolp (car instr)))
+        do (let* ((opname (symbol-name (car instr))))
+             (cond
+               ;; A=Rx: unconditional A write — the earlier A write is dead
+               ((string= opname "A=RX")
+                (return-from A-dead-before-next-write-p t))
+               ;; Pure data/label/comment directives: skip
+               ((or (string= opname "LABEL")
+                    (string= opname "COMMENT")
+                    (string= opname "LALIGN-DWORD")
+                    (string= opname "ADWORD")
+                    (string= opname "ALIGN-DWORD"))
+                nil)
+               ;; Branches, jumps, and calls: stop conservatively
+               ((or (string= opname "JSR")
+                    (and (>= (length opname) 1) (char= (char opname 0) #\J)))
+                (return-from A-dead-before-next-write-p nil))
+               ;; Any other instruction whose name contains 'A': might read A
+               ((find #\A opname)
+                (return-from A-dead-before-next-write-p nil))
+               ;; Instruction not involving A: skip
+               (t nil)))
+        finally (return nil)))
+
 ;;; NOTE: Zero-test elimination rule was removed because it's incorrect.
 ;;; The pattern (Rx= 0 ?r) (A-=Rx ?r) (jz ?label) is NOT redundant.
 ;;; The A-=Rx instruction is required to SET THE FLAGS based on A's value.
 ;;; JZ checks the zero flag, not the accumulator directly.
 
 ;;; Rule 2: Redundant register round-trip
-;;; (Rx=A ?r) (A=Rx ?r) -> (remove both)
-;;; ONLY when ?r is dead after the pair (not read again before the next write).
+;;; (Rx=A ?r) (A=Rx ?r) -> (Rx=A ?r)  [when ?r is live]
+;;;                      -> {}          [when ?r is dead]
+;;; After (Rx=A r), A is unchanged (Rx=A writes only to r). So the immediately
+;;; following (A=Rx r) is always redundant — A already equals r.
+;;; When r is also dead afterwards, both instructions can be dropped entirely.
 ;;; NOTE: Must NOT apply to SP because (RX=A SP) updates the stack pointer!
 (push (make-peephole-rule
        :name "roundtrip"
@@ -265,12 +305,14 @@
                           ;; Don't optimize SP — stack pointer updates have side effects
                           ((eq r 'SP)
                            (list (list 'Rx=A 'SP) (list 'A=Rx 'SP)))
-                          ;; Don't eliminate if the register is read again later:
-                          ;; eliminating (Rx=A r) would leave r with a stale value
-                          ((reg-read-after-p r code-vec end-idx)
-                           (list (list 'Rx=A r) (list 'A=Rx r)))
-                          ;; Register is dead after the pair — safe to eliminate both
-                          (t nil)))))
+                          ;; Register is dead: eliminate both (A=Rx r is a no-op, Rx=A r
+                          ;; is a dead write)
+                          ((not (reg-read-after-p r code-vec end-idx))
+                           nil)
+                          ;; Register is live: keep only (Rx=A r); the (A=Rx r) is a
+                          ;; no-op since Rx=A does not modify A — A already equals r
+                          (t
+                           (list (list 'Rx=A r)))))))
       *peephole-rules*)
 
 ;;; Rule 3: Consecutive loads to same register
@@ -526,17 +568,20 @@
                             (list (list 'Rx=M[A] reg2))))))
       *peephole-rules*)
 
-;;; Rule 22: Dead A store before immediate load and A overwrite
-;;; (A=Rx ?r1) (Rx= ?v ?r2) (A=Rx ?r3) -> (Rx= ?v ?r2) (A=Rx ?r3)
-;;; When A is written, then a register is loaded with an immediate (not using A),
-;;; then A is overwritten, the first A write is dead.
+;;; Rule 22: Dead A load — general scan-based elimination
+;;; (A=Rx ?r) -> {} when A is provably overwritten before being read.
+;;; Uses A-dead-before-next-write-p to scan forward through non-A instructions
+;;; and labels. This handles:
+;;;   - Consecutive A loads:           (A=Rx r1)(A=Rx r2)         -> (A=Rx r2)
+;;;   - Dead A before immediate + A:   (A=Rx r1)(Rx= v r2)(A=Rx r3) -> (Rx= v r2)(A=Rx r3)
+;;;   - Dead A before label + A:       (A=Rx r1)(non-A...)(label)(A=Rx r2) -> ...
 (push (make-peephole-rule
-       :name "dead-A-before-immediate-load"
-       :pattern '((A=Rx ?r1) (Rx= ?v ?r2) (A=Rx ?r3))
+       :name "dead-A-load"
+       :pattern '((A=Rx ?r))
        :replacement (lambda (bindings code-vec end-idx)
-                      (declare (ignore code-vec end-idx))
-                      (list (list 'Rx= (getf bindings :V) (getf bindings :R2))
-                            (list 'A=Rx (getf bindings :R3)))))
+                      (if (A-dead-before-next-write-p code-vec end-idx)
+                          nil
+                          (list (list 'A=Rx (getf bindings :r))))))
       *peephole-rules*)
 
 ;;; Reverse the rules list so higher-priority rules are tried first
