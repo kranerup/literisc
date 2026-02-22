@@ -1517,12 +1517,16 @@
 
 (defun cse-collect-from-expr (expr result)
   "Collect all CSE-eligible subexpressions from EXPR into RESULT.
-   Bottom-up order (innermost first), with duplicates (for counting)."
+   Bottom-up order (innermost first), with duplicates (for counting).
+   Does NOT recurse into inline-expr nodes: their internal variables are
+   only in scope during the inline-expr's own evaluation and must not be
+   hoisted to an outer block."
   (when (and expr (ast-node-p expr))
-    (dolist (child (ast-node-children expr))
-      (setf result (cse-collect-from-expr child result)))
-    (when (cse-eligible-p expr)
-      (push expr result)))
+    (unless (eq (ast-node-type expr) 'inline-expr)
+      (dolist (child (ast-node-children expr))
+        (setf result (cse-collect-from-expr child result)))
+      (when (cse-eligible-p expr)
+        (push expr result))))
   result)
 
 (defun cse-collect-stmt-exprs (stmt)
@@ -1601,9 +1605,15 @@
 (defun cse-replace-in-node (node done)
   "Replace CSE-eligible expressions in NODE with var-refs from DONE alist.
    Checks the node itself first (larger expressions take priority over
-   their subexpressions)."
+   their subexpressions).
+   inline-expr nodes are treated as opaque: outer replacements are NOT
+   propagated into them (their internal vars are out-of-scope outside),
+   but cse-node is applied so that inner CSE opportunities are still found."
   (when (null node) (return-from cse-replace-in-node nil))
   (unless (ast-node-p node) (return-from cse-replace-in-node node))
+  ;; inline-expr: don't apply outer replacements inside; run inner CSE instead
+  (when (eq (ast-node-type node) 'inline-expr)
+    (return-from cse-replace-in-node (cse-node node)))
   (let ((entry (find node done :test #'ast-node-equal :key #'car)))
     (when entry
       (return-from cse-replace-in-node
@@ -1768,13 +1778,18 @@
                     :data (ast-node-data node)))))
 
 (defun cse-alloc-temp (name var-type)
-  "Allocate a CSE temporary variable on the current function's stack.
-   Extends compiler-state-local-offset and registers the symbol.
+  "Allocate a CSE temporary variable in a register or on the stack.
+   Promotes eligible scalars to registers (R6-R9); falls back to stack.
    Must be called while the function's context is active in *state*."
-  (let* ((size (type-size var-type))
-         (new-offset (- (compiler-state-local-offset *state*) size)))
-    (setf (compiler-state-local-offset *state*) new-offset)
-    (add-symbol name var-type :local new-offset)))
+  (let ((reg-count (compiler-state-local-reg-count *state*)))
+    (if (and (promotable-to-register-p var-type) (< reg-count 4))
+        (progn
+          (add-symbol name var-type :register reg-count)
+          (incf (compiler-state-local-reg-count *state*)))
+        (let* ((size (type-size var-type))
+               (new-offset (- (compiler-state-local-offset *state*) size)))
+          (setf (compiler-state-local-offset *state*) new-offset)
+          (add-symbol name var-type :local new-offset)))))
 
 (defun eliminate-common-subexpressions (ast)
   "Apply CSE to all functions in the program AST.
@@ -1791,36 +1806,43 @@
     (lambda (child)
       (if (not (and (ast-node-p child) (eq (ast-node-type child) 'function)))
           child
-          (let* ((func-name  (ast-node-value child))
-                 (func-data  (ast-node-data child))
-                 (frame-size (or (getf func-data :frame-size) 0))
-                 (params     (first  (ast-node-children child)))
-                 (body       (second (ast-node-children child)))
+          (let* ((func-name       (ast-node-value child))
+                 (func-data       (ast-node-data child))
+                 (frame-size      (or (getf func-data :frame-size) 0))
+                 (local-reg-count (or (getf func-data :local-reg-count) 0))
+                 (params          (first  (ast-node-children child)))
+                 (body            (second (ast-node-children child)))
                  ;; Save compiler state
-                 (saved-func   (compiler-state-current-function *state*))
-                 (saved-scope  (compiler-state-scope-level     *state*))
-                 (saved-offset (compiler-state-local-offset    *state*)))
+                 (saved-func      (compiler-state-current-function *state*))
+                 (saved-scope     (compiler-state-scope-level      *state*))
+                 (saved-offset    (compiler-state-local-offset     *state*))
+                 (saved-reg-count (compiler-state-local-reg-count  *state*)))
             ;; Install this function's stack context
             (setf (compiler-state-current-function *state*) func-name)
             (setf (compiler-state-scope-level      *state*) 1)
             (setf (compiler-state-local-offset     *state*) (- frame-size))
+            (setf (compiler-state-local-reg-count  *state*) local-reg-count)
             (let ((new-body (cse-node body)))
-              (let ((new-frame-size (- (compiler-state-local-offset *state*))))
+              (let ((new-frame-size      (- (compiler-state-local-offset    *state*)))
+                    (new-local-reg-count    (compiler-state-local-reg-count *state*)))
                 ;; Restore state
                 (setf (compiler-state-current-function *state*) saved-func)
                 (setf (compiler-state-scope-level      *state*) saved-scope)
                 (setf (compiler-state-local-offset     *state*) saved-offset)
-                ;; Return updated function node
+                (setf (compiler-state-local-reg-count  *state*) saved-reg-count)
+                ;; Return updated function node (update func-data if anything changed)
                 (make-ast-node
                  :type 'function
                  :value func-name
                  :children (list params new-body)
                  :result-type (ast-node-result-type child)
                  :source-loc (ast-node-source-loc child)
-                 :data (if (= new-frame-size frame-size)
+                 :data (if (and (= new-frame-size frame-size)
+                                (= new-local-reg-count local-reg-count))
                            func-data
                            (let ((d (copy-list func-data)))
                              (setf (getf d :frame-size) new-frame-size)
+                             (setf (getf d :local-reg-count) new-local-reg-count)
                              d))))))))
     (ast-node-children ast))))
 

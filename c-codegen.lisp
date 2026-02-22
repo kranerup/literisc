@@ -1431,6 +1431,16 @@
     ;; Set current function for symbol lookup
     (setf (compiler-state-current-function *state*) name)
 
+    ;; Recount :register vars from symbol table so CSE-promoted temps are included.
+    ;; This makes *local-reg-count* accurate before inline var allocation in body gen.
+    (let ((reg-count-from-table
+            (loop for sym being the hash-values of (compiler-state-symbols *state*)
+                  when (and (eq (sym-entry-storage sym) :register)
+                            (equal (sym-entry-function sym) name))
+                  count 1)))
+      (setf *local-reg-count* reg-count-from-table)
+      (setf (compiler-state-local-reg-count *state*) reg-count-from-table))
+
     ;; Enter function scope
     (enter-scope)
 
@@ -3654,29 +3664,42 @@
     (emit-comment (format nil "-- inline begin: result in ~a --" result-var))
 
     ;; First, register all inline variables in the symbol table
-    ;; They need to be allocated storage before we can generate code
+    ;; They need to be allocated storage before we can generate code.
+    ;; Promote eligible scalars to registers (R6-R9), fall back to stack.
     (dolist (decl (ast-node-children init-decls))
       (when (eq (ast-node-type decl) 'var-decl)
         (let* ((name (ast-node-value decl))
-               (var-type (or (ast-node-result-type decl) (make-int-type)))
-               ;; Allocate stack space for the variable
-               (current-offset (compiler-state-local-offset *state*))
-               (new-offset (- current-offset (type-size var-type))))
-          (setf (compiler-state-local-offset *state*) new-offset)
-          (add-symbol name var-type :local new-offset)
+               (var-type (or (ast-node-result-type decl) (make-int-type))))
+          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
+              (progn
+                (add-symbol name var-type :register *local-reg-count*)
+                (incf *local-reg-count*))
+              (let* ((current-offset (compiler-state-local-offset *state*))
+                     (new-offset (- current-offset (type-size var-type))))
+                (setf (compiler-state-local-offset *state*) new-offset)
+                (add-symbol name var-type :local new-offset)))
           (push name inline-vars))))
 
     ;; Also register any local variables declared in the body
     ;; (these were renamed during the inline transformation)
     (dolist (decl (collect-var-decls body))
       (let* ((name (ast-node-value decl))
-             (var-type (or (ast-node-result-type decl) (make-int-type)))
-             (current-offset (compiler-state-local-offset *state*))
-             (new-offset (- current-offset (type-size var-type))))
+             (var-type (or (ast-node-result-type decl) (make-int-type))))
         (unless (lookup-symbol name)  ; don't re-register if already done
-          (setf (compiler-state-local-offset *state*) new-offset)
-          (add-symbol name var-type :local new-offset)
+          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
+              (progn
+                (add-symbol name var-type :register *local-reg-count*)
+                (incf *local-reg-count*))
+              (let* ((current-offset (compiler-state-local-offset *state*))
+                     (new-offset (- current-offset (type-size var-type))))
+                (setf (compiler-state-local-offset *state*) new-offset)
+                (add-symbol name var-type :local new-offset)))
           (push name inline-vars))))
+
+    ;; Update frame-size to cover any stack-allocated inline vars
+    (let ((needed (- (compiler-state-local-offset *state*))))
+      (when (> needed *frame-size*)
+        (setf *frame-size* needed)))
 
     ;; Now generate initializations for the inline variables
     (dolist (decl (ast-node-children init-decls))
@@ -3690,10 +3713,14 @@
             ;; Mask value to appropriate size before storing
             (when (and var-type (< (type-size var-type) 4))
               (emit-mask-to-size var-type))
-            ;; Store to local variable
+            ;; Store to local variable (register or stack)
             (let ((sym (lookup-symbol name)))
               (when sym
-                (generate-store-local (sym-entry-offset sym) var-type)))))))
+                (case (sym-entry-storage sym)
+                  (:register
+                   (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
+                  (:local
+                   (generate-store-local (sym-entry-offset sym) var-type)))))))))
 
     ;; Generate the transformed body
     (generate-statement body)
@@ -3701,12 +3728,14 @@
     ;; Generate the exit label
     (generate-statement exit-label-node)
 
-    ;; Load result into A
+    ;; Load result into A (from register or stack)
     (let ((sym (lookup-symbol result-var)))
       (if sym
-          (let ((offset (sym-entry-offset sym))
-                (var-type (sym-entry-type sym)))
-            (generate-load-local offset var-type))
+          (case (sym-entry-storage sym)
+            (:register
+             (emit `(A=Rx ,(get-local-reg (sym-entry-offset sym)))))
+            (:local
+             (generate-load-local (sym-entry-offset sym) (sym-entry-type sym))))
           (compiler-warning "Inline result var ~a not found" result-var)))
 
     ;; Clean up: remove inline variables from symbol table
