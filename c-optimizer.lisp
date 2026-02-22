@@ -1451,3 +1451,55 @@
   (when (null ast)
     (return-from unroll-loops nil))
   (unroll-loops-in-node ast))
+
+;;; ===========================================================================
+;;; AST Query Utilities
+;;; ===========================================================================
+;;; These utilities support testing of AST-level optimizations (e.g. CSE) by
+;;; allowing tests to inspect the structure of the optimized AST rather than
+;;; relying on emulated program output or generated assembly.
+
+(defun ast-node-equal (a b)
+  "Return t if two AST nodes are structurally equal.
+   Compares type, value, and children recursively.
+   Ignores source-loc, result-type, and data fields so that hand-built
+   template nodes can be matched against compiler-produced nodes."
+  (and (ast-node-p a)
+       (ast-node-p b)
+       (eq (ast-node-type a) (ast-node-type b))
+       (equal (ast-node-value a) (ast-node-value b))
+       (= (length (ast-node-children a)) (length (ast-node-children b)))
+       (every #'ast-node-equal (ast-node-children a) (ast-node-children b))))
+
+(defun ast-count-if (node pred)
+  "Count all AST nodes in the subtree rooted at NODE for which PRED returns true.
+   NODE itself is included in the count."
+  (if (or (null node) (not (ast-node-p node)))
+      0
+      (+ (if (funcall pred node) 1 0)
+         (reduce #'+ (ast-node-children node)
+                 :key (lambda (child) (ast-count-if child pred))
+                 :initial-value 0))))
+
+(defun ast-count-subtree (node template)
+  "Count occurrences of TEMPLATE as a subtree anywhere within NODE.
+   TEMPLATE is an ast-node; matching uses ast-node-equal (ignores
+   source-loc, result-type, and data)."
+  (ast-count-if node (lambda (n) (ast-node-equal n template))))
+
+(defun ast-count-var-refs (node name)
+  "Count var-ref nodes referencing NAME anywhere within NODE."
+  (ast-count-if node (lambda (n)
+                       (and (ast-node-p n)
+                            (eq (ast-node-type n) 'var-ref)
+                            (equal (ast-node-value n) name)))))
+
+(defun ast-find-function (ast name)
+  "Find the function node named NAME in the program AST.
+   Returns the function node, or nil if not found."
+  (when (and ast (ast-node-p ast))
+    (if (and (eq (ast-node-type ast) 'function)
+             (equal (ast-node-value ast) name))
+        ast
+        (some (lambda (child) (ast-find-function child name))
+              (ast-node-children ast)))))

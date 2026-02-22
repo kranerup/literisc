@@ -5916,6 +5916,192 @@ int main() {
     (test-loop-unroll-not-unrolled)
     (test-loop-unroll-memory)))
 
+;;; ===========================================================================
+;;; Phase 29: CSE Testing Infrastructure
+;;; ===========================================================================
+;;; Tests for the AST query utilities and get-optimized-ast, which together
+;;; form the foundation for testing Common Subexpression Elimination (and
+;;; other AST-level optimizations) without relying on fragile assembly patterns.
+
+;;; --- Utility unit tests ---
+
+(deftest test-ast-node-equal ()
+  "ast-node-equal: structural equality of AST nodes"
+  (let* ((a    (make-ast-node :type 'var-ref  :value "a"))
+         (b    (make-ast-node :type 'var-ref  :value "b"))
+         (a2   (make-ast-node :type 'var-ref  :value "a"))
+         (lit5 (make-ast-node :type 'literal  :value 5))
+         (lit5b(make-ast-node :type 'literal  :value 5))
+         (lit6 (make-ast-node :type 'literal  :value 6))
+         (apb  (make-ast-node :type 'binary-op :value "+"
+                              :children (list a b)))
+         (apb2 (make-ast-node :type 'binary-op :value "+"
+                              :children (list (make-ast-node :type 'var-ref :value "a")
+                                             (make-ast-node :type 'var-ref :value "b"))))
+         (amb  (make-ast-node :type 'binary-op :value "-"
+                              :children (list a b))))
+    (check
+      ;; identical leaf nodes
+      (ast-node-equal a a2)
+      (ast-node-equal lit5 lit5b)
+      ;; different values
+      (not (ast-node-equal a b))
+      (not (ast-node-equal lit5 lit6))
+      ;; different types
+      (not (ast-node-equal a lit5))
+      ;; composite: same structure (source-loc and result-type are ignored)
+      (ast-node-equal apb apb2)
+      ;; composite: different operator
+      (not (ast-node-equal apb amb))
+      ;; a+b =/= b+a (order of children matters)
+      (not (ast-node-equal apb
+                           (make-ast-node :type 'binary-op :value "+"
+                                          :children (list b a)))))))
+
+(deftest test-ast-count-if ()
+  "ast-count-if: counts nodes matching a predicate"
+  (let* ((src "int main() { return 1 + 2; }")
+         (ast (get-optimized-ast src))
+         ;; After constant folding 1+2 becomes 3, so only literal 3 survives
+         (lit-count (ast-count-if ast (lambda (n)
+                                        (eq (ast-node-type n) 'literal))))
+         (total     (ast-count-if ast #'ast-node-p)))
+    (check
+      ;; At least one node exists
+      (> total 0)
+      ;; Literal count is non-negative
+      (>= lit-count 0)
+      ;; Total >= literal count
+      (>= total lit-count)
+      ;; nil / non-node input returns 0
+      (= 0 (ast-count-if nil #'ast-node-p)))))
+
+(deftest test-ast-count-var-refs ()
+  "ast-count-var-refs: counts variable references by name"
+  (let* ((src "int f(int x) { return x + x + x; }
+               int main() { return f(1); }")
+         (ast  (get-optimized-ast src))
+         (func (ast-find-function ast "f")))
+    (check
+      ;; f uses x three times; constant propagation won't touch parameters
+      (= 3 (ast-count-var-refs func "x"))
+      ;; y is not in scope at all
+      (= 0 (ast-count-var-refs func "y")))))
+
+(deftest test-ast-find-function ()
+  "ast-find-function: locates function nodes by name"
+  (let* ((src "int foo(int a) { return a + 1; }
+               int bar(int b) { return b * 2; }
+               int main() { return foo(1) + bar(2); }")
+         (ast (get-optimized-ast src)))
+    (check
+      (not (null (ast-find-function ast "foo")))
+      (not (null (ast-find-function ast "bar")))
+      (not (null (ast-find-function ast "main")))
+      ;; Non-existent function returns nil
+      (null (ast-find-function ast "nonexistent"))
+      ;; Returned node has the correct type and name
+      (eq 'function (ast-node-type (ast-find-function ast "foo")))
+      (equal "bar"  (ast-node-value (ast-find-function ast "bar"))))))
+
+(deftest test-get-optimized-ast ()
+  "get-optimized-ast: returns a valid optimized AST"
+  (let* ((src "int main() { return 6 * 7; }")
+         (ast (get-optimized-ast src)))
+    (check
+      ;; Top-level node is 'program
+      (ast-node-p ast)
+      (eq 'program (ast-node-type ast))
+      ;; main function is present
+      (not (null (ast-find-function ast "main")))
+      ;; Constant folding ran: 6*7 folded to literal 42, no binary-op remains in main
+      (= 0 (ast-count-if (ast-find-function ast "main")
+                         (lambda (n) (eq (ast-node-type n) 'binary-op)))))))
+
+;;; --- CSE opportunity tests ---
+;;; These tests document programs where CSE would help.
+;;; The correctness assertions always pass.
+;;; The structural assertions (ast-count-subtree) document the PRE-CSE state:
+;;; they assert that duplicate subexpressions still appear in the AST.
+;;; When CSE is implemented, the counts should drop and these assertions
+;;; will need to be updated (or moved to a new test-phase30-cse group that
+;;; asserts the post-CSE structure alongside these pre-CSE baselines).
+
+(deftest test-cse-opportunity-basic ()
+  "CSE opportunity: same binary expression used twice"
+  (let* ((src "int f(int a, int b) { return (a+b) + (a+b); }
+               int main() { return f(3, 4); }")
+         (ast  (get-optimized-ast src))
+         (func (ast-find-function ast "f"))
+         ;; Template for a+b (source-loc and result-type are ignored by ast-node-equal)
+         (ab   (make-ast-node :type 'binary-op :value "+"
+                              :children (list (make-ast-node :type 'var-ref :value "a")
+                                             (make-ast-node :type 'var-ref :value "b")))))
+    (check
+      ;; Correctness: (3+4)+(3+4) = 14
+      (= 14 (run-and-get-result src))
+      ;; Pre-CSE baseline: a+b appears exactly twice (the CSE opportunity)
+      (= 2 (ast-count-subtree func ab)))))
+
+(deftest test-cse-opportunity-multiply ()
+  "CSE opportunity: same multiply expression used twice"
+  (let* ((src "int f(int a, int b) { int x = a*b; int y = a*b; return x + y; }
+               int main() { return f(3, 4); }")
+         (ast  (get-optimized-ast src))
+         (func (ast-find-function ast "f"))
+         (ab   (make-ast-node :type 'binary-op :value "*"
+                              :children (list (make-ast-node :type 'var-ref :value "a")
+                                             (make-ast-node :type 'var-ref :value "b")))))
+    (check
+      ;; Correctness: 3*4 + 3*4 = 24
+      (= 24 (run-and-get-result src))
+      ;; Pre-CSE baseline: a*b appears twice
+      (= 2 (ast-count-subtree func ab)))))
+
+(deftest test-cse-opportunity-three-uses ()
+  "CSE opportunity: same expression used three times"
+  (let* ((src "int f(int a, int b) { return (a+b) + (a+b) + (a+b); }
+               int main() { return f(2, 3); }")
+         (ast  (get-optimized-ast src))
+         (func (ast-find-function ast "f"))
+         (ab   (make-ast-node :type 'binary-op :value "+"
+                              :children (list (make-ast-node :type 'var-ref :value "a")
+                                             (make-ast-node :type 'var-ref :value "b")))))
+    (check
+      ;; Correctness: (2+3)*3 = 15
+      (= 15 (run-and-get-result src))
+      ;; Pre-CSE baseline: a+b appears three times
+      (= 3 (ast-count-subtree func ab)))))
+
+(deftest test-cse-opportunity-no-duplicate ()
+  "CSE opportunity: verify ast-count-subtree returns 0 when no match"
+  (let* ((src "int f(int a, int b) { return a + b; }
+               int main() { return f(5, 3); }")
+         (ast  (get-optimized-ast src))
+         (func (ast-find-function ast "f"))
+         ;; a*b is NOT in this function
+         (ab   (make-ast-node :type 'binary-op :value "*"
+                              :children (list (make-ast-node :type 'var-ref :value "a")
+                                             (make-ast-node :type 'var-ref :value "b")))))
+    (check
+      ;; Correctness
+      (= 8 (run-and-get-result src))
+      ;; a*b does not appear
+      (= 0 (ast-count-subtree func ab)))))
+
+(deftest test-phase29-cse-infrastructure ()
+  "Run all CSE infrastructure tests (AST utilities + get-optimized-ast)"
+  (combine-results
+    (test-ast-node-equal)
+    (test-ast-count-if)
+    (test-ast-count-var-refs)
+    (test-ast-find-function)
+    (test-get-optimized-ast)
+    (test-cse-opportunity-basic)
+    (test-cse-opportunity-multiply)
+    (test-cse-opportunity-three-uses)
+    (test-cse-opportunity-no-duplicate)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -5950,7 +6136,8 @@ int main() {
     (test-phase25-multidim-arrays)
     (test-phase26-longlong)
     (test-phase27-memory-inspection)
-    (test-phase28-loop-unrolling)))
+    (test-phase28-loop-unrolling)
+    (test-phase29-cse-infrastructure)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

@@ -1031,6 +1031,32 @@
             (format t "  ~s~%" instr)))
         code))))
 
+(defun get-optimized-ast (source &key (optimize nil) (optimize-size t))
+  "Compile C source through the optimizer and return the resulting AST.
+   Unlike compile-c, this stops before code generation, making it useful
+   for testing AST-level optimizations such as CSE by inspecting the tree
+   structure directly.
+
+   Accepts the same :optimize and :optimize-size flags as compile-c."
+  (let ((*state* (make-compiler-state))
+        (*current-source-line* nil)
+        (*current-source-context* nil))
+    (setf (compiler-state-source-lines *state*) (split-source-lines source))
+    (setf (compiler-state-source-annotations *state*) nil)
+    (setf (compiler-state-optimize *state*) optimize)
+    (setf (compiler-state-optimize-size *state*) optimize-size)
+    (setf (compiler-state-tokens *state*) (tokenize source))
+    (scan-address-taken-variables)
+    (let ((ast (parse-program)))
+      (when optimize
+        (setf ast (inline-functions ast)))
+      (setf ast (fold-constants ast))
+      (when optimize
+        (setf ast (unroll-loops ast))
+        (setf ast (fold-constants ast)))
+      (setf ast (dead-code-elimination ast))
+      ast)))
+
 (defun compile-c-file (filename &key (verbose nil))
   "Compile a C file to assembly S-expressions"
   (with-open-file (stream filename :direction :input)
