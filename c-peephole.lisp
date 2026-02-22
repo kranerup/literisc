@@ -120,9 +120,11 @@
         (incf idx)))
     ;; All pattern instructions matched - compute replacement
     (let* ((consumed (- idx start-idx))
+           (end-idx (+ start-idx consumed))
            (replacement-spec (peephole-rule-replacement rule))
            (replacement (if (functionp replacement-spec)
-                            (funcall replacement-spec bindings)
+                            ;; Pass code-vec and end-idx so lambdas can do lookahead
+                            (funcall replacement-spec bindings code-vec end-idx)
                             (instantiate-replacement replacement-spec bindings))))
       ;; If replacement function returns :no-match, treat as no match
       (if (eq replacement :no-match)
@@ -208,6 +210,43 @@
 ;;; Clear rules before redefining
 (setf *peephole-rules* nil)
 
+;;; ===========================================================================
+;;; Lookahead Utility
+;;; ===========================================================================
+
+(defun reg-read-after-p (reg code-vec from-idx)
+  "Return T if REG is potentially read in any instruction at or after FROM-IDX,
+   before the next unconditional write to REG.
+   Used by peephole rules to ensure a register is dead before eliminating a write.
+
+   Strategy:
+   - Rx=... instructions WRITE to their last argument; if writing REG, stop (reg is
+     redefined, so any prior write is invisible to later readers).
+   - ...=Rx instructions READ from their last argument; if reading REG, return T.
+   - All other instruction forms: if REG appears anywhere, conservatively return T."
+  (loop for i from from-idx below (length code-vec)
+        for instr = (aref code-vec i)
+        when (and (consp instr) (symbolp (car instr)))
+        do (let* ((opname (symbol-name (car instr)))
+                  (oplen  (length opname))
+                  (last-arg (when (cdr instr) (car (last (cdr instr))))))
+             (cond
+               ;; Rx=... instruction: writes to the last argument
+               ((and (>= oplen 3) (string= opname "RX=" :end1 3))
+                (when (eq last-arg reg)
+                  ;; REG is being overwritten before any read — safe to eliminate
+                  (return-from reg-read-after-p nil)))
+               ;; ...=Rx instruction: reads from the last argument
+               ((and (>= oplen 3) (string= opname "=RX" :start1 (- oplen 3)))
+                (when (eq last-arg reg)
+                  ;; REG is read — NOT safe to eliminate the earlier write
+                  (return-from reg-read-after-p t)))
+               ;; Other instruction: conservatively check if REG appears at all
+               (t
+                (when (member reg (cdr instr))
+                  (return-from reg-read-after-p t)))))
+        finally (return nil)))
+
 ;;; NOTE: Zero-test elimination rule was removed because it's incorrect.
 ;;; The pattern (Rx= 0 ?r) (A-=Rx ?r) (jz ?label) is NOT redundant.
 ;;; The A-=Rx instruction is required to SET THE FLAGS based on A's value.
@@ -215,15 +254,23 @@
 
 ;;; Rule 2: Redundant register round-trip
 ;;; (Rx=A ?r) (A=Rx ?r) -> (remove both)
+;;; ONLY when ?r is dead after the pair (not read again before the next write).
 ;;; NOTE: Must NOT apply to SP because (RX=A SP) updates the stack pointer!
 (push (make-peephole-rule
        :name "roundtrip"
        :pattern '((Rx=A ?r) (A=Rx ?r))
-       :replacement (lambda (bindings)
-                      ;; Don't optimize away if register is SP - stack pointer updates have side effects
-                      (if (eq (getf bindings :r) 'SP)
-                          (list (list 'Rx=A 'SP) (list 'A=Rx 'SP))
-                          nil)))
+       :replacement (lambda (bindings code-vec end-idx)
+                      (let ((r (getf bindings :r)))
+                        (cond
+                          ;; Don't optimize SP — stack pointer updates have side effects
+                          ((eq r 'SP)
+                           (list (list 'Rx=A 'SP) (list 'A=Rx 'SP)))
+                          ;; Don't eliminate if the register is read again later:
+                          ;; eliminating (Rx=A r) would leave r with a stale value
+                          ((reg-read-after-p r code-vec end-idx)
+                           (list (list 'Rx=A r) (list 'A=Rx r)))
+                          ;; Register is dead after the pair — safe to eliminate both
+                          (t nil)))))
       *peephole-rules*)
 
 ;;; Rule 3: Consecutive loads to same register
@@ -231,7 +278,8 @@
 (push (make-peephole-rule
        :name "consecutive-load"
        :pattern '((Rx= ?v1 ?r) (Rx= ?v2 ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'Rx= (getf bindings :v2) (getf bindings :r)))))
       *peephole-rules*)
 
@@ -240,7 +288,8 @@
 (push (make-peephole-rule
        :name "jump-to-next"
        :pattern '((j ?label) (label ?label))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'label (getf bindings :label)))))
       *peephole-rules*)
 
@@ -249,7 +298,8 @@
 (push (make-peephole-rule
        :name "useless-transfer"
        :pattern '((A=Rx ?r) (Rx=A ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'A=Rx (getf bindings :r)))))
       *peephole-rules*)
 
@@ -286,7 +336,8 @@
 (push (make-peephole-rule
        :name "immediate-through-temp"
        :pattern '((Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :r1))
                             (reg2 (getf bindings :r2))
                             (val (getf bindings :v)))
@@ -303,7 +354,8 @@
 (push (make-peephole-rule
        :name "small-immediate-through-A"
        :pattern '((A= ?v) (Rx=A ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((val (getf bindings :v))
                             (reg (getf bindings :r)))
                         ;; Don't optimize if target is SP (side effects)
@@ -317,7 +369,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-store"
        :pattern '((A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'A=Rx (getf bindings :r))
                             (list 'M[A]=Rx (getf bindings :r2)))))
       *peephole-rules*)
@@ -327,7 +380,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-store-offset"
        :pattern '((A=Rx ?r) (M[A+n]=Rx ?n ?r2) (A=Rx ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'A=Rx (getf bindings :r))
                             (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r2)))))
       *peephole-rules*)
@@ -337,7 +391,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-between-stores"
        :pattern '((A=Rx ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'A=Rx (getf bindings :r))
                             (list 'M[A]=Rx (getf bindings :r2))
                             (list 'M[A+n]=Rx (getf bindings :n) (getf bindings :r3)))))
@@ -349,7 +404,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-load"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :R))
                             (reg2 (getf bindings :R2)))
                         (if (eq reg1 reg2)
@@ -366,7 +422,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-load-offset"
        :pattern '((A=Rx ?r) (Rx=M[A+n] ?n ?r2) (A=Rx ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :R))
                             (reg2 (getf bindings :R2))
                             (offs (getf bindings :N)))
@@ -384,7 +441,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-between-loads"
        :pattern '((A=Rx ?r) (Rx=M[A] ?r2) (A=Rx ?r) (Rx=M[A+n] ?n ?r3))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :R))
                             (reg2 (getf bindings :R2))
                             (reg3 (getf bindings :R3))
@@ -404,7 +462,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-store-from-A"
        :pattern '((Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg (getf bindings :r)))
                         ;; Don't optimize SP - it may have been modified
                         (if (eq reg 'SP)
@@ -420,7 +479,8 @@
 (push (make-peephole-rule
        :name "redundant-reload-after-store-from-A-64"
        :pattern '((Rx=A ?r) (M[A]=Rx ?r2) (A=Rx ?r) (M[A+n]=Rx ?n ?r3))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg (getf bindings :r)))
                         (if (eq reg 'SP)
                             (list (list 'Rx=A reg)
@@ -439,7 +499,8 @@
 (push (make-peephole-rule
        :name "redundant-copy-back-after-load"
        :pattern '((Rx=M[A] ?r) (A=Rx ?r) (Rx=A ?r))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg (getf bindings :R)))
                         (list (list 'Rx=M[A] reg)
                               (list 'A=Rx reg)))))
@@ -454,7 +515,8 @@
 (push (make-peephole-rule
        :name "load-through-temp-to-target"
        :pattern '((Rx=M[A] ?r1) (A=Rx ?r1) (Rx=A ?r2))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :R1))
                             (reg2 (getf bindings :R2)))
                         (if (eq reg1 reg2)
@@ -471,7 +533,8 @@
 (push (make-peephole-rule
        :name "dead-A-before-immediate-load"
        :pattern '((A=Rx ?r1) (Rx= ?v ?r2) (A=Rx ?r3))
-       :replacement (lambda (bindings)
+       :replacement (lambda (bindings code-vec end-idx)
+                      (declare (ignore code-vec end-idx))
                       (list (list 'Rx= (getf bindings :V) (getf bindings :R2))
                             (list 'A=Rx (getf bindings :R3)))))
       *peephole-rules*)

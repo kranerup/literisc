@@ -6025,53 +6025,57 @@ int main() {
 
 (deftest test-cse-opportunity-basic ()
   "CSE: same binary expression used twice in a return"
-  (let* ((src "int f(int a, int b) { return (a+b) + (a+b); }
-               int main() { return f(3, 4); }")
+  (let* ((src "volatile int g1 = 3; volatile int g2 = 4;
+               int f(int a, int b) { return (a+b) + (a+b); }
+               int main() { return f(g1, g2); }")
          (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          (ab   (make-ast-node :type 'binary-op :value "+"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
-      ;; Correctness: (3+4)+(3+4) = 14
-      (= 14 (run-and-get-result src :optimize t))
+      ;; Correctness: (3+4)+(3+4) = 14, run all configs (none, -O)
+      (= 14 (run-and-get-result src))
       ;; Post-CSE: a+b appears exactly once (only in the temp-var initializer)
       (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-multiply ()
-  "CSE: same multiply expression used in two declarations"
-  (let* ((src "int f(int a, int b) { int x = a*b; int y = a*b; return x + y; }
-               int main() { return f(3, 4); }")
+  "CSE: same multiply expression used in two declarations; volatile inputs prevent constant folding"
+  (let* ((src "volatile int g1 = 3; volatile int g2 = 4;
+               int f(int a, int b) { int x = a*b; int y = a*b; return x + y; }
+               int main() { return f(g1, g2); }")
          (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          (ab   (make-ast-node :type 'binary-op :value "*"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
-      ;; Correctness: 3*4 + 3*4 = 24
-      (= 24 (run-and-get-result src :optimize t))
+      ;; Correctness: 3*4 + 3*4 = 24, run all configs (none, -O)
+      (= 24 (run-and-get-result src))
       ;; Post-CSE: a*b appears exactly once
       (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-three-uses ()
-  "CSE: same expression used three times"
-  (let* ((src "int f(int a, int b) { return (a+b) + (a+b) + (a+b); }
-               int main() { return f(2, 3); }")
+  "CSE: same expression used three times; volatile inputs prevent constant folding"
+  (let* ((src "volatile int g1 = 2; volatile int g2 = 3;
+               int f(int a, int b) { return (a+b) + (a+b) + (a+b); }
+               int main() { return f(g1, g2); }")
          (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          (ab   (make-ast-node :type 'binary-op :value "+"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
-      ;; Correctness: (2+3)*3 = 15
-      (= 15 (run-and-get-result src :optimize t))
+      ;; Correctness: (2+3)*3 = 15, run all configs (none, -O)
+      (= 15 (run-and-get-result src))
       ;; Post-CSE: a+b appears exactly once
       (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-no-duplicate ()
   "CSE: no duplicate expressions means no CSE temp inserted"
-  (let* ((src "int f(int a, int b) { return a + b; }
-               int main() { return f(5, 3); }")
+  (let* ((src "volatile int g1 = 5; volatile int g2 = 3;
+               int f(int a, int b) { return a + b; }
+               int main() { return f(g1, g2); }")
          (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          ;; a*b is NOT in this function
@@ -6079,8 +6083,8 @@ int main() {
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
-      ;; Correctness
-      (= 8 (run-and-get-result src :optimize t))
+      ;; Correctness: 5+3 = 8, run all configs (none, -O)
+      (= 8 (run-and-get-result src))
       ;; a*b does not appear
       (= 0 (ast-count-subtree func ab)))))
 
