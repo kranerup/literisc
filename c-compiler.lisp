@@ -1014,6 +1014,13 @@
           (format t "~%AST (after re-folding):~%")
           (print-ast ast)))
 
+      ;; Common subexpression elimination (after all folding/unrolling)
+      (when optimize
+        (setf ast (eliminate-common-subexpressions ast))
+        (when verbose
+          (format t "~%AST (after CSE):~%")
+          (print-ast ast)))
+
       ;; Dead code elimination (removes unused variables after constant propagation)
       (setf ast (dead-code-elimination ast))
       (when verbose
@@ -1053,7 +1060,8 @@
       (setf ast (fold-constants ast))
       (when optimize
         (setf ast (unroll-loops ast))
-        (setf ast (fold-constants ast)))
+        (setf ast (fold-constants ast))
+        (setf ast (eliminate-common-subexpressions ast)))
       (setf ast (dead-code-elimination ast))
       ast)))
 

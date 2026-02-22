@@ -6018,66 +6018,61 @@ int main() {
       (= 0 (ast-count-if (ast-find-function ast "main")
                          (lambda (n) (eq (ast-node-type n) 'binary-op)))))))
 
-;;; --- CSE opportunity tests ---
-;;; These tests document programs where CSE would help.
-;;; The correctness assertions always pass.
-;;; The structural assertions (ast-count-subtree) document the PRE-CSE state:
-;;; they assert that duplicate subexpressions still appear in the AST.
-;;; When CSE is implemented, the counts should drop and these assertions
-;;; will need to be updated (or moved to a new test-phase30-cse group that
-;;; asserts the post-CSE structure alongside these pre-CSE baselines).
+;;; --- CSE structural tests ---
+;;; Each test checks both correctness (program produces the right result)
+;;; and structure (CSE reduced the duplicate subexpression to a single occurrence).
+;;; get-optimized-ast is called with :optimize t so CSE runs.
 
 (deftest test-cse-opportunity-basic ()
-  "CSE opportunity: same binary expression used twice"
+  "CSE: same binary expression used twice in a return"
   (let* ((src "int f(int a, int b) { return (a+b) + (a+b); }
                int main() { return f(3, 4); }")
-         (ast  (get-optimized-ast src))
+         (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
-         ;; Template for a+b (source-loc and result-type are ignored by ast-node-equal)
          (ab   (make-ast-node :type 'binary-op :value "+"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
       ;; Correctness: (3+4)+(3+4) = 14
-      (= 14 (run-and-get-result src))
-      ;; Pre-CSE baseline: a+b appears exactly twice (the CSE opportunity)
-      (= 2 (ast-count-subtree func ab)))))
+      (= 14 (run-and-get-result src :optimize t))
+      ;; Post-CSE: a+b appears exactly once (only in the temp-var initializer)
+      (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-multiply ()
-  "CSE opportunity: same multiply expression used twice"
+  "CSE: same multiply expression used in two declarations"
   (let* ((src "int f(int a, int b) { int x = a*b; int y = a*b; return x + y; }
                int main() { return f(3, 4); }")
-         (ast  (get-optimized-ast src))
+         (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          (ab   (make-ast-node :type 'binary-op :value "*"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
       ;; Correctness: 3*4 + 3*4 = 24
-      (= 24 (run-and-get-result src))
-      ;; Pre-CSE baseline: a*b appears twice
-      (= 2 (ast-count-subtree func ab)))))
+      (= 24 (run-and-get-result src :optimize t))
+      ;; Post-CSE: a*b appears exactly once
+      (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-three-uses ()
-  "CSE opportunity: same expression used three times"
+  "CSE: same expression used three times"
   (let* ((src "int f(int a, int b) { return (a+b) + (a+b) + (a+b); }
                int main() { return f(2, 3); }")
-         (ast  (get-optimized-ast src))
+         (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          (ab   (make-ast-node :type 'binary-op :value "+"
                               :children (list (make-ast-node :type 'var-ref :value "a")
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
       ;; Correctness: (2+3)*3 = 15
-      (= 15 (run-and-get-result src))
-      ;; Pre-CSE baseline: a+b appears three times
-      (= 3 (ast-count-subtree func ab)))))
+      (= 15 (run-and-get-result src :optimize t))
+      ;; Post-CSE: a+b appears exactly once
+      (= 1 (ast-count-subtree func ab)))))
 
 (deftest test-cse-opportunity-no-duplicate ()
-  "CSE opportunity: verify ast-count-subtree returns 0 when no match"
+  "CSE: no duplicate expressions means no CSE temp inserted"
   (let* ((src "int f(int a, int b) { return a + b; }
                int main() { return f(5, 3); }")
-         (ast  (get-optimized-ast src))
+         (ast  (get-optimized-ast src :optimize t))
          (func (ast-find-function ast "f"))
          ;; a*b is NOT in this function
          (ab   (make-ast-node :type 'binary-op :value "*"
@@ -6085,7 +6080,7 @@ int main() {
                                              (make-ast-node :type 'var-ref :value "b")))))
     (check
       ;; Correctness
-      (= 8 (run-and-get-result src))
+      (= 8 (run-and-get-result src :optimize t))
       ;; a*b does not appear
       (= 0 (ast-count-subtree func ab)))))
 

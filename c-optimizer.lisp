@@ -1453,6 +1453,378 @@
   (unroll-loops-in-node ast))
 
 ;;; ===========================================================================
+;;; Common Subexpression Elimination (CSE)
+;;; ===========================================================================
+;;; Eliminates redundant computation of identical pure subexpressions within
+;;; a function by introducing a temporary variable for the first occurrence
+;;; and replacing subsequent occurrences with a reference to that variable.
+;;;
+;;; Algorithm (per block):
+;;;   Pass 1 – Scan all statements tracking "available" expressions.
+;;;            An expression becomes a candidate if seen 2+ times while
+;;;            no operand variable has been written to between occurrences.
+;;;            Control-flow statements conservatively clear the available set.
+;;;   Pass 2 – Walk statements in order, inserting a temp-var decl just
+;;;            before the first statement in which each candidate appears,
+;;;            then replacing all occurrences (in that statement and later
+;;;            ones) with a var-ref to the temp.
+;;;
+;;; Only binary-op expressions whose operands are purely literal/var-ref/
+;;; eligible-binary-op (no calls, no volatile reads, no side effects) are
+;;; considered.  Short-circuit operators (&& and ||) are excluded.
+
+(defvar *cse-counter* 0
+  "Counter for generating unique CSE temporary variable names.")
+
+(defun cse-fresh-name ()
+  "Generate a unique CSE temporary variable name."
+  (format nil "_cse~a" (incf *cse-counter*)))
+
+;;; --- Eligibility predicates ---
+
+(defun cse-pure-p (node)
+  "Return t if NODE is a pure expression: no side effects, no volatile reads.
+   Pure nodes: literals, non-volatile var-refs, and binary-ops (non-short-
+   circuit) whose operands are themselves pure."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (literal t)
+      (var-ref
+       (let ((type (ast-node-result-type node)))
+         (not (and (type-desc-p type) (type-desc-volatile-p type)))))
+      (binary-op
+       (and (not (member (ast-node-value node) '("&&" "||") :test #'string=))
+            (every #'cse-pure-p (ast-node-children node))))
+      (otherwise nil))))
+
+(defun cse-eligible-p (node)
+  "Return t if NODE is a CSE-eligible expression.
+   Must be a binary-op (not &&/||) with pure operands."
+  (and (ast-node-p node)
+       (eq (ast-node-type node) 'binary-op)
+       (not (member (ast-node-value node) '("&&" "||") :test #'string=))
+       (every #'cse-pure-p (ast-node-children node))))
+
+;;; --- AST walkers ---
+
+(defun cse-uses-var-p (node var-name)
+  "Return t if NODE or any descendant is a var-ref to VAR-NAME."
+  (and (ast-node-p node)
+       (or (and (eq (ast-node-type node) 'var-ref)
+                (equal (ast-node-value node) var-name))
+           (some (lambda (c) (cse-uses-var-p c var-name))
+                 (ast-node-children node)))))
+
+(defun cse-collect-from-expr (expr result)
+  "Collect all CSE-eligible subexpressions from EXPR into RESULT.
+   Bottom-up order (innermost first), with duplicates (for counting)."
+  (when (and expr (ast-node-p expr))
+    (dolist (child (ast-node-children expr))
+      (setf result (cse-collect-from-expr child result)))
+    (when (cse-eligible-p expr)
+      (push expr result)))
+  result)
+
+(defun cse-collect-stmt-exprs (stmt)
+  "Return a list (with duplicates) of CSE-eligible subexpressions from the
+   expression positions of STMT, or :all if STMT is a control-flow construct
+   (signalling that the available-expression set should be cleared)."
+  (when (and stmt (ast-node-p stmt))
+    (case (ast-node-type stmt)
+      (decl-list
+       (let ((result nil))
+         (dolist (child (ast-node-children stmt))
+           (when (and (ast-node-p child) (eq (ast-node-type child) 'var-decl))
+             (let ((init (first (ast-node-children child))))
+               (when init
+                 (setf result (cse-collect-from-expr init result))))))
+         result))
+      (expr-stmt
+       (cse-collect-from-expr (first (ast-node-children stmt)) nil))
+      (return
+       (when (ast-node-children stmt)
+         (cse-collect-from-expr (first (ast-node-children stmt)) nil)))
+      ;; if / while / for / do-while / block / goto / … → conservative
+      (otherwise :all))))
+
+(defun cse-written-in-expr (node result)
+  "Collect variables written by NODE (assignments and ++/--)."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (assign
+       (let ((lhs (first (ast-node-children node))))
+         (when (and (ast-node-p lhs) (eq (ast-node-type lhs) 'var-ref))
+           (pushnew (ast-node-value lhs) result :test #'string=))
+         (setf result (cse-written-in-expr (second (ast-node-children node)) result))))
+      ((unary-op post-op)
+       (when (member (ast-node-value node) '("++" "--") :test #'string=)
+         (let ((op (first (ast-node-children node))))
+           (when (and (ast-node-p op) (eq (ast-node-type op) 'var-ref))
+             (pushnew (ast-node-value op) result :test #'string=))))
+       (dolist (child (ast-node-children node))
+         (setf result (cse-written-in-expr child result))))
+      (otherwise
+       (dolist (child (ast-node-children node))
+         (setf result (cse-written-in-expr child result))))))
+  result)
+
+(defun cse-written-in-stmt (stmt)
+  "Return the list of variable names written in STMT (not descending into
+   nested control-flow blocks), or :all for control-flow statements."
+  (when (and stmt (ast-node-p stmt))
+    (case (ast-node-type stmt)
+      (decl-list
+       (loop for child in (ast-node-children stmt)
+             when (and (ast-node-p child) (eq (ast-node-type child) 'var-decl))
+             collect (ast-node-value child)))
+      (expr-stmt
+       (cse-written-in-expr (first (ast-node-children stmt)) nil))
+      (return nil)
+      (otherwise :all))))
+
+(defun cse-expr-appears-in-p (expr node)
+  "Return t if EXPR appears as a subtree anywhere within NODE."
+  (when (ast-node-p node)
+    (or (ast-node-equal expr node)
+        (some (lambda (child) (cse-expr-appears-in-p expr child))
+              (ast-node-children node)))))
+
+(defun cse-invalidate-alist (alist written-vars)
+  "Remove ALIST entries whose expression uses any variable in WRITTEN-VARS."
+  (remove-if (lambda (entry)
+               (some (lambda (v) (cse-uses-var-p (car entry) v))
+                     written-vars))
+             alist))
+
+;;; --- Transformation ---
+
+(defun cse-replace-in-node (node done)
+  "Replace CSE-eligible expressions in NODE with var-refs from DONE alist.
+   Checks the node itself first (larger expressions take priority over
+   their subexpressions)."
+  (when (null node) (return-from cse-replace-in-node nil))
+  (unless (ast-node-p node) (return-from cse-replace-in-node node))
+  (let ((entry (find node done :test #'ast-node-equal :key #'car)))
+    (when entry
+      (return-from cse-replace-in-node
+        (make-ast-node :type 'var-ref
+                       :value (cdr entry)
+                       :result-type (ast-node-result-type node)
+                       :source-loc (ast-node-source-loc node)))))
+  (make-ast-node :type (ast-node-type node)
+                 :value (ast-node-value node)
+                 :children (mapcar (lambda (c) (cse-replace-in-node c done))
+                                   (ast-node-children node))
+                 :result-type (ast-node-result-type node)
+                 :source-loc (ast-node-source-loc node)
+                 :data (ast-node-data node)))
+
+(defun cse-replace-in-stmt (stmt done)
+  "Apply DONE CSE replacements to the expression positions of STMT.
+   For control-flow statements, recursively applies CSE to sub-blocks
+   (with a fresh analysis) rather than propagating DONE across branches."
+  (when (null stmt) (return-from cse-replace-in-stmt nil))
+  (unless (ast-node-p stmt) (return-from cse-replace-in-stmt stmt))
+  (case (ast-node-type stmt)
+    (decl-list
+     (make-ast-node
+      :type 'decl-list
+      :children (mapcar (lambda (child)
+                          (if (and (ast-node-p child)
+                                   (eq (ast-node-type child) 'var-decl))
+                              (let ((init (first (ast-node-children child))))
+                                (if init
+                                    (make-ast-node
+                                     :type 'var-decl
+                                     :value (ast-node-value child)
+                                     :children (list (cse-replace-in-node init done))
+                                     :result-type (ast-node-result-type child)
+                                     :source-loc (ast-node-source-loc child)
+                                     :data (ast-node-data child))
+                                    child))
+                              child))
+                        (ast-node-children stmt))
+      :source-loc (ast-node-source-loc stmt)))
+    (expr-stmt
+     (make-ast-node
+      :type 'expr-stmt
+      :children (list (cse-replace-in-node (first (ast-node-children stmt)) done))
+      :source-loc (ast-node-source-loc stmt)))
+    (return
+     (if (ast-node-children stmt)
+         (make-ast-node
+          :type 'return
+          :children (list (cse-replace-in-node (first (ast-node-children stmt)) done))
+          :source-loc (ast-node-source-loc stmt))
+         stmt))
+    ;; Control-flow: recurse into sub-blocks with a fresh CSE analysis
+    (otherwise (cse-node stmt))))
+
+(defun cse-make-temp-decl (name expr)
+  "Build a decl-list/var-decl node for a CSE temporary variable."
+  (make-ast-node
+   :type 'decl-list
+   :children (list (make-ast-node
+                    :type 'var-decl
+                    :value name
+                    :children (list expr)
+                    :result-type (or (ast-node-result-type expr) (make-int-type))))))
+
+;;; --- Block-level CSE ---
+
+(defun cse-block (block)
+  "Apply CSE within BLOCK (two-pass). Returns the transformed block."
+  (let ((stmts (ast-node-children block)))
+    (when (null stmts)
+      (return-from cse-block block))
+
+    ;; ---- Pass 1: identify CSE candidates ----
+    ;; seen:       alist (expr . name) – eligible exprs seen exactly once so far
+    ;; candidates: alist (expr . name) – exprs seen 2+ times (CSE opportunity)
+    (let ((seen nil)
+          (candidates nil))
+      (dolist (stmt stmts)
+        (let ((exprs (cse-collect-stmt-exprs stmt)))
+          (if (eq exprs :all)
+              (setf seen nil)          ; control flow: clear available set
+              (dolist (expr exprs)
+                (unless (find expr candidates :test #'ast-node-equal :key #'car)
+                  (if (find expr seen :test #'ast-node-equal :key #'car)
+                      ;; Seen before while still available → CSE candidate
+                      (let ((entry (find expr seen :test #'ast-node-equal :key #'car)))
+                        (push (cons expr (cdr entry)) candidates))
+                      ;; First time → add to seen with a fresh temp name
+                      (push (cons expr (cse-fresh-name)) seen))))))
+        ;; Invalidate seen entries when variables are written
+        (let ((written (cse-written-in-stmt stmt)))
+          (unless (eq written :all)
+            (setf seen (cse-invalidate-alist seen written)))))
+
+      ;; No candidates → just recurse into sub-blocks and return
+      (when (null candidates)
+        (return-from cse-block
+          (make-ast-node :type 'block
+                         :value (ast-node-value block)
+                         :children (mapcar #'cse-node stmts)
+                         :result-type (ast-node-result-type block)
+                         :source-loc (ast-node-source-loc block)
+                         :data (ast-node-data block))))
+
+      ;; ---- Pass 2: transform ----
+      ;; not-yet: candidates whose temp-var decl has not been emitted yet
+      ;; done:    candidates whose decl has been emitted (active for replacement)
+      (let ((not-yet (copy-list candidates))
+            (done    nil)
+            (new-stmts nil))
+        (dolist (stmt stmts)
+          (let ((new-decls nil))
+            ;; Find which not-yet candidates first appear in this statement
+            (let ((newly-done nil))
+              (dolist (entry not-yet)
+                (when (cse-expr-appears-in-p (car entry) stmt)
+                  ;; Register temp var in symbol table and note for emission
+                  (let* ((expr (car entry))
+                         (name (cdr entry))
+                         (expr-type (or (ast-node-result-type expr) (make-int-type))))
+                    (cse-alloc-temp name expr-type)
+                    (push (cse-make-temp-decl name expr) new-decls)
+                    (push entry done)
+                    (push entry newly-done))))
+              (setf not-yet (remove-if (lambda (e) (member e newly-done)) not-yet)))
+
+            ;; Apply done replacements to this statement
+            (let ((stmt* (cse-replace-in-stmt stmt done)))
+              (dolist (decl (nreverse new-decls))
+                (push decl new-stmts))
+              (push stmt* new-stmts)))
+
+          ;; Invalidate done and not-yet based on writes in original stmt
+          (let ((written (cse-written-in-stmt stmt)))
+            (if (eq written :all)
+                (progn (setf not-yet nil) (setf done nil))
+                (progn
+                  (setf not-yet (cse-invalidate-alist not-yet written))
+                  (setf done    (cse-invalidate-alist done    written))))))
+
+        (make-ast-node :type 'block
+                       :value (ast-node-value block)
+                       :children (nreverse new-stmts)
+                       :result-type (ast-node-result-type block)
+                       :source-loc (ast-node-source-loc block)
+                       :data (ast-node-data block))))))
+
+(defun cse-node (node)
+  "Recursively apply CSE to any block nodes within NODE."
+  (when (null node) (return-from cse-node nil))
+  (unless (ast-node-p node) (return-from cse-node node))
+  (case (ast-node-type node)
+    (block (cse-block node))
+    (otherwise
+     (make-ast-node :type (ast-node-type node)
+                    :value (ast-node-value node)
+                    :children (mapcar #'cse-node (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)
+                    :data (ast-node-data node)))))
+
+(defun cse-alloc-temp (name var-type)
+  "Allocate a CSE temporary variable on the current function's stack.
+   Extends compiler-state-local-offset and registers the symbol.
+   Must be called while the function's context is active in *state*."
+  (let* ((size (type-size var-type))
+         (new-offset (- (compiler-state-local-offset *state*) size)))
+    (setf (compiler-state-local-offset *state*) new-offset)
+    (add-symbol name var-type :local new-offset)))
+
+(defun eliminate-common-subexpressions (ast)
+  "Apply CSE to all functions in the program AST.
+   For each function, temporarily restores the function's stack context in
+   *state* so that CSE temporary variables can be registered in the symbol
+   table with correct offsets.  The function node's :frame-size is updated
+   to account for any newly introduced temporaries."
+  (when (null ast)
+    (return-from eliminate-common-subexpressions nil))
+  (make-ast-node
+   :type 'program
+   :children
+   (mapcar
+    (lambda (child)
+      (if (not (and (ast-node-p child) (eq (ast-node-type child) 'function)))
+          child
+          (let* ((func-name  (ast-node-value child))
+                 (func-data  (ast-node-data child))
+                 (frame-size (or (getf func-data :frame-size) 0))
+                 (params     (first  (ast-node-children child)))
+                 (body       (second (ast-node-children child)))
+                 ;; Save compiler state
+                 (saved-func   (compiler-state-current-function *state*))
+                 (saved-scope  (compiler-state-scope-level     *state*))
+                 (saved-offset (compiler-state-local-offset    *state*)))
+            ;; Install this function's stack context
+            (setf (compiler-state-current-function *state*) func-name)
+            (setf (compiler-state-scope-level      *state*) 1)
+            (setf (compiler-state-local-offset     *state*) (- frame-size))
+            (let ((new-body (cse-node body)))
+              (let ((new-frame-size (- (compiler-state-local-offset *state*))))
+                ;; Restore state
+                (setf (compiler-state-current-function *state*) saved-func)
+                (setf (compiler-state-scope-level      *state*) saved-scope)
+                (setf (compiler-state-local-offset     *state*) saved-offset)
+                ;; Return updated function node
+                (make-ast-node
+                 :type 'function
+                 :value func-name
+                 :children (list params new-body)
+                 :result-type (ast-node-result-type child)
+                 :source-loc (ast-node-source-loc child)
+                 :data (if (= new-frame-size frame-size)
+                           func-data
+                           (let ((d (copy-list func-data)))
+                             (setf (getf d :frame-size) new-frame-size)
+                             d))))))))
+    (ast-node-children ast))))
+
+;;; ===========================================================================
 ;;; AST Query Utilities
 ;;; ===========================================================================
 ;;; These utilities support testing of AST-level optimizations (e.g. CSE) by
