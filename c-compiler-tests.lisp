@@ -2273,7 +2273,7 @@ int main() {
       (let* ((asm (compile-c source :optimize t :annotate nil :optimize-size optimize-size))
              (mcode (assemble (strip-asm-comments asm) nil))
              (dmem (lr-emulator:make-dmem #x10000))
-             (emul (lr-emulator:make-emulator mcode dmem :shared-mem nil :debug nil)))
+             (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug nil)))
         (lr-emulator:run-emul emul max-cycles nil)
         (let ((result (aref (lr-emulator::processor-state-r
                              (lr-emulator:emulated-system-processor emul))
@@ -6101,6 +6101,522 @@ int main() {
     (test-cse-opportunity-three-uses)
     (test-cse-opportunity-no-duplicate)))
 
+;;; ===========================================================================
+;;; Phase 4 Volatile Tests: Local Variables and Function Calls
+;;; ===========================================================================
+
+(deftest test-local-vars-volatile ()
+  "Test: local variables with volatile inputs"
+  (check
+    (= 10 (run-and-get-result "volatile int g1 = 10; int main() { int x; x = g1; return x; }"))
+    (= 30 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20;
+int main() { int x; int y; x = g1; y = g2; return x + y; }"))))
+
+(deftest test-function-call-volatile ()
+  "Test: function calls with volatile inputs"
+  (check
+    (= 42 (run-and-get-result "volatile int g1 = 42;
+int answer() { return g1; }
+int main() { return answer(); }"))
+    (= 5 (run-and-get-result "volatile int g1 = 2; volatile int g2 = 3;
+int add(int a, int b) { return a + b; }
+int main() { return add(g1, g2); }"))))
+
+(deftest test-recursion-volatile ()
+  "Test: recursive function (factorial) with volatile input"
+  (check
+    (= 120 (run-and-get-result "volatile int g1 = 5;
+int fact(int n) {
+  if (n <= 1) return 1;
+  return n * fact(n - 1);
+}
+int main() { return fact(g1); }"
+                               :max-cycles 100000))))
+
+(deftest test-fibonacci-volatile ()
+  "Test: Fibonacci sequence with volatile input"
+  (check
+    (= 55 (run-and-get-result "volatile int g1 = 10;
+int fib(int n) {
+  if (n <= 1) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+int main() { return fib(g1); }"
+                              :max-cycles 1000000))))
+
+(deftest test-phase4-volatile ()
+  "Run Phase 4 volatile tests"
+  (combine-results
+    (test-local-vars-volatile)
+    (test-function-call-volatile)
+    (test-recursion-volatile)
+    (test-fibonacci-volatile)))
+
+;;; ===========================================================================
+;;; Phase 8 Volatile Tests: Function Parameters
+;;; ===========================================================================
+
+(deftest test-single-param-volatile ()
+  "Test: single parameter passing with volatile inputs"
+  (check
+    (= 42 (run-and-get-result "volatile int g1 = 42;
+int id(int x) { return x; }
+int main() { return id(g1); }"))
+    (result= -10 (run-and-get-result "volatile int g1 = 10;
+int neg(int x) { return -x; }
+int main() { return neg(g1); }"))
+    (= 20 (run-and-get-result "volatile int g1 = 10;
+int dbl(int x) { return x + x; }
+int main() { return dbl(g1); }"))))
+
+(deftest test-two-params-volatile ()
+  "Test: two parameter passing with volatile inputs"
+  (check
+    (= 30 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20;
+int add(int a, int b) { return a + b; }
+int main() { return add(g1, g2); }"))
+    (= 5 (run-and-get-result "volatile int g1 = 15; volatile int g2 = 10;
+int sub(int a, int b) { return a - b; }
+int main() { return sub(g1, g2); }"))
+    (= 56 (run-and-get-result "volatile int g1 = 7; volatile int g2 = 8;
+int mul(int a, int b) { return a * b; }
+int main() { return mul(g1, g2); }"))))
+
+(deftest test-three-params-volatile ()
+  "Test: three parameter passing with volatile inputs"
+  (check
+    (= 60 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20; volatile int g3 = 30;
+int sum3(int a, int b, int c) { return a + b + c; }
+int main() { return sum3(g1, g2, g3); }"))
+    (= 32 (run-and-get-result "volatile int g1 = 2; volatile int g2 = 3; volatile int g3 = 8;
+int weighted(int a, int b, int c) { return a * 1 + b * 2 + c * 3; }
+int main() { return weighted(g1, g2, g3); }"))
+    (= 5 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 5; volatile int g3 = 15;
+int min3(int a, int b, int c) {
+  int m;
+  m = a;
+  if (b < m) m = b;
+  if (c < m) m = c;
+  return m;
+}
+int main() { return min3(g1, g2, g3); }"))))
+
+(deftest test-four-params-volatile ()
+  "Test: four parameters with volatile inputs"
+  (check
+    (= 100 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20; volatile int g3 = 30; volatile int g4 = 40;
+int sum4(int a, int b, int c, int d) { return a + b + c + d; }
+int main() { return sum4(g1, g2, g3, g4); }"))
+    (= 200 (run-and-get-result "volatile int g1 = 30; volatile int g2 = 10; volatile int g3 = 50; volatile int g4 = 40;
+int calc(int a, int b, int c, int d) { return (a - b) * (c - d); }
+int main() { return calc(g1, g2, g3, g4); }"))
+    (= 24 (run-and-get-result "volatile int g1 = 2; volatile int g2 = 3; volatile int g3 = 6; volatile int g4 = 3;
+int f(int a, int b, int c, int d) { return a * b + c * d; }
+int main() { return f(g1, g2, g3, g4); }"))))
+
+(deftest test-five-plus-params-volatile ()
+  "Test: five or more parameters with volatile inputs"
+  (check
+    (= 150 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20; volatile int g3 = 30; volatile int g4 = 40; volatile int g5 = 50;
+int sum5(int a, int b, int c, int d, int e) {
+  return a + b + c + d + e;
+}
+int main() { return sum5(g1, g2, g3, g4, g5); }"
+                               :max-cycles 20000))
+    (= 210 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 20; volatile int g3 = 30; volatile int g4 = 40; volatile int g5 = 50; volatile int g6 = 60;
+int sum6(int a, int b, int c, int d, int e, int f) {
+  return a + b + c + d + e + f;
+}
+int main() { return sum6(g1, g2, g3, g4, g5, g6); }"
+                               :max-cycles 20000))))
+
+(deftest test-param-modification-volatile ()
+  "Test: pass-by-value with volatile inputs"
+  (check
+    (= 10 (run-and-get-result "volatile int g1 = 10;
+int modify(int x) {
+  x = x + 100;
+  return x;
+}
+int main() {
+  int a;
+  a = g1;
+  modify(a);
+  return a;
+}"))
+    (= 110 (run-and-get-result "volatile int g1 = 10;
+int modify(int x) {
+  x = x + 100;
+  return x;
+}
+int main() {
+  int a;
+  a = g1;
+  return modify(a);
+}"))))
+
+(deftest test-nested-calls-volatile ()
+  "Test: nested function calls with volatile inputs"
+  (check
+    (= 24 (run-and-get-result "volatile int g1 = 4;
+int dbl(int x) { return x * 2; }
+int triple(int x) { return x * 3; }
+int main() { return dbl(triple(g1)); }"))
+    (= 35 (run-and-get-result "volatile int g1 = 10; volatile int g2 = 5;
+int add(int a, int b) { return a + b; }
+int dbl(int x) { return x * 2; }
+int triple(int x) { return x * 3; }
+int main() { return add(dbl(g1), triple(g2)); }"))
+    (= 48 (run-and-get-result "volatile int g1 = 6;
+int dbl(int x) { return x * 2; }
+int main() { return dbl(dbl(dbl(g1))); }"))))
+
+(deftest test-char-params-volatile ()
+  "Test: char type parameters with volatile inputs"
+  (check
+    (= 65 (run-and-get-result "volatile int g1 = 65;
+int getval(char c) { return c; }
+int main() { return getval(g1); }"))
+    (= 10 (run-and-get-result "volatile int g1 = 75; volatile int g2 = 65;
+int diff(char a, char b) { return a - b; }
+int main() { return diff(g1, g2); }"))))
+
+(deftest test-short-params-volatile ()
+  "Test: short type parameters with volatile inputs"
+  (check
+    (= 1000 (run-and-get-result "volatile int g1 = 1000;
+int getval(short s) { return s; }
+int main() { return getval(g1); }"))
+    (= 30000 (run-and-get-result "volatile int g1 = 10000; volatile int g2 = 20000;
+int add_shorts(short a, short b) { return a + b; }
+int main() { return add_shorts(g1, g2); }"))))
+
+(deftest test-mixed-type-params-volatile ()
+  "Test: mixed type parameters with volatile inputs"
+  (check
+    (= 111 (run-and-get-result "volatile int g1 = 1; volatile int g2 = 10; volatile int g3 = 100;
+int mixed(char a, short b, int c) { return a + b + c; }
+int main() { return mixed(g1, g2, g3); }"))
+    (= 321 (run-and-get-result "volatile int g1 = 300; volatile int g2 = 1; volatile int g3 = 20;
+int mixed(int a, char b, short c) { return a + b + c; }
+int main() { return mixed(g1, g2, g3); }"))))
+
+(deftest test-phase8-params-volatile ()
+  "Run Phase 8 volatile parameter tests"
+  (combine-results
+    (test-single-param-volatile)
+    (test-two-params-volatile)
+    (test-three-params-volatile)
+    (test-four-params-volatile)
+    (test-five-plus-params-volatile)
+    (test-param-modification-volatile)
+    (test-nested-calls-volatile)
+    (test-char-params-volatile)
+    (test-short-params-volatile)
+    (test-mixed-type-params-volatile)))
+
+;;; ===========================================================================
+;;; Phase 11 Volatile Tests: Function Inlining
+;;; ===========================================================================
+
+(deftest test-inline-explicit-volatile ()
+  "Test: explicit inline keyword with volatile inputs"
+  (check
+    (= 30 (run-optimized "volatile int g1 = 10; volatile int g2 = 20;
+inline int add(int a, int b) { return a + b; }
+int main() { return add(g1, g2); }"))
+    (= 25 (run-optimized "volatile int g1 = 5;
+inline int square(int x) { return x * x; }
+int main() { return square(g1); }"))
+    (= 50 (run-optimized "volatile int g1 = 10; volatile int g2 = 15;
+inline int double_it(int x) { return x + x; }
+int main() { return double_it(g1) + double_it(g2); }"))))
+
+(deftest test-inline-auto-volatile ()
+  "Test: automatic inlining of small functions with volatile inputs"
+  (check
+    (= 42 (run-optimized "volatile int g1 = 41;
+int inc(int x) { return x + 1; }
+int main() { return inc(g1); }"))
+    (= 10 (run-optimized "volatile int g1 = 10;
+int passthru(int x) { return x; }
+int main() { return passthru(g1); }"))
+    (= 13 (run-optimized "volatile int g1 = 7;
+int add1(int x) { return x + 1; }
+int add2(int x) { return x + 2; }
+int add3(int x) { return x + 3; }
+int main() { return add1(add2(add3(g1))); }"))))
+
+(deftest test-inline-multiple-returns-volatile ()
+  "Test: inlining functions with multiple return statements with volatile inputs"
+  (check
+    (= 5 (run-optimized "volatile int g1 = -5;
+inline int my_abs(int x) {
+  if (x < 0) return -x;
+  return x;
+}
+int main() { return my_abs(g1); }"))
+    (= 10 (run-optimized "volatile int g1 = 10;
+inline int my_abs(int x) {
+  if (x < 0) return -x;
+  return x;
+}
+int main() { return my_abs(g1); }"))
+    (= 1 (run-optimized "volatile int g1 = 10; volatile int g2 = -10; volatile int g3 = 0; volatile int g4 = 5;
+inline int sign(int x) {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
+}
+int main() { return sign(g1) + sign(g2) + sign(g3) + sign(g4); }"))))
+
+(deftest test-inline-with-locals-volatile ()
+  "Test: inlining functions with local variables and volatile inputs"
+  (check
+    (= 30 (run-optimized "volatile int g1 = 10;
+inline int compute(int x) {
+  int temp;
+  temp = x * 2;
+  return temp + x;
+}
+int main() { return compute(g1); }"))
+    (= 75 (run-optimized "volatile int g1 = 10; volatile int g2 = 5;
+inline int calc(int a, int b) {
+  int sum;
+  int diff;
+  sum = a + b;
+  diff = a - b;
+  return sum * diff;
+}
+int main() { return calc(g1, g2); }" :max-cycles 50000))))
+
+(deftest test-inline-nested-calls-volatile ()
+  "Test: inlining with nested function calls and volatile inputs"
+  (check
+    (= 16 (run-optimized "volatile int g1 = 2;
+inline int square(int x) { return x * x; }
+inline int quad(int x) { return square(square(x)); }
+int main() { return quad(g1); }"))
+    (= 15 (run-optimized "volatile int g1 = 5;
+inline int add5(int x) { return x + 5; }
+inline int add10(int x) { return add5(add5(x)); }
+int main() { return add10(g1); }"))))
+
+(deftest test-inline-expression-context-volatile ()
+  "Test: inlined function in expression context with volatile inputs"
+  (check
+    (= 25 (run-optimized "volatile int g1 = 3; volatile int g2 = 4;
+inline int sq(int x) { return x * x; }
+int main() { return sq(g1) + sq(g2); }"))
+    (= 1 (run-optimized "volatile int g1 = 3; volatile int g2 = 4;
+inline int sq(int x) { return x * x; }
+int main() { if (sq(g1) < sq(g2)) return 1; return 0; }"))))
+
+(deftest test-phase11-inlining-volatile ()
+  "Run Phase 11 volatile inlining tests"
+  (combine-results
+    (test-inline-explicit-volatile)
+    (test-inline-auto-volatile)
+    (test-inline-multiple-returns-volatile)
+    (test-inline-with-locals-volatile)
+    (test-inline-nested-calls-volatile)
+    (test-inline-expression-context-volatile)))
+
+;;; ===========================================================================
+;;; Phase 14 Volatile Tests: Conditional (Ternary) Operator
+;;; ===========================================================================
+
+(deftest test-conditional-with-vars-volatile ()
+  "Test: ternary with volatile conditions and values"
+  (check
+    (= 100 (run-and-get-result "volatile int g1 = 5; int main() { return g1 ? 100 : 200; }"))
+    (= 200 (run-and-get-result "volatile int g1 = 0; int main() { return g1 ? 100 : 200; }"))
+    (= 50 (run-and-get-result "volatile int ga = 50; volatile int gb = 60; int main() { return 1 ? ga : gb; }"))
+    (= 60 (run-and-get-result "volatile int ga = 50; volatile int gb = 60; int main() { return 0 ? ga : gb; }"))))
+
+(deftest test-conditional-comparison-volatile ()
+  "Test: ternary with volatile values in comparison (max/min patterns)"
+  (check
+    (= 5 (run-and-get-result "volatile int ga = 5; volatile int gb = 3; int main() { return (ga > gb) ? ga : gb; }"))
+    (= 7 (run-and-get-result "volatile int ga = 2; volatile int gb = 7; int main() { return (ga > gb) ? ga : gb; }"))
+    (= 3 (run-and-get-result "volatile int ga = 5; volatile int gb = 3; int main() { return (ga < gb) ? ga : gb; }"))
+    (= 2 (run-and-get-result "volatile int ga = 2; volatile int gb = 7; int main() { return (ga < gb) ? ga : gb; }"))
+    (= 1 (run-and-get-result "volatile int gx = 10; int main() { return (gx == 10) ? 1 : 0; }"))
+    (= 0 (run-and-get-result "volatile int gx = 5; int main() { return (gx == 10) ? 1 : 0; }"))))
+
+(deftest test-conditional-nested-volatile ()
+  "Test: nested ternary with volatile values"
+  (check
+    (= 10 (run-and-get-result "volatile int gx = 1; int main() { return gx == 1 ? 10 : gx == 2 ? 20 : 30; }"))
+    (= 20 (run-and-get-result "volatile int gx = 2; int main() { return gx == 1 ? 10 : gx == 2 ? 20 : 30; }"))
+    (= 30 (run-and-get-result "volatile int gx = 3; int main() { return gx == 1 ? 10 : gx == 2 ? 20 : 30; }"))
+    (= 40 (run-and-get-result "volatile int gx = 4;
+int main() {
+    return gx == 1 ? 10 : gx == 2 ? 20 : gx == 3 ? 30 : 40;
+}"))))
+
+(deftest test-conditional-in-expr-volatile ()
+  "Test: ternary as subexpression with volatile values"
+  (check
+    (= 12 (run-and-get-result "volatile int ga = 3; int main() { return (ga > 0 ? 10 : 5) + (ga < 5 ? 2 : 1); }"))
+    (= 100 (run-and-get-result "volatile int gflag = 1; int main() { int x; x = gflag ? 100 : 200; return x; }"))))
+
+(deftest test-conditional-with-calls-volatile ()
+  "Test: ternary with function calls and volatile conditions"
+  (check
+    (= 10 (run-and-get-result "volatile int gflag = 1;
+int double_it(int x) { return x * 2; }
+int triple_it(int x) { return x * 3; }
+int main() { return gflag ? double_it(5) : triple_it(5); }"))
+    (= 15 (run-and-get-result "volatile int gflag = 0;
+int double_it(int x) { return x * 2; }
+int triple_it(int x) { return x * 3; }
+int main() { return gflag ? double_it(5) : triple_it(5); }"))
+    (= 100 (run-and-get-result "volatile int gx = 5;
+int is_positive(int x) { return x > 0; }
+int main() { return is_positive(gx) ? 100 : 200; }"))
+    (= 200 (run-and-get-result "volatile int gx = -5;
+int is_positive(int x) { return x > 0; }
+int main() { return is_positive(gx) ? 100 : 200; }"))))
+
+(deftest test-phase14-conditional-volatile ()
+  "Run Phase 14 volatile conditional operator tests"
+  (combine-results
+    (test-conditional-with-vars-volatile)
+    (test-conditional-comparison-volatile)
+    (test-conditional-nested-volatile)
+    (test-conditional-in-expr-volatile)
+    (test-conditional-with-calls-volatile)))
+
+;;; ===========================================================================
+;;; Phase 22 Volatile Tests: goto and unions
+;;; ===========================================================================
+
+(deftest test-union-basic-volatile ()
+  "Test: basic union functionality with volatile inputs"
+  (check
+    (= 65 (run-and-get-result "volatile int g1 = 0x41;
+union Data { int i; char c; };
+int main() {
+  union Data d;
+  d.i = g1;
+  return d.c;
+}"))
+    (= 255 (run-and-get-result "volatile int g1 = 255;
+union Data { int i; unsigned char c; };
+int main() {
+  union Data d;
+  d.i = g1;
+  return d.c;
+}"))))
+
+(deftest test-goto-basic-volatile ()
+  "Test: goto statement with volatile inputs"
+  (check
+    (= 10 (run-and-get-result "volatile int g1 = 10;
+int main() {
+  int i = 0;
+loop:
+  i++;
+  if (i < g1) goto loop;
+  return i;
+}"))
+    (= 3 (run-and-get-result "volatile int g1 = 2;
+int main() {
+  int x = 0;
+  goto first;
+second:
+  x++;
+  goto done;
+first:
+  x = g1;
+  goto second;
+done:
+  return x;
+}"))))
+
+(deftest test-goto-nested-volatile ()
+  "Test: goto with nested blocks and volatile inputs"
+  (check
+    (= 5 (run-and-get-result "volatile int g1 = 5;
+int main() {
+  int i;
+  for (i = 0; i < 100; i++) {
+    if (i == g1) goto out;
+  }
+out:
+  return i;
+}"))))
+
+(deftest test-phase22-new-features-volatile ()
+  "Run Phase 22 volatile tests (goto and unions with volatile inputs)"
+  (combine-results
+    (test-union-basic-volatile)
+    (test-goto-basic-volatile)
+    (test-goto-nested-volatile)))
+
+;;; ===========================================================================
+;;; Phase 28 Volatile Tests: Loop Unrolling with volatile bounds
+;;; ===========================================================================
+;;; These tests use volatile bounds to prevent loop unrolling, verifying
+;;; that the same computation is still correct via the normal loop path.
+
+(deftest test-loop-unroll-sum-volatile ()
+  "Test loop with volatile bound (forces normal loop, not unrolled)"
+  (check "sum loop with volatile bound"
+    (= 15 (run-and-get-result "volatile int gn = 5;
+int main() {
+    int sum = 0;
+    for (int i = 1; i <= gn; i++) {
+        sum += i;
+    }
+    return sum;
+}"))))
+
+(deftest test-loop-unroll-step-volatile ()
+  "Test loop with step > 1 and volatile bound"
+  (check "loop with step 2 and volatile bound"
+    (= 12 (run-and-get-result "volatile int gn = 8;
+int main() {
+    int sum = 0;
+    for (int i = 0; i < gn; i += 2) {
+        sum += i;
+    }
+    return sum;
+}"))))
+
+(deftest test-loop-unroll-descending-volatile ()
+  "Test descending loop with volatile bound"
+  (check "descending loop with volatile bound"
+    (= 10 (run-and-get-result "volatile int gn = 4;
+int main() {
+    int sum = 0;
+    for (int i = gn; i > 0; i--) {
+        sum += i;
+    }
+    return sum;
+}"))))
+
+(deftest test-loop-unroll-expression-volatile ()
+  "Test loop with expression in body and volatile bound"
+  (check "loop with multiply and volatile bound"
+    (= 20 (run-and-get-result "volatile int gn = 5;
+int arr[5];
+int main() {
+    for (int i = 0; i < gn; i++) {
+        arr[i] = i * 2;
+    }
+    return arr[0] + arr[1] + arr[2] + arr[3] + arr[4];
+}"))))
+
+(deftest test-phase28-loop-unrolling-volatile ()
+  "Run Phase 28 volatile loop tests (volatile bounds prevent unrolling)"
+  (combine-results
+    (test-loop-unroll-sum-volatile)
+    (test-loop-unroll-step-volatile)
+    (test-loop-unroll-descending-volatile)
+    (test-loop-unroll-expression-volatile)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -6111,17 +6627,21 @@ int main() {
     (test-phase3)
     (test-phase3-volatile)
     (test-phase4)
+    (test-phase4-volatile)
     (test-phase5)
     (test-phase6)
     (test-phase7)
     (test-phase7-volatile)
     (test-phase8-params)
+    (test-phase8-params-volatile)
     (test-phase9-pointers)
     (test-phase10-constant-folding)
     (test-phase11-inlining)
+    (test-phase11-inlining-volatile)
     (test-phase12-reg-preservation)
     (test-phase13-scope)
     (test-phase14-conditional)
+    (test-phase14-conditional-volatile)
     (test-phase15-enum)
     (test-phase16-c99-features)
     (test-phase17-struct)
@@ -6130,12 +6650,14 @@ int main() {
     (test-phase20-typedef)
     (test-phase21-regpressure)
     (test-phase22-new-features)
+    (test-phase22-new-features-volatile)
     (test-phase23-initializers)
     (test-phase24-integer-suffixes)
     (test-phase25-multidim-arrays)
     (test-phase26-longlong)
     (test-phase27-memory-inspection)
     (test-phase28-loop-unrolling)
+    (test-phase28-loop-unrolling-volatile)
     (test-phase29-cse-infrastructure)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
