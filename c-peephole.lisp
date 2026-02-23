@@ -20,6 +20,11 @@
 ;;; Maximum passes to prevent infinite loops
 (defparameter *peephole-max-passes* 10)
 
+;;; Output-buffer for backward scan: bound to the (reversed) result list
+;;; in apply-peephole-rules so backward-scan helpers see already-emitted
+;;; instructions rather than the original (possibly stale) code-vec entries.
+(defvar *peephole-output-so-far* nil)
+
 ;;; ===========================================================================
 ;;; Pattern Matching
 ;;; ===========================================================================
@@ -163,6 +168,7 @@
                 (incf i))
                ;; Try each rule
                (t
+                (setf *peephole-output-so-far* result)
                 (let ((matched nil))
                   (dolist (rule *peephole-rules*)
                     (multiple-value-bind (did-match consumed replacement)
@@ -281,6 +287,58 @@
                ((find #\A opname)
                 (return-from A-dead-before-next-write-p nil))
                ;; Instruction not involving A: skip
+               (t nil)))
+        finally (return nil)))
+
+(defun A-already-equals-reg-p (r)
+  "Return T if A provably holds the same value as register R at the current
+   peephole position, by scanning backward through *peephole-output-so-far*
+   (the already-emitted instructions, most-recent first) to find a prior
+   (Rx=A r) with no intervening write to A or r.
+
+   Using the output buffer (rather than the original code-vec) ensures we
+   see only instructions that were actually emitted — not instructions that
+   were consumed and replaced by an earlier peephole rule in this same pass.
+
+   Conservative: stops (returns NIL) at labels, branches, calls, or any
+   instruction that writes A or r."
+  (loop for instr in *peephole-output-so-far*
+        when (and (consp instr) (symbolp (car instr)))
+        do (let* ((opname (symbol-name (car instr)))
+                  (oplen  (length opname))
+                  (last-arg (when (cdr instr) (car (last (cdr instr))))))
+             (cond
+               ;; Rx=A r: A was stored into r here — A still equals r
+               ((and (string= opname "RX=A") (eq last-arg r))
+                (return-from A-already-equals-reg-p t))
+               ;; Any other Rx=... instruction writing r: r has a new value
+               ((and (>= oplen 3) (string= opname "RX=" :end1 3)
+                     (eq last-arg r))
+                (return-from A-already-equals-reg-p nil))
+               ;; POP-R r: r overwritten from stack
+               ((and (string= opname "POP-R") (eq last-arg r))
+                (return-from A-already-equals-reg-p nil))
+               ;; Any instruction whose name starts with "A=": writes A
+               ((and (>= oplen 2) (char= (char opname 0) #\A)
+                     (char= (char opname 1) #\=))
+                (return-from A-already-equals-reg-p nil))
+               ;; POP-A: writes A from stack
+               ((string= opname "POP-A")
+                (return-from A-already-equals-reg-p nil))
+               ;; Labels: potential jump target — stop conservatively
+               ((string= opname "LABEL")
+                (return-from A-already-equals-reg-p nil))
+               ;; Branches and calls: stop conservatively
+               ((or (string= opname "JSR")
+                    (and (>= oplen 1) (char= (char opname 0) #\J)))
+                (return-from A-already-equals-reg-p nil))
+               ;; Comments and data directives: skip
+               ((or (string= opname "COMMENT")
+                    (string= opname "LALIGN-DWORD")
+                    (string= opname "ADWORD")
+                    (string= opname "ALIGN-DWORD"))
+                nil)
+               ;; Everything else (Rx=A other-r, M[A]=Rx, Push-R, etc.): skip
                (t nil)))
         finally (return nil)))
 
@@ -568,20 +626,22 @@
                             (list (list 'Rx=M[A] reg2))))))
       *peephole-rules*)
 
-;;; Rule 22: Dead A load — general scan-based elimination
-;;; (A=Rx ?r) -> {} when A is provably overwritten before being read.
-;;; Uses A-dead-before-next-write-p to scan forward through non-A instructions
-;;; and labels. This handles:
-;;;   - Consecutive A loads:           (A=Rx r1)(A=Rx r2)         -> (A=Rx r2)
-;;;   - Dead A before immediate + A:   (A=Rx r1)(Rx= v r2)(A=Rx r3) -> (Rx= v r2)(A=Rx r3)
-;;;   - Dead A before label + A:       (A=Rx r1)(non-A...)(label)(A=Rx r2) -> ...
+;;; Rule 22: Dead or redundant A load
+;;; (A=Rx ?r) -> {} in two cases:
+;;;   1. Forward scan: A is provably overwritten before being read.
+;;;      Handles consecutive A loads, dead A before label, etc.
+;;;   2. Backward scan: A already equals r because a prior (Rx=A r) stored A
+;;;      into r with no intervening writes to A or r.
+;;;      Handles: (Rx=A r)(non-A/r instrs)(A=Rx r) -> drop the reload.
 (push (make-peephole-rule
-       :name "dead-A-load"
+       :name "dead-or-redundant-A-load"
        :pattern '((A=Rx ?r))
        :replacement (lambda (bindings code-vec end-idx)
-                      (if (A-dead-before-next-write-p code-vec end-idx)
-                          nil
-                          (list (list 'A=Rx (getf bindings :r))))))
+                      (let ((r (getf bindings :r)))
+                        (if (or (A-dead-before-next-write-p code-vec end-idx)
+                                (A-already-equals-reg-p r))
+                            nil
+                            (list (list 'A=Rx r))))))
       *peephole-rules*)
 
 ;;; Reverse the rules list so higher-priority rules are tried first
