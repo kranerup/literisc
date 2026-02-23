@@ -52,7 +52,10 @@ test functions or use `check' to run individual test cases."
         (if (gethash test-name *all-tests*)
             (progn
               (format t "Running test: ~a~%" test-name)
-              (if (funcall test-name)
+              (if (handler-case (funcall test-name)
+                    (error (e)
+                      (format t "~%FAIL (error) ... ~a~%  ~a~%" test-name e)
+                      nil))
                   (incf pass-count)
                   (incf fail-count)))
             (format t "Test not found: ~a~%" test-name)))

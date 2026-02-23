@@ -91,12 +91,14 @@
                 (push (cons config-name result) results)
                 (if (null first-result)
                     (setf first-result result)
-                    ;; Verify results match
-                    (unless (eql result first-result)
-                      (format t "~%WARNING: Result mismatch between configurations!~%")
-                      (format t "  :none result: ~a~%" (cdr (assoc :none results)))
-                      (format t "  :optimize result: ~a~%" (cdr (assoc :optimize results)))
-                      (format t "  :size result: ~a~%" (cdr (assoc :size results)))))))
+                    ;; Verify results match — mismatch is a hard failure.
+                    ;; Normalize to signed 32-bit before comparing so that the
+                    ;; unsigned (e.g. 4294967295) and signed (e.g. -1) representations
+                    ;; of the same 32-bit value are not considered a mismatch.
+                    (unless (eql (normalize-result result) (normalize-result first-result))
+                      (error "Config mismatch: :none=~a :optimize=~a"
+                             (cdr (assoc :none results))
+                             (cdr (assoc :optimize results)))))))
             first-result))
     (error (e)
       ;; Try to save on error
@@ -117,6 +119,14 @@
 (defun result= (expected actual)
   "Compare expected vs actual, handling signed 32-bit values"
   (= expected (to-signed-32 actual)))
+
+(defun normalize-result (r)
+  "Normalize a result to signed 32-bit for inter-config comparison.
+   Returns nil unchanged, normalizes large positive integers (unsigned representation
+   of negative values) to their signed equivalent."
+  (if (and r (integerp r) (>= r 0))
+      (to-signed-32 r)
+      r))
 
 ;;; Memory inspection test helpers
 
