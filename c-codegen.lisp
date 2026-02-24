@@ -1441,6 +1441,14 @@
       (setf *local-reg-count* reg-count-from-table)
       (setf (compiler-state-local-reg-count *state*) reg-count-from-table))
 
+    ;; Pre-expand frame-size to include all inline-expr variable allocations.
+    ;; This ensures that local variable initialization addresses (computed as
+    ;; offset + *frame-size*) remain consistent even after generate-inline-expr
+    ;; allocates its own stack vars and updates *frame-size* later.
+    (let ((inline-stack-bytes (sum-inline-var-sizes body)))
+      (when (> inline-stack-bytes 0)
+        (incf *frame-size* inline-stack-bytes)))
+
     ;; Enter function scope
     (enter-scope)
 
@@ -3647,6 +3655,31 @@
       (otherwise
        (mapcan #'collect-var-decls (ast-node-children node))))))
 
+(defun sum-inline-var-sizes (node &optional (seen (make-hash-table :test 'equal)))
+  "Conservatively estimate total stack bytes that will be allocated for all
+   inline-expr variables in the subtree.  Assumes all inline vars go to stack
+   (over-estimates when some are promotable to registers, but is always safe)."
+  (let ((total 0))
+    (when (and node (ast-node-p node))
+      (when (eq (ast-node-type node) 'inline-expr)
+        ;; Count init-decls vars
+        (let ((init-decls (first (ast-node-children node))))
+          (dolist (decl (ast-node-children init-decls))
+            (when (and (ast-node-p decl) (eq (ast-node-type decl) 'var-decl))
+              (unless (gethash (ast-node-value decl) seen)
+                (setf (gethash (ast-node-value decl) seen) t)
+                (incf total (type-size (or (ast-node-result-type decl) (make-int-type))))))))
+        ;; Count body vars (collect-var-decls recurses through nested inline-exprs)
+        (let ((body (second (ast-node-children node))))
+          (dolist (decl (collect-var-decls body))
+            (unless (gethash (ast-node-value decl) seen)
+              (setf (gethash (ast-node-value decl) seen) t)
+              (incf total (type-size (or (ast-node-result-type decl) (make-int-type))))))))
+      ;; Recurse into children (handles nested inline-exprs; seen prevents double-counting)
+      (dolist (child (ast-node-children node))
+        (incf total (sum-inline-var-sizes child seen))))
+    total))
+
 (defun generate-inline-expr (node)
   "Generate code for an inlined function expression.
    The inline-expr node contains:
@@ -3670,15 +3703,16 @@
       (when (eq (ast-node-type decl) 'var-decl)
         (let* ((name (ast-node-value decl))
                (var-type (or (ast-node-result-type decl) (make-int-type))))
-          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
-              (progn
-                (add-symbol name var-type :register *local-reg-count*)
-                (incf *local-reg-count*))
-              (let* ((current-offset (compiler-state-local-offset *state*))
-                     (new-offset (- current-offset (type-size var-type))))
-                (setf (compiler-state-local-offset *state*) new-offset)
-                (add-symbol name var-type :local new-offset)))
-          (push name inline-vars))))
+          (unless (lookup-symbol name)  ; don't re-register if already done
+            (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
+                (progn
+                  (add-symbol name var-type :register *local-reg-count*)
+                  (incf *local-reg-count*))
+                (let* ((current-offset (compiler-state-local-offset *state*))
+                       (new-offset (- current-offset (type-size var-type))))
+                  (setf (compiler-state-local-offset *state*) new-offset)
+                  (add-symbol name var-type :local new-offset)))
+            (push name inline-vars)))))
 
     ;; Also register any local variables declared in the body
     ;; (these were renamed during the inline transformation)

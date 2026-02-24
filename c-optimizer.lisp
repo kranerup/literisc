@@ -659,6 +659,16 @@
                 (can-reach callee target call-graph visited))
               callees))))
 
+(defun has-static-locals-p (node)
+  "Return T if node or any descendant contains a static local var-decl."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      (var-decl
+       (or (eq (ast-node-data node) :static)
+           (some #'has-static-locals-p (ast-node-children node))))
+      (otherwise
+       (some #'has-static-locals-p (ast-node-children node))))))
+
 (defun can-inline-function (func-name func-node depth)
   "Check if a function can be inlined"
   (when (null func-node)
@@ -669,6 +679,9 @@
       ((> depth *inline-max-depth*) nil)
       ;; Don't inline recursive functions
       ((gethash func-name *recursive-functions*) nil)
+      ;; Don't inline functions with static locals: they have persistent state
+      ;; that cannot be correctly modeled by renaming variables in the inlined body
+      ((has-static-locals-p func-node) nil)
       ;; Inline if explicitly marked
       ((getf data :inline-hint) t)
       ;; Auto-inline small functions when optimizing
@@ -677,6 +690,40 @@
               (<= stmt-count *inline-stmt-threshold*)))
        t)
       (t nil))))
+
+(defun parameter-is-modified-p (name node)
+  "Return T if 'name' appears as an lvalue target in any assignment
+   or increment/decrement expression within 'node'."
+  (when (and node (ast-node-p node))
+    (case (ast-node-type node)
+      ;; Simple and compound assignments (=, +=, -=, etc.)
+      (assign
+       (let ((lhs (first (ast-node-children node))))
+         (or (and (ast-node-p lhs)
+                  (eq (ast-node-type lhs) 'var-ref)
+                  (string= (ast-node-value lhs) name))
+             (some (lambda (c) (parameter-is-modified-p name c))
+                   (ast-node-children node)))))
+      ;; Pre-increment/decrement: ++x / --x (unary-op with "++" or "--")
+      (unary-op
+       (when (member (ast-node-value node) '("++" "--") :test #'string=)
+         (let ((operand (first (ast-node-children node))))
+           (or (and (ast-node-p operand)
+                    (eq (ast-node-type operand) 'var-ref)
+                    (string= (ast-node-value operand) name))
+               (some (lambda (c) (parameter-is-modified-p name c))
+                     (ast-node-children node))))))
+      ;; Post-increment/decrement: x++ / x-- (post-op node)
+      (post-op
+       (let ((operand (first (ast-node-children node))))
+         (or (and (ast-node-p operand)
+                  (eq (ast-node-type operand) 'var-ref)
+                  (string= (ast-node-value operand) name))
+             (some (lambda (c) (parameter-is-modified-p name c))
+                   (ast-node-children node)))))
+      (otherwise
+       (some (lambda (c) (parameter-is-modified-p name c))
+             (ast-node-children node))))))
 
 (defun gen-inline-suffix ()
   "Generate a unique suffix for inlined variable names"
@@ -789,6 +836,45 @@
                                (ast-node-source-loc node))
            node)))
 
+    ;; Block nodes: process children sequentially so that a var-decl that shadows
+    ;; a constant binding prevents that binding from being substituted into
+    ;; subsequent siblings (C scoping rules).
+    (block
+     (let ((current-bindings const-bindings)
+           (new-children nil))
+       (dolist (child (ast-node-children node))
+         ;; Process this child with the current bindings
+         (let ((processed (substitute-constants-in-node child current-bindings)))
+           (push processed new-children)
+           ;; If this child declares a variable that shadows a constant binding,
+           ;; create new bindings without that name for subsequent siblings.
+           ;; Declarations appear as var-decl directly or wrapped in decl-list.
+           (let ((decl-name
+                   (cond
+                     ;; Direct var-decl child
+                     ((and (ast-node-p processed)
+                           (eq (ast-node-type processed) 'var-decl))
+                      (ast-node-value processed))
+                     ;; Declaration wrapped in decl-list (common in parsed C)
+                     ((and (ast-node-p processed)
+                           (eq (ast-node-type processed) 'decl-list))
+                      (let ((inner (first (ast-node-children processed))))
+                        (when (and (ast-node-p inner)
+                                   (eq (ast-node-type inner) 'var-decl))
+                          (ast-node-value inner))))
+                     (t nil))))
+             (when (and decl-name (gethash decl-name current-bindings))
+               (let ((new-bindings (make-hash-table :test 'equal)))
+                 (maphash (lambda (k v) (setf (gethash k new-bindings) v)) current-bindings)
+                 (remhash decl-name new-bindings)
+                 (setf current-bindings new-bindings))))))
+       (make-ast-node :type 'block
+                      :value (ast-node-value node)
+                      :children (nreverse new-children)
+                      :result-type (ast-node-result-type node)
+                      :source-loc (ast-node-source-loc node)
+                      :data (ast-node-data node))))
+
     ;; Recursively process children for other nodes
     (otherwise
      (make-ast-node :type (ast-node-type node)
@@ -865,10 +951,14 @@
                  ((is-constant-node arg)
                   (setf (gethash param-name const-bindings) (get-constant-value arg)))
                  ;; Simple var-ref argument - rename parameter to argument variable
-                 ;; This avoids creating unnecessary temp variables for simple cases
+                 ;; ONLY if the parameter is never assigned to in the function body.
+                 ;; If the parameter is modified (e.g., x = x + 100), renaming would
+                 ;; make the body write back to the caller's variable, breaking
+                 ;; pass-by-value semantics.
                  ((and (ast-node-p arg)
                        (eq (ast-node-type arg) 'var-ref)
-                       (ast-node-value arg))
+                       (ast-node-value arg)
+                       (not (parameter-is-modified-p param-name body)))
                   (setf (gethash param-name renames) (ast-node-value arg)))
                  ;; Complex expression - create temp variable to evaluate once
                  (t
@@ -1081,29 +1171,46 @@
     (return-from eliminate-dead-code node))
 
   (case (ast-node-type node)
-    ;; For blocks and decl-lists, filter out dead declarations
-    ((block decl-list)
+    ;; For block nodes, filter out dead decl-list children.
+    ;; A decl-list is kept if ANY of its var-decls is used/has-side-effects.
+    ;; (Checking all var-decls, not just the first, avoids dropping needed vars
+    ;; like `e` in `int a=1,b=2,c=3,d=4,e=5` when only a,b,c,d are DCE'd.)
+    (block
      (let ((live-children
              (loop for child in (ast-node-children node)
-                   ;; Keep non-var-decl nodes
-                   when (or (not (ast-node-p child))
-                            (not (eq (ast-node-type child) 'decl-list))
-                            ;; For decl-list, check if var-decl inside is used
-                            (let ((inner (first (ast-node-children child))))
-                              (or (not (ast-node-p inner))
-                                  (not (eq (ast-node-type inner) 'var-decl))
-                                  ;; Keep if variable is used
-                                  (gethash (ast-node-value inner) used)
-                                  ;; Keep if has address taken
-                                  (is-address-taken (ast-node-value inner))
-                                  ;; Keep if initializer has side effects
-                                  (has-side-effects (first (ast-node-children inner))))))
+                   when (cond
+                          ((not (ast-node-p child)) t)
+                          ;; For decl-list child: keep if ANY var-decl inside is needed
+                          ((eq (ast-node-type child) 'decl-list)
+                           (some (lambda (inner)
+                                   (or (not (ast-node-p inner))
+                                       (not (eq (ast-node-type inner) 'var-decl))
+                                       ;; Keep if variable is used
+                                       (gethash (ast-node-value inner) used)
+                                       ;; Keep if has address taken
+                                       (is-address-taken (ast-node-value inner))
+                                       ;; Keep if initializer has side effects
+                                       (has-side-effects (first (ast-node-children inner)))))
+                                 (ast-node-children child)))
+                          ;; All other block children: keep
+                          (t t))
                    collect (eliminate-dead-code child used))))
-       (make-ast-node :type (ast-node-type node)
+       (make-ast-node :type 'block
                       :value (ast-node-value node)
                       :children live-children
                       :result-type (ast-node-result-type node)
                       :source-loc (ast-node-source-loc node))))
+
+    ;; For decl-list nodes, recurse into children without filtering individual
+    ;; var-decls. (Inline-expr init-decls are decl-list nodes and must be
+    ;; preserved intact; filtering happens at block level above.)
+    (decl-list
+     (make-ast-node :type 'decl-list
+                    :value (ast-node-value node)
+                    :children (mapcar (lambda (c) (eliminate-dead-code c used))
+                                      (ast-node-children node))
+                    :result-type (ast-node-result-type node)
+                    :source-loc (ast-node-source-loc node)))
 
     ;; Recursively process other nodes
     (otherwise

@@ -318,9 +318,12 @@
                ;; POP-R r: r overwritten from stack
                ((and (string= opname "POP-R") (eq last-arg r))
                 (return-from A-already-equals-reg-p nil))
-               ;; Any instruction whose name starts with "A=": writes A
+               ;; Any instruction that writes A: name starts with "A=" or "A+"
+               ;; This covers A=RX, A=A<<1, A=-A (start with "A=")
+               ;; and A+=RX (starts with "A+", also modifies A).
                ((and (>= oplen 2) (char= (char opname 0) #\A)
-                     (char= (char opname 1) #\=))
+                     (or (char= (char opname 1) #\=)
+                         (char= (char opname 1) #\+)))
                 (return-from A-already-equals-reg-p nil))
                ;; POP-A: writes A from stack
                ((string= opname "POP-A")
@@ -433,19 +436,26 @@
 ;;; we can just load directly to target.
 ;;; NOTE: When r1 == r2, the Rx=A is redundant but A=Rx is still needed
 ;;; because A may be used later (e.g., for M[A]=Rx). In that case, keep A=Rx.
+;;; NOTE: When r1 != r2, we must also verify r1 is dead after the pattern.
+;;; If r1 is still live (e.g. it's a variable read later), dropping (Rx= v r1)
+;;; would leave r1 uninitialized.
 (push (make-peephole-rule
        :name "immediate-through-temp"
        :pattern '((Rx= ?v ?r1) (A=Rx ?r1) (Rx=A ?r2))
        :replacement (lambda (bindings code-vec end-idx)
-                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :r1))
                             (reg2 (getf bindings :r2))
                             (val (getf bindings :v)))
                         (if (eq reg1 reg2)
                             ;; r1 == r2: keep the A=Rx since A may be used later
                             (list (list 'Rx= val reg1) (list 'A=Rx reg1))
-                            ;; r1 != r2: safe to optimize away
-                            (list (list 'Rx= val reg2))))))
+                            ;; r1 != r2: only safe if both A and r1 are dead after
+                            ;; the pattern. A is dead = we can drop the A=Rx load.
+                            ;; r1 is dead = we can drop the Rx= v r1 store entirely.
+                            (if (and (A-dead-before-next-write-p code-vec end-idx)
+                                     (not (reg-read-after-p reg1 code-vec end-idx)))
+                                (list (list 'Rx= val reg2))
+                                :no-match)))))
       *peephole-rules*)
 
 ;;; Rule 11: Small immediate load through temp register
@@ -612,18 +622,22 @@
 ;;; target register, we can load directly into the target register.
 ;;; NOTE: When r1 == r2, this rule returns nil to indicate no match, allowing
 ;;; rule 20 to handle that case.
+;;; NOTE: When r1 != r2, we must verify r1 is dead after the pattern. If r1
+;;; is still live (e.g. it holds a variable read later), dropping (Rx=M[A] r1)
+;;; would leave r1 with a stale/wrong value.
 (push (make-peephole-rule
        :name "load-through-temp-to-target"
        :pattern '((Rx=M[A] ?r1) (A=Rx ?r1) (Rx=A ?r2))
        :replacement (lambda (bindings code-vec end-idx)
-                      (declare (ignore code-vec end-idx))
                       (let ((reg1 (getf bindings :R1))
                             (reg2 (getf bindings :R2)))
                         (if (eq reg1 reg2)
                             ;; Same register - return :no-match to let rule 20 handle it
                             :no-match
-                            ;; Different registers - load directly into target
-                            (list (list 'Rx=M[A] reg2))))))
+                            ;; Different registers - only safe if r1 is dead after
+                            (if (not (reg-read-after-p reg1 code-vec end-idx))
+                                (list (list 'Rx=M[A] reg2))
+                                :no-match)))))
       *peephole-rules*)
 
 ;;; Rule 22: Dead or redundant A load
