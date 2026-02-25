@@ -1441,6 +1441,16 @@
       (setf *local-reg-count* reg-count-from-table)
       (setf (compiler-state-local-reg-count *state*) reg-count-from-table))
 
+    ;; Reset local-offset so generate-inline-expr allocates inline vars from the
+    ;; correct position (right below the function's own locals).
+    ;; compiler-state-local-offset carries over from the previous function's codegen
+    ;; and may be more negative than this function's frame-size.  Without the reset,
+    ;; generate-inline-expr would allocate vars below that stale offset, making
+    ;; "needed" exceed the pre-expanded *frame-size* and growing *frame-size* AFTER
+    ;; *param-save-offset* is set — causing body code and prologue to disagree on
+    ;; where parameters are saved.
+    (setf (compiler-state-local-offset *state*) (- *frame-size*))
+
     ;; Pre-expand frame-size to include all inline-expr variable allocations.
     ;; This ensures that local variable initialization addresses (computed as
     ;; offset + *frame-size*) remain consistent even after generate-inline-expr
@@ -1471,6 +1481,15 @@
 
         ;; Register parameters in symbol table for body generation
         (register-parameters params)
+
+        ;; Set param-save-offset now so that non-leaf parameter load/store
+        ;; in the body code uses the same offset that the prologue will use.
+        ;; (Prologue also sets this, but only after body is generated.)
+        ;; Note: if the allocator needs spills (spill-needed condition), the body
+        ;; is regenerated in non-virtual-reg mode; local-offset is reset again
+        ;; before that regeneration so *param-save-offset* stays consistent.
+        (unless *is-leaf-function*
+          (setf *param-save-offset* *frame-size*))
 
         ;; Generate body (with virtual registers if enabled)
         (if body-ends-with-return
@@ -1532,6 +1551,13 @@
               (exit-scope)
               (enter-scope)
               (register-parameters params)
+              ;; Reset local-offset so generate-inline-expr allocates inline vars
+              ;; from the correct position (right below this function's own locals).
+              ;; The first body gen left local-offset at -(func-frame + actual-inline),
+              ;; which would cause a second round of generate-inline-expr to allocate
+              ;; further down, growing *frame-size* and shifting *param-save-offset*.
+              (setf (compiler-state-local-offset *state*)
+                    (- (or (getf func-data :frame-size) 0)))
               ;; Regenerate body
               (if body-ends-with-return
                   (generate-body-with-final-return body)
@@ -2595,6 +2621,9 @@
                                (get-dereferenced-type base-type) base-type))
               (member (lookup-struct-member struct-type member-name)))
          (when member (struct-member-type member))))
+      (post-op
+       ;; Post-increment/decrement: yields the original value, same type as operand
+       (get-expression-type (first (ast-node-children node))))
       (call
        ;; Function call - get return type from callee's type
        (let* ((callee (first (ast-node-children node))))
@@ -3152,7 +3181,16 @@
            (:parameter
             (let ((idx (sym-entry-offset sym)))
               (if (< idx 4)
-                  (emit `(Rx=A ,(nth idx *param-regs*)))
+                  (if *is-leaf-function*
+                      ;; Leaf: parameter stays in P-register
+                      (emit `(Rx=A ,(nth idx *param-regs*)))
+                      ;; Non-leaf: parameter is saved on stack; update the stack slot
+                      (let ((offset (+ *param-save-offset* (* idx 4)))
+                            (value-reg (alloc-temp-reg)))
+                        (emit `(Rx=A ,value-reg))
+                        (emit `(A=Rx SP))
+                        (emit `(M[A+n]=Rx ,offset ,value-reg))
+                        (free-temp-reg value-reg)))
                   (compiler-error "Cannot store to stack parameter"))))))))
     (unary-op
      ;; *ptr = value - need to determine element type from pointer
@@ -3223,6 +3261,9 @@
                              :pointer-level (1- (type-desc-pointer-level var-type))
                              :size (type-desc-size var-type)
                              :unsigned-p (type-desc-unsigned-p var-type)))))))
+    (post-op
+     ;; Post-increment on a pointer: delegate to the inner operand
+     (get-lvalue-type (first (ast-node-children node))))
     (otherwise nil)))
 
 (defun get-subscript-element-type (node)

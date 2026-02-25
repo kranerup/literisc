@@ -187,6 +187,27 @@
   (let ((val (cdr (assoc label mem-alist :test #'string-equal))))
     (if (listp val) val (list val))))
 
+(defun run-and-capture-output (source &key (max-cycles 50000))
+  "Compile and run C source, capturing characters emitted via volatile I/O.
+   Runs with all test configurations and signals an error if outputs differ.
+   Returns the captured output string from the first configuration."
+  (let ((first-output nil))
+    (dolist (config *test-option-configs*)
+      (let* ((config-opts (cdr config))
+             (optimize (getf config-opts :optimize))
+             (optimize-size (getf config-opts :optimize-size))
+             (peephole (getf config-opts :peephole))
+             (out (with-output-to-string (*standard-output*)
+                    (run-c-program source :optimize optimize
+                                          :optimize-size optimize-size
+                                          :peephole peephole
+                                          :max-cycles max-cycles))))
+        (if (null first-output)
+            (setf first-output out)
+            (unless (equal out first-output)
+              (error "Output mismatch between configs: ~s vs ~s" first-output out)))))
+    first-output))
+
 ;;; ===========================================================================
 ;;; Phase 1 Tests: Minimal Compiler
 ;;; ===========================================================================
@@ -6627,6 +6648,118 @@ int main() {
     (test-loop-unroll-descending-volatile)
     (test-loop-unroll-expression-volatile)))
 
+;;; ===========================================================================
+;;; Phase 30 Tests: stdio (putchar, puts, itoa, printf)
+;;; ===========================================================================
+
+(defparameter *stdio-preamble*
+  "volatile char *_outch = (volatile char*)0xffffffff;
+int putchar(int c) { *_outch = (char)c; return c; }
+int puts(char *s) { while (*s) putchar(*s++); putchar('\\n'); return 0; }
+char *itoa(int n, char *buf) {
+  int i = 0; int j, k; char tmp; int neg = 0;
+  if (n == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
+  if (n < 0) { neg = 1; n = -n; }
+  while (n > 0) { buf[i++] = '0' + n % 10; n /= 10; }
+  if (neg) buf[i++] = '-';
+  buf[i] = 0;
+  j = 0; k = i - 1;
+  while (j < k) { tmp = buf[j]; buf[j] = buf[k]; buf[k] = tmp; j++; k--; }
+  return buf;
+}
+int printf(char *fmt, int a0, int a1, int a2) {
+  int argc = 0; char ibuf[12]; int count = 0; int c; int val; char *s;
+  while (*fmt) {
+    c = *fmt; fmt++;
+    if (c == '%') {
+      c = *fmt; fmt++;
+      if (c == 'd') {
+        if (argc == 0) val = a0;
+        else if (argc == 1) val = a1;
+        else val = a2;
+        argc++;
+        s = itoa(val, ibuf);
+        while (*s) { putchar(*s); s++; count++; }
+      } else { putchar('%'); count++; putchar(c); count++; }
+    } else { putchar(c); count++; }
+  }
+  return count;
+}")
+
+(deftest test-stdio-putchar ()
+  "putchar writes a single character via volatile I/O"
+  (check
+    (string= (format nil "A")
+             (run-and-capture-output
+              "volatile char *_outch = (volatile char*)0xffffffff;
+               int putchar(int c) { *_outch = (char)c; return c; }
+               int main() { putchar('A'); return 0; }"))))
+
+(deftest test-stdio-puts ()
+  "puts writes a string followed by newline"
+  (check
+    (string= (format nil "hello~%")
+             (run-and-capture-output
+              (concatenate 'string *stdio-preamble*
+                           "int main() { puts(\"hello\"); return 0; }")))))
+
+(deftest test-stdio-itoa ()
+  "itoa converts integers to decimal strings: 0, positive, negative"
+  (check
+    (string= (format nil "0~%42~%-7~%")
+             (run-and-capture-output
+              (concatenate 'string *stdio-preamble*
+                           "int main() {
+                              char buf[12];
+                              puts(itoa(0, buf));
+                              puts(itoa(42, buf));
+                              puts(itoa(-7, buf));
+                              return 0;
+                            }")))))
+
+(deftest test-stdio-printf-single ()
+  "printf with one %d format specifier"
+  (check
+    (string= (format nil "val=42~%")
+             (run-and-capture-output
+              (concatenate 'string *stdio-preamble*
+                           "int main() { printf(\"val=%d\\n\", 42, 0, 0); return 0; }")))))
+
+(deftest test-stdio-printf-multi ()
+  "printf with three %d format specifiers"
+  (check
+    (string= (format nil "1+2=3~%")
+             (run-and-capture-output
+              (concatenate 'string *stdio-preamble*
+                           "int main() { printf(\"%d+%d=%d\\n\", 1, 2, 3); return 0; }")))))
+
+(deftest test-stdio-combined ()
+  "Full stdio: itoa, puts, and printf together"
+  (check
+    (string= (format nil "0~%42~%-7~%Hello, World!~%value=42~%1 + 2 = 3~%")
+             (run-and-capture-output
+              (concatenate 'string *stdio-preamble*
+                           "int main() {
+                              char buf[12];
+                              puts(itoa(0, buf));
+                              puts(itoa(42, buf));
+                              puts(itoa(-7, buf));
+                              puts(\"Hello, World!\");
+                              printf(\"value=%d\\n\", 42, 0, 0);
+                              printf(\"%d + %d = %d\\n\", 1, 2, 3);
+                              return 0;
+                            }")))))
+
+(deftest test-phase30-stdio ()
+  "Phase 30: stdio output tests (putchar, puts, itoa, printf)"
+  (combine-results
+    (test-stdio-putchar)
+    (test-stdio-puts)
+    (test-stdio-itoa)
+    (test-stdio-printf-single)
+    (test-stdio-printf-multi)
+    (test-stdio-combined)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -6668,7 +6801,8 @@ int main() {
     (test-phase27-memory-inspection)
     (test-phase28-loop-unrolling)
     (test-phase28-loop-unrolling-volatile)
-    (test-phase29-cse-infrastructure)))
+    (test-phase29-cse-infrastructure)
+    (test-phase30-stdio)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
