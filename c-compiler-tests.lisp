@@ -6760,6 +6760,106 @@ int printf(char *fmt, int a0, int a1, int a2) {
     (test-stdio-printf-multi)
     (test-stdio-combined)))
 
+;;; ===========================================================================
+;;; Phase 31 Tests: Constant Operand Optimization (mul/div/mod)
+;;; ===========================================================================
+
+(defun asm-contains-symbol-p (asm sym-string)
+  "Check if assembly list contains any instruction referencing a symbol by string."
+  (some (lambda (instr)
+          (some (lambda (atom)
+                  (and (symbolp atom)
+                       (search sym-string (symbol-name atom))))
+                (if (listp instr) instr (list instr))))
+        asm))
+
+(deftest test-const-mul-basic ()
+  "Test: constant multiply basic cases (global volatile prevents constant propagation)"
+  (combine-results
+    (check "x * 0 = 0"
+      (= 0 (run-and-get-result "volatile int x = 99; int main() { return x * 0; }")))
+    (check "x * 1 = x"
+      (= 7 (run-and-get-result "volatile int x = 7; int main() { return x * 1; }")))
+    (check "x * 2 = 2x"
+      (= 14 (run-and-get-result "volatile int x = 7; int main() { return x * 2; }")))
+    (check "x * 4 = 4x"
+      (= 28 (run-and-get-result "volatile int x = 7; int main() { return x * 4; }")))
+    (check "0 * x = 0 (commutative)"
+      (= 0 (run-and-get-result "volatile int x = 42; int main() { return 0 * x; }")))
+    (check "3 * x = 3x (commutative)"
+      (= 21 (run-and-get-result "volatile int x = 7; int main() { return 3 * x; }")))))
+
+(deftest test-const-mul-multibit ()
+  "Test: constant multiply with multi-bit constants (shift-add) - global volatile prevents propagation"
+  (combine-results
+    (check "x * 3 = 3x"
+      (= 15 (run-and-get-result "volatile int x = 5; int main() { return x * 3; }")))
+    (check "x * 6 = 6x"
+      (= 30 (run-and-get-result "volatile int x = 5; int main() { return x * 6; }")))
+    (check "x * 7 = 7x"
+      (= 35 (run-and-get-result "volatile int x = 5; int main() { return x * 7; }")))
+    (check "x * 100 = 100x"
+      (= 500 (run-and-get-result "volatile int x = 5; int main() { return x * 100; }")))))
+
+(deftest test-const-mul-negative ()
+  "Test: constant multiply with negative constants - global volatile prevents propagation"
+  (combine-results
+    (check "x * -1 = -x"
+      (result= -7 (run-and-get-result "volatile int x = 7; int main() { return x * -1; }")))
+    (check "x * -3 = -3x"
+      (result= -15 (run-and-get-result "volatile int x = 5; int main() { return x * -3; }")))))
+
+(deftest test-const-div-pow2 ()
+  "Test: division by power-of-2 uses right shifts - global volatile prevents propagation"
+  (combine-results
+    (check "x / 4 = x>>2"
+      (= 3 (run-and-get-result "volatile int x = 12; int main() { return x / 4; }")))
+    (check "x / 8 = x>>3"
+      (= 2 (run-and-get-result "volatile int x = 16; int main() { return x / 8; }")))
+    (check "x / 1 = x (no shift)"
+      (= 42 (run-and-get-result "volatile int x = 42; int main() { return x / 1; }")))))
+
+(deftest test-const-mod-pow2 ()
+  "Test: modulo by power-of-2 uses bitwise AND - global volatile prevents propagation"
+  (combine-results
+    (check "x % 8 = x & 7"
+      (= 5 (run-and-get-result "volatile int x = 13; int main() { return x % 8; }")))
+    (check "x % 4 = x & 3"
+      (= 1 (run-and-get-result "volatile int x = 9; int main() { return x % 4; }")))
+    (check "x % 16 = x & 15"
+      (= 3 (run-and-get-result "volatile int x = 19; int main() { return x % 16; }")))))
+
+(deftest test-const-mul-no-runtime-call ()
+  "Test: optimized cases don't use __MUL/__DIV runtime calls.
+   Global volatile prevents constant propagation so operations reach codegen."
+  (combine-results
+    (check "x*3 no __MUL (not -Os)"
+      (let ((asm (compile-c "volatile int x = 5; int main() { return x * 3; }"
+                            :annotate nil :optimize nil :optimize-size nil)))
+        (not (asm-contains-symbol-p asm "__MUL"))))
+    (check "x/4 no __DIV (not -Os)"
+      (let ((asm (compile-c "volatile int x = 12; int main() { return x / 4; }"
+                            :annotate nil :optimize nil :optimize-size nil)))
+        (not (asm-contains-symbol-p asm "__DIV"))))
+    (check "x%8 no __MOD (not -Os)"
+      (let ((asm (compile-c "volatile int x = 13; int main() { return x % 8; }"
+                            :annotate nil :optimize nil :optimize-size nil)))
+        (not (asm-contains-symbol-p asm "__MOD"))))
+    (check "x*6 still calls __MUL under -Os (not power-of-2)"
+      (let ((asm (compile-c "volatile int x = 5; int main() { return x * 6; }"
+                            :annotate nil :optimize nil :optimize-size t)))
+        (asm-contains-symbol-p asm "__MUL")))))
+
+(deftest test-phase31-const-mul ()
+  "Phase 31: constant operand optimization for mul/div/mod"
+  (combine-results
+    (test-const-mul-basic)
+    (test-const-mul-multibit)
+    (test-const-mul-negative)
+    (test-const-div-pow2)
+    (test-const-mod-pow2)
+    (test-const-mul-no-runtime-call)))
+
 (deftest test-c-compiler ()
   "Run all C compiler tests"
   (combine-results
@@ -6802,7 +6902,8 @@ int printf(char *fmt, int a0, int a1, int a2) {
     (test-phase28-loop-unrolling)
     (test-phase28-loop-unrolling-volatile)
     (test-phase29-cse-infrastructure)
-    (test-phase30-stdio)))
+    (test-phase30-stdio)
+    (test-phase31-const-mul)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

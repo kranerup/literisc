@@ -2728,6 +2728,38 @@
         ;; offset is the register index (0-3), get-local-reg converts to R6-R9
         (get-local-reg (sym-entry-offset sym))))))
 
+(defun get-literal-integer (node)
+  "Return integer value if node is a literal integer AST node, else nil."
+  (when (and (ast-node-p node)
+             (eq (ast-node-type node) 'literal)
+             (integerp (ast-node-value node)))
+    (ast-node-value node)))
+
+(defun const-mul-instruction-count (c)
+  "Estimate instruction count to implement A = left-reg * c via shift-add sequence.
+   C must be positive (use abs value)."
+  (cond
+    ((= c 0) 1)
+    ((= c 1) 1)
+    (t
+     (let ((bit-positions (loop for i from 0 below 32
+                                when (logbitp i c) collect i)))
+       (+ (reduce #'+ bit-positions)
+          (* 3 (length bit-positions))
+          -2)))))
+
+(defun should-use-const-mul-p (abs-val)
+  "Return T if const-mul optimization should be applied for |const_val| = abs-val."
+  (cond
+    ((= abs-val 0) t)     ; trivial: A= 0
+    ((= abs-val 1) t)     ; trivial: A=Rx left_reg
+    ((compiler-state-optimize-size *state*)
+     ;; -Os: only power-of-2 (single shift sequence, minimum code)
+     (power-of-2-p abs-val))
+    (t
+     ;; -O or default: any constant within threshold
+     (<= (const-mul-instruction-count abs-val) *const-mul-threshold*))))
+
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
   ;; Handle shifts specially - they can optimize for constant counts
@@ -2740,6 +2772,41 @@
           (generate-shift-right left-reg right))
       (free-temp-reg left-reg)
       (return-from generate-arithmetic-op)))
+
+  ;; Constant-operand optimization for *, /, %
+  ;; Multiplication: commutative, so check either operand
+  (when (string= op "*")
+    (let* ((right-const (get-literal-integer right))
+           (left-const (get-literal-integer left))
+           (const-val (or right-const left-const))
+           (var-node  (if right-const left right)))
+      (when (and const-val (should-use-const-mul-p (abs const-val)))
+        (generate-expression var-node)
+        (let ((var-reg (alloc-temp-reg)))
+          (emit `(Rx=A ,var-reg))
+          (generate-const-mul var-reg const-val)
+          (free-temp-reg var-reg))
+        (return-from generate-arithmetic-op))))
+
+  ;; Division by constant power-of-2: right shifts
+  (when (string= op "/")
+    (let ((right-const (get-literal-integer right)))
+      (when (and right-const (> right-const 0) (power-of-2-p right-const))
+        (generate-expression left)
+        (dotimes (i (log2-int right-const))
+          (emit '(A=A>>1)))
+        (return-from generate-arithmetic-op))))
+
+  ;; Modulo by constant power-of-2: bitwise AND
+  (when (string= op "%")
+    (let ((right-const (get-literal-integer right)))
+      (when (and right-const (> right-const 0) (power-of-2-p right-const))
+        (generate-expression left)
+        (let ((mask-reg (alloc-temp-reg)))
+          (emit `(Rx= ,(1- right-const) ,mask-reg))
+          (emit `(A&=Rx ,mask-reg))
+          (free-temp-reg mask-reg))
+        (return-from generate-arithmetic-op))))
 
   ;; Check for pointer arithmetic
   (let* ((left-type (get-expression-type left))
@@ -3830,6 +3897,61 @@
     (emit-label label)))
 
 ;;; ===========================================================================
+;;; Constant Multiply (Shift-Add Sequence)
+;;; ===========================================================================
+
+(defun generate-const-mul (left-reg const-val)
+  "Generate inline multiply: A = left-reg * const-val using shift-add.
+   const-val is a known integer literal. Result in A."
+  (cond
+    ((= const-val 0)
+     (emit '(A= 0)))
+    ((= const-val 1)
+     (emit `(A=Rx ,left-reg)))
+    ((= const-val -1)
+     ;; Negate: A = 0 - left-reg
+     (emit '(A= 0))
+     (emit `(A-=Rx ,left-reg)))
+    (t
+     (let* ((abs-val (abs const-val))
+            (bit-positions (loop for i from 0 below 32
+                                 when (logbitp i abs-val) collect i))
+            (k (length bit-positions)))
+       (if (= k 1)
+           ;; Power-of-2: simple shifts, no result_reg needed
+           (let ((shift-count (first bit-positions)))
+             (emit `(A=Rx ,left-reg))
+             (dotimes (i shift-count) (emit '(A=A<<1))))
+           ;; Multiple bits: accumulate into result_reg
+           (let ((result-reg (alloc-temp-reg)))
+             (loop for bit-pos-list on bit-positions
+                   for p = (first bit-pos-list)
+                   for rest = (rest bit-pos-list)
+                   for first-p = t then nil
+                   do
+                     (emit `(A=Rx ,left-reg))
+                     (dotimes (i p) (emit '(A=A<<1)))
+                     (cond
+                       ;; First bit: initialize result_reg
+                       (first-p
+                        (emit `(Rx=A ,result-reg)))
+                       ;; Last bit: accumulate, leave in A
+                       ((null rest)
+                        (emit `(A+=Rx ,result-reg)))
+                       ;; Middle bit: accumulate, update result_reg
+                       (t
+                        (emit `(A+=Rx ,result-reg))
+                        (emit `(Rx=A ,result-reg)))))
+             (free-temp-reg result-reg)))
+       ;; Negate if constant was negative
+       (when (< const-val 0)
+         (let ((tmp (alloc-temp-reg)))
+           (emit `(Rx=A ,tmp))
+           (emit '(A= 0))
+           (emit `(A-=Rx ,tmp))
+           (free-temp-reg tmp)))))))
+
+;;; ===========================================================================
 ;;; Software Multiply/Divide
 ;;; ===========================================================================
 
@@ -3983,6 +4105,9 @@
 ;;; Threshold for inline vs loop shift (in terms of instructions)
 ;;; Below this, use inline shifts. At or above, use loop (if optimize-size) or inline (if not)
 (defparameter *shift-inline-threshold* 4)
+
+;;; Max instruction count for const-mul optimization under -O (not -Os)
+(defparameter *const-mul-threshold* 64)
 
 (defun generate-shift-left (left-reg right-node)
   "Generate left shift: result = left-reg << right-node.
