@@ -1,6 +1,6 @@
 /* stdio.c - minimal stdio for liteRISC emulator
  *
- * Provides: putchar, puts, itoa, printf (handles %d only)
+ * Provides: putchar, puts, itoa_r, itoa, printf (handles %d only)
  *
  * Note: printf uses a fixed signature (no varargs support in this compiler):
  *   int printf(char *fmt, int a0, int a1, int a2)
@@ -20,15 +20,18 @@ int puts(char *s) {
   return 0;
 }
 
+char *itoa_r(int n, char *p) {
+  if (n > 9) p = itoa_r(n / 10, p);
+  *p++ = '0' + n % 10;
+  return p;
+}
+
 char *itoa(int n, char *buf) {
-  int i = 0, j = 0, k;
-  char tmp;
+  char *p = buf;
   if (n == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
-  if (n < 0) { buf[i++] = '-'; n = -n; j = 1; }
-  while (n > 0) { buf[i++] = '0' + n % 10; n /= 10; }
-  buf[i] = 0;
-  k = i - 1;
-  while (j < k) { tmp = buf[j]; buf[j] = buf[k]; buf[k] = tmp; j++; k--; }
+  if (n < 0) { *p++ = '-'; n = -n; }
+  p = itoa_r(n, p);
+  *p = 0;
   return buf;
 }
 

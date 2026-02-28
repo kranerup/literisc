@@ -615,6 +615,7 @@
 ;;; Global state for inlining pass
 (defvar *inline-counter* 0 "Counter for generating unique inline suffixes")
 (defvar *recursive-functions* nil "Set of recursive function names")
+(defvar *call-counts* nil "Hash table: function-name -> call count across whole AST")
 
 (defun detect-recursive-functions (ast)
   "Detect which functions are recursive (call themselves directly or indirectly)"
@@ -659,6 +660,24 @@
                 (can-reach callee target call-graph visited))
               callees))))
 
+(defun count-calls-in-ast (ast)
+  "Count how many times each function is called across the entire AST.
+   Returns a hash table: function-name -> integer call count."
+  (let ((counts (make-hash-table :test 'equal)))
+    (labels ((walk (node)
+               (when (and node (ast-node-p node))
+                 (when (eq (ast-node-type node) 'call)
+                   (let ((func-expr (first (ast-node-children node))))
+                     (when (and (ast-node-p func-expr)
+                                (eq (ast-node-type func-expr) 'var-ref))
+                       (let ((name (ast-node-value func-expr)))
+                         (setf (gethash name counts)
+                               (1+ (gethash name counts 0)))))))
+                 (dolist (child (ast-node-children node))
+                   (walk child)))))
+      (walk ast))
+    counts))
+
 (defun has-static-locals-p (node)
   "Return T if node or any descendant contains a static local var-decl."
   (when (and node (ast-node-p node))
@@ -684,8 +703,15 @@
       ((has-static-locals-p func-node) nil)
       ;; Inline if explicitly marked
       ((getf data :inline-hint) t)
-      ;; Auto-inline small functions when optimizing
+      ;; Under -Os: only auto-inline if this function has exactly one call site
+      ;; (inlining a function called once replaces the call site without duplication)
+      ((and (compiler-state-optimize-size *state*)
+            (let ((stmt-count (or (getf data :stmt-count) 999)))
+              (<= stmt-count *inline-stmt-threshold*)))
+       (= 1 (gethash func-name (or *call-counts* (make-hash-table)) 0)))
+      ;; Under -O (not -Os): auto-inline small functions
       ((and (compiler-state-optimize *state*)
+            (not (compiler-state-optimize-size *state*))
             (let ((stmt-count (or (getf data :stmt-count) 999)))
               (<= stmt-count *inline-stmt-threshold*)))
        t)
@@ -1080,6 +1106,9 @@
 
   ;; Detect recursive functions first
   (setf *recursive-functions* (detect-recursive-functions ast))
+
+  ;; Count call sites for each function (used by -Os inlining policy)
+  (setf *call-counts* (count-calls-in-ast ast))
 
   ;; Collect all defined function names (except main)
   (let ((defined-functions (make-hash-table :test 'equal)))
