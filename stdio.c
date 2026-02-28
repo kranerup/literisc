@@ -1,9 +1,9 @@
 /* stdio.c - minimal stdio for liteRISC emulator
  *
- * Provides: putchar, puts, itoa_r, itoa, printf (handles %d only)
+ * Provides: putchar, print_str, puts, itoa_r, itoa, printf
  *
- * Note: printf uses a fixed signature (no varargs support in this compiler):
- *   int printf(char *fmt, int a0, int a1, int a2)
+ * Note: printf uses a fixed, non-standard signature (no varargs, no return value):
+ *   void printf(char *fmt, int a0, int a1, int a2)
  * Supports up to three %d format specifiers per call.
  */
 
@@ -14,8 +14,12 @@ int putchar(int c) {
   return c;
 }
 
-int puts(char *s) {
+void print_str(char *s) {
   while (*s) putchar(*s++);
+}
+
+int puts(char *s) {
+  print_str(s);
   putchar('\n');
   return 0;
 }
@@ -35,29 +39,25 @@ char *itoa(int n, char *buf) {
   return buf;
 }
 
-int printf(char *fmt, int a0, int a1, int a2) {
+void printf(char *fmt, int a0, int a1, int a2) {
   int args[3];
-  int argc = 0, count = 0, c, spec;
+  int argc = 0, c, spec;
   char ibuf[12];
-  char *s;
   args[0] = a0; args[1] = a1; args[2] = a2;
   while (*fmt) {
     c = *fmt++;
     if (c == '%') {
       spec = *fmt++;
       if (spec == 'd') {
-        s = itoa(args[argc], ibuf);
-        argc++;
-        while (*s) { putchar(*s++); count++; }
+        print_str(itoa(args[argc++], ibuf));
       } else {
-        putchar('%'); count++;
-        putchar(spec); count++;
+        putchar('%');
+        putchar(spec);
       }
     } else {
-      putchar(c); count++;
+      putchar(c);
     }
   }
-  return count;
 }
 
 int main() {
