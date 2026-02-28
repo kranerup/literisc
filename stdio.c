@@ -21,49 +21,34 @@ int puts(char *s) {
 }
 
 char *itoa(int n, char *buf) {
-  int i = 0;
-  int j, k;
+  int i = 0, j = 0, k;
   char tmp;
-  int neg = 0;
   if (n == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
-  if (n < 0) { neg = 1; n = -n; }
-  while (n > 0) {
-    buf[i++] = '0' + n % 10;
-    n /= 10;
-  }
-  if (neg) buf[i++] = '-';
+  if (n < 0) { buf[i++] = '-'; n = -n; j = 1; }
+  while (n > 0) { buf[i++] = '0' + n % 10; n /= 10; }
   buf[i] = 0;
-  j = 0; k = i - 1;
-  while (j < k) {
-    tmp = buf[j]; buf[j] = buf[k]; buf[k] = tmp;
-    j++; k--;
-  }
+  k = i - 1;
+  while (j < k) { tmp = buf[j]; buf[j] = buf[k]; buf[k] = tmp; j++; k--; }
   return buf;
 }
 
 int printf(char *fmt, int a0, int a1, int a2) {
-  int argc = 0;
+  int args[3];
+  int argc = 0, count = 0, c, spec;
   char ibuf[12];
-  int count = 0;
-  int c;
-  int val;
   char *s;
+  args[0] = a0; args[1] = a1; args[2] = a2;
   while (*fmt) {
-    c = *fmt;
-    fmt++;
+    c = *fmt++;
     if (c == '%') {
-      c = *fmt;
-      fmt++;
-      if (c == 'd') {
-        if (argc == 0) val = a0;
-        else if (argc == 1) val = a1;
-        else val = a2;
+      spec = *fmt++;
+      if (spec == 'd') {
+        s = itoa(args[argc], ibuf);
         argc++;
-        s = itoa(val, ibuf);
-        while (*s) { putchar(*s); s++; count++; }
+        while (*s) { putchar(*s++); count++; }
       } else {
         putchar('%'); count++;
-        putchar(c); count++;
+        putchar(spec); count++;
       }
     } else {
       putchar(c); count++;
