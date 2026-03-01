@@ -6,36 +6,60 @@ A minimal C compiler written in Common Lisp targeting the liteRISC 32-bit proces
 
 ```
 literisc/
-├── c-compiler.lisp      # Main compiler infrastructure, types, symbol tables
-├── c-lexer.lisp         # Tokenizer/lexer for C source
-├── c-parser.lisp        # Recursive descent parser, AST construction
-├── c-optimizer.lisp     # AST-level optimizations (constant folding, propagation, DCE)
-├── c-peephole.lisp      # Peephole optimization on generated assembly
-├── c-regalloc.lisp      # Register allocation
-├── c-codegen.lisp       # Code generation (AST -> liteRISC assembly)
-├── c-compiler-tests.lisp # Comprehensive test suite
-├── assembler.lisp       # liteRISC assembler (S-expressions -> machine code)
-├── disassembler.lisp    # Machine code disassembly
-├── emulator.lisp        # liteRISC CPU emulator for testing
-├── lrcc.lisp            # Command-line interface
-├── literisc.asd         # ASDF system definition
-└── tests/               # C testsuite (symlinks to external tests)
+├── c-compiler.lisp       # Main compiler infrastructure, types, symbol tables
+├── c-lexer.lisp          # Tokenizer/lexer for C source
+├── c-parser.lisp         # Recursive descent parser, AST construction
+├── c-optimizer.lisp      # AST-level optimizations (constant folding, propagation, DCE)
+├── c-peephole.lisp       # Peephole optimization on generated assembly
+├── c-regalloc.lisp       # Register allocation
+├── c-codegen.lisp        # Code generation (AST -> liteRISC assembly)
+├── c-compiler-tests.lisp # Unit test suite (run via run-tests.lisp)
+├── assembler.lisp        # liteRISC assembler (S-expressions -> machine code)
+├── disassembler.lisp     # Machine code disassembly
+├── emulator.lisp         # liteRISC CPU emulator for testing
+├── lrcc.lisp             # Command-line interface (always preprocesses via clang -E -P)
+├── literisc.asd          # ASDF system definition
+├── include/stdio.h       # liteRISC stdio implementation (selected via -I include)
+├── test_stdio.c          # Self-test for include/stdio.h
+├── tests/                # C testsuite: simple return-value programs (run_tests.sh)
+└── programs/             # Algorithm programs with stdio (run-programs)
+```
+
+## Regression Test Suites
+
+**All three suites must be run after any compiler change.**
+
+### 1. Unit tests (`run-tests.lisp`)
+Lisp-level tests covering every compiler phase (lexer, parser, codegen, optimizer).
+```bash
+./run-tests.lisp              # run all (~375 tests)
+./run-tests.lisp test-name    # run one test by name
+./run-tests.lisp --list       # list available tests
+```
+
+### 2. C testsuite (`tests/run_tests.sh`)
+Simple C programs (symlinks into c-testsuite) that return 0 on success.
+lrcc exit code reflects the program's return value, so shell detects failures.
+```bash
+tests/run_tests.sh
+```
+
+### 3. Algorithm programs (`programs/run-programs`)
+Larger programs using `#include <stdio.h>` (via `include/stdio.h`).
+Output is compared against clang compiled with system stdio as reference.
+```bash
+programs/run-programs                        # run all
+programs/run-programs programs/sieve.c       # run one
 ```
 
 ## Quick Commands
 
 ```bash
-# Run all tests (unit tests + C compiler tests)
-./run-tests.lisp
-
-# Run specific test
-./run-tests.lisp test-name
-
-# List available tests
-./run-tests.lisp --list
-
-# Compile and run a C file
+# Compile and run a C file (preprocessed via clang -E -P)
 ./lrcc.lisp -r source.c
+
+# With liteRISC stdio (include/stdio.h)
+./lrcc.lisp -I include -Os -r source.c
 
 # Output assembly only
 ./lrcc.lisp -S source.c
@@ -45,9 +69,6 @@ literisc/
 
 # Optimize for size (library mul/div/mod)
 ./lrcc.lisp -Os -r source.c
-
-# Run C testsuite only
-cd tests && bash run_tests.sh
 ```
 
 ## Architecture

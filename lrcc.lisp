@@ -206,7 +206,7 @@
                                                  :peephole peephole
                                                  :max-cycles 1000000)))
                (format *error-output* "~a~%" result)
-               (sb-ext:exit :code 0)))
+               (sb-ext:exit :code (logand result 255))))
 
             ;; Compile to binary
             (t
