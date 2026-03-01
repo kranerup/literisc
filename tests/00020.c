@@ -1,0 +1,1 @@
+../../literisc_gemini/c-testsuite/tests/single-exec/00020.c
