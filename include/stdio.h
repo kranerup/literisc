@@ -1,11 +1,16 @@
-/* stdio.c - minimal stdio for liteRISC emulator
+/* stdio.h - liteRISC minimal stdio implementation
  *
  * Provides: putchar, print_str, puts, itoa_r, itoa, printf
  *
- * Note: printf uses a fixed, non-standard signature (no varargs, no return value):
+ * Non-standard printf signature (no varargs, void return):
  *   void printf(char *fmt, int a0, int a1, int a2)
  * Supports up to three %d format specifiers per call.
+ *
+ * Use with: cpp -E -P -I <dir-containing-this-file> source.c | lrcc
  */
+
+#ifndef STDIO_H
+#define STDIO_H
 
 volatile char *_outch = (volatile char*)0xffffffff;
 
@@ -60,13 +65,4 @@ void printf(char *fmt, int a0, int a1, int a2) {
   }
 }
 
-int main() {
-  char buf[12];
-  puts(itoa(0, buf));
-  puts(itoa(42, buf));
-  puts(itoa(-7, buf));
-  puts("Hello, World!");
-  printf("value=%d\n", 42, 0, 0);
-  printf("%d + %d = %d\n", 1, 2, 3);
-  return 0;
-}
+#endif /* STDIO_H */

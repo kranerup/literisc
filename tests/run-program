@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Run a single C program test and compare lrcc output against clang.
+# Usage: tests/run-program <test.c>
+#
+# The test program uses #include <stdio.h>, which resolves differently:
+#   lrcc:  preprocessed via clang -E -P -I include/  -> liteRISC stdio.h
+#   clang: compiled directly -> system stdio.h (standard C library)
+#
+# Test programs must use at most three %d format specifiers per printf call.
+
+set -e
+set -u
+
+SCRIPTDIR=$(cd "$(dirname "$0")" && pwd)
+LRCC="$SCRIPTDIR/../lrcc.lisp"
+INCLUDE="$SCRIPTDIR/../include"
+
+t="$1"
+
+preproc=$(mktemp /tmp/lrcc.p.XXXX.c)
+clang_bin=$(mktemp /tmp/lrcc.clang.XXXX)
+trap 'rm -f "$preproc" "$clang_bin"' EXIT
+
+# Preprocess with liteRISC stdio.h for lrcc
+if ! clang -E -P -x c -I "$INCLUDE" -o "$preproc" "$t" 2>/dev/null; then
+    printf 'FAIL  %s  (preprocessing failed)\n' "$(basename "$t")" >&2
+    exit 1
+fi
+
+# Compile test program with clang using system stdio.h (reference output)
+if ! clang -w -o "$clang_bin" "$t" 2>/dev/null; then
+    printf 'FAIL  %s  (clang compilation failed)\n' "$(basename "$t")" >&2
+    exit 1
+fi
+reference=$("$clang_bin")
+
+# Compile and run with lrcc (program output to stdout, return value to stderr)
+actual=$("$LRCC" -Os -r "$preproc" 2>/dev/null)
+
+if [ "$reference" = "$actual" ]; then
+    printf 'PASS  %s\n' "$(basename "$t")"
+else
+    printf 'FAIL  %s\n' "$(basename "$t")" >&2
+    diff <(printf '%s\n' "$reference") <(printf '%s\n' "$actual") >&2
+    exit 1
+fi

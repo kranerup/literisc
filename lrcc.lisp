@@ -18,19 +18,21 @@
   (format t "Options:~%")
   (format t "  -o <file>        Write binary output to file (hex format)~%")
   (format t "  -S               Output assembly code only (pretty printed)~%")
-  (format t "  -r, --run        Run program in emulator and print return value~%")
+  (format t "  -r, --run        Run program in emulator (program output to stdout,~%")
+  (format t "                   return value to stderr)~%")
+  (format t "  -I <dir>         Add directory to preprocessor include search path~%")
   (format t "  -O               Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
   (format t "  -Os              Optimize for size (inlining, peephole, library mul/div/mod)~%")
   (format t "  -fno-peephole    Disable peephole optimization~%")
   (format t "  -v, --verbose    Verbose output~%")
   (format t "  -h, --help       Show this help message~%")
-  (format t "~%Constant folding is always enabled.~%")
+  (format t "~%Source is always preprocessed via clang -E -P before compilation.~%")
   (format t "~%Examples:~%")
-  (format t "  lrcc -S hello.c              # Print assembly~%")
-  (format t "  lrcc -o hello.hex hello.c    # Compile to hex file~%")
-  (format t "  lrcc -r hello.c              # Compile and run~%")
-  (format t "  lrcc -O -r hello.c           # Full optimization for speed~%")
-  (format t "  lrcc -Os -r hello.c          # Full optimization for size~%"))
+  (format t "  lrcc -S hello.c                    # Print assembly~%")
+  (format t "  lrcc -o hello.hex hello.c          # Compile to hex file~%")
+  (format t "  lrcc -r hello.c                    # Compile and run~%")
+  (format t "  lrcc -I include -Os -r hello.c     # With stdio.h, optimized for size~%")
+  (format t "  lrcc -O -r hello.c                 # Full optimization for speed~%"))
 
 (defun pretty-print-asm (asm-list)
   "Pretty print assembly code in a readable format"
@@ -84,6 +86,23 @@
     (dolist (b bytes)
       (write-byte b out))))
 
+(defun cpp-preprocess (source-file include-dirs)
+  "Preprocess source-file using clang -E -P with given include dirs.
+   Returns preprocessed source as a string."
+  (let* ((args (append (list "-E" "-P" "-x" "c")
+                       (loop for d in include-dirs nconc (list "-I" d))
+                       (list source-file)))
+         (output (make-string-output-stream))
+         (proc (sb-ext:run-program "clang" args
+                                   :search t
+                                   :wait t
+                                   :output output
+                                   :error *error-output*)))
+    (unless (zerop (sb-ext:process-exit-code proc))
+      (format *error-output* "Error: Preprocessing failed~%")
+      (sb-ext:exit :code 1))
+    (get-output-stream-string output)))
+
 (defun main ()
   (let* ((args (cdr sb-ext:*posix-argv*))
          (output-file nil)
@@ -93,6 +112,7 @@
          (peephole nil)
          (optimize-size t)
          (verbose nil)
+         (include-dirs nil)
          (source-file nil))
 
     ;; Parse command line arguments
@@ -126,6 +146,16 @@
                (setf peephole nil))
               ((or (string= arg "-v") (string= arg "--verbose"))
                (setf verbose t))
+              ((string= arg "-I")
+               ;; -I dir (space-separated)
+               (if args
+                   (push (pop args) include-dirs)
+                   (progn
+                     (format *error-output* "Error: -I requires an argument~%")
+                     (sb-ext:exit :code 1))))
+              ((and (> (length arg) 2) (string= arg "-I" :end1 2))
+               ;; -Idir (no space)
+               (push (subseq arg 2) include-dirs))
               ((char= (char arg 0) #\-)
                (format *error-output* "Error: Unknown option ~a~%" arg)
                (sb-ext:exit :code 1))
@@ -147,11 +177,8 @@
       (format *error-output* "Error: Source file not found: ~a~%" source-file)
       (sb-ext:exit :code 1))
 
-    ;; Read source file
-    (let ((source (with-open-file (in source-file :direction :input)
-                    (let ((content (make-string (file-length in))))
-                      (read-sequence content in)
-                      content))))
+    ;; Preprocess with cpp (resolves #include, #define, etc.)
+    (let ((source (cpp-preprocess source-file (nreverse include-dirs))))
 
       (handler-case
           (cond
@@ -178,7 +205,7 @@
                                                  :optimize-size optimize-size
                                                  :peephole peephole
                                                  :max-cycles 1000000)))
-               (format t "~a~%" result)
+               (format *error-output* "~a~%" result)
                (sb-ext:exit :code 0)))
 
             ;; Compile to binary
