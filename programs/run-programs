@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# Run all C algorithm programs and compare lrcc output against clang.
+# Usage: programs/run-programs [program.c ...]
+#   With no arguments, runs all .c files in the same directory as this script.
+
+SCRIPTDIR=$(cd "$(dirname "$0")" && pwd)
+RUNNER="$SCRIPTDIR/../tests/run-program"
+
+if [ $# -gt 0 ]; then
+    files="$@"
+else
+    files="$SCRIPTDIR"/*.c
+fi
+
+pass=0
+fail=0
+
+for t in $files; do
+    if "$RUNNER" "$t"; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+    fi
+done
+
+echo ""
+echo "Results: $pass passed, $fail failed"
+[ $fail -eq 0 ]
