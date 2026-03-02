@@ -460,18 +460,26 @@
 
 ;;; Rule 11: Small immediate load through temp register
 ;;; (A= ?v) (Rx=A ?r) -> (Rx= ?v ?r)
-;;; When A= is used for small immediates (-128 to 127), we can load directly
+;;; When A= is used for small immediates (-128 to 127), we can load directly.
+;;; Only safe if A is dead after (Rx=A r) — i.e., A's value is not read
+;;; by a subsequent instruction. If A is live (e.g. followed by A=A<<1 in
+;;; emit-multiply-by-constant), the (A= v) must be preserved.
 (push (make-peephole-rule
        :name "small-immediate-through-A"
        :pattern '((A= ?v) (Rx=A ?r))
        :replacement (lambda (bindings code-vec end-idx)
-                      (declare (ignore code-vec end-idx))
                       (let ((val (getf bindings :v))
                             (reg (getf bindings :r)))
-                        ;; Don't optimize if target is SP (side effects)
-                        (if (eq reg 'SP)
-                            (list (list 'A= val) (list 'Rx=A reg))
-                            (list (list 'Rx= val reg))))))
+                        (cond
+                          ;; Don't optimize if target is SP (side effects)
+                          ((eq reg 'SP)
+                           (list (list 'A= val) (list 'Rx=A reg)))
+                          ;; Only optimize if A is dead after the pattern
+                          ((A-dead-before-next-write-p code-vec end-idx)
+                           (list (list 'Rx= val reg)))
+                          ;; A is still live after — keep both instructions
+                          (t
+                           (list (list 'A= val) (list 'Rx=A reg)))))))
       *peephole-rules*)
 
 ;;; Rule 12: Redundant reload after store (M[A]=Rx doesn't modify A)

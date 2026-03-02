@@ -52,8 +52,10 @@
   (setf *local-vreg-map* (make-hash-table :test 'eql))
   (setf *max-temp-reg-index* -1)
   (setf *pushed-reg-bytes* 0)
-  ;; Also init old-style tracking for fallback
-  (setf *reg-in-use* (make-array 6 :initial-element nil)))
+  ;; 10-element array covers R0-R5 (temps) + R6-R9 (local/extended-temps).
+  ;; In physical fallback mode, R6-R9 are used as extra temps when not
+  ;; claimed by :register variables (*local-reg-count* = 0).
+  (setf *reg-in-use* (make-array 10 :initial-element nil)))
 
 ;;; ===========================================================================
 ;;; 64-bit (long long) Register Pair Support
@@ -1171,30 +1173,45 @@
       ;; Virtual register mode: return V0, V1, V2, ...
       (prog1 (make-vreg *vreg-counter*)
         (incf *vreg-counter*))
-      ;; Fallback to physical register mode
-      (loop for i from 0 below 6
-            when (not (aref *reg-in-use* i))
-            do (progn
-                 (setf (aref *reg-in-use* i) t)
-                 (when (> i *max-temp-reg-index*)
-                   (setf *max-temp-reg-index* i))
-                 (return-from alloc-temp-reg (nth i *temp-regs*)))
-            finally (compiler-error "Out of temporary registers"))))
+      ;; Physical register mode.
+      ;; R0-R5 are always available as temps (indices 0-5).
+      ;; R6-R9 are local-variable registers; only use them as extra temps
+      ;; when *local-reg-count* = 0 (no :register variables in this function).
+      ;; If *local-reg-count* > 0, R6..R(5+local-reg-count) are claimed and
+      ;; must be skipped; R(6+local-reg-count)..R9 are available.
+      (let* ((combined (append *temp-regs* *local-regs*))  ; R0..R9
+             (local-start 6)
+             (local-end   (+ local-start *local-reg-count*)))  ; R(local-end-1) is highest local
+        (loop for i from 0 below 10
+              ;; Skip indices that belong to :register locals
+              when (and (or (< i local-start)
+                            (>= i local-end))
+                        (not (aref *reg-in-use* i)))
+              do (progn
+                   (setf (aref *reg-in-use* i) t)
+                   (when (> i *max-temp-reg-index*)
+                     (setf *max-temp-reg-index* i))
+                   (return-from alloc-temp-reg (nth i combined)))
+              finally (compiler-error "Out of temporary registers")))))
 
 (defun free-temp-reg (reg)
   "Free a temporary register (no-op for virtual registers)"
   (unless *use-virtual-regs*
-    ;; Only needed in physical register mode
-    (let ((idx (position reg *temp-regs*)))
+    ;; Search in combined R0-R9 list
+    (let ((idx (position reg (append *temp-regs* *local-regs*))))
       (when idx
         (setf (aref *reg-in-use* idx) nil)))))
 
 (defun save-temp-regs ()
   "Return list of temp registers currently in use (for physical mode only)"
   (unless *use-virtual-regs*
-    (loop for i from 0 below 6
-          when (aref *reg-in-use* i)
-          collect (nth i *temp-regs*))))
+    (let* ((combined (append *temp-regs* *local-regs*))
+           (local-start 6)
+           (local-end   (+ local-start *local-reg-count*)))
+      (loop for i from 0 below 10
+            when (and (or (< i local-start) (>= i local-end))
+                      (aref *reg-in-use* i))
+            collect (nth i combined)))))
 
 (defun get-local-reg (index)
   "Get register for local variable by index.
@@ -2660,22 +2677,50 @@
   (1- (integer-length n)))
 
 (defun emit-multiply-by-constant (size)
-  "Multiply A by a constant SIZE. Uses shifts for powers of 2, else general multiply.
-   Returns t if simple (shifts only), nil if needed general multiply."
+  "Multiply A by a constant SIZE using shifts/add/sub, never calling __mul.
+   Factors size = 2^a * M (M odd) and uses 1-temp when M = 2^b+1 or 2^b-1,
+   falling back to 2-temp for other M. This minimises register pressure in
+   the physical-register regen path (only 6 regs available)."
   (cond
-    ((= size 1) t)  ; no-op
+    ((= size 1) t)
     ((power-of-2-p size)
-     ;; Use shifts: emit log2(size) left shifts
-     (dotimes (i (log2-int size))
-       (emit '(A=A<<1)))
+     (dotimes (i (log2-int size)) (emit '(A=A<<1)))
      t)
     (t
-     ;; General case: use software multiply
-     (let ((size-reg (alloc-temp-reg)))
-       (emit `(Rx= ,size ,size-reg))
-       (generate-multiply size-reg)
-       (free-temp-reg size-reg))
-     nil)))
+     ;; Factor: size = 2^a * M, where M is odd and > 1.
+     (let* ((a (loop for i from 0 when (logbitp i size) return i))
+            (m (ash size (- a)))
+            (orig-reg (alloc-temp-reg)))
+       (emit `(Rx=A ,orig-reg))      ; save original x
+       (cond
+         ;; M = 2^b + 1: one shift + add original  (e.g. 3,5,9,17...)
+         ;; Handles strides 12,20,24,36,40... (common for 2D int arrays)
+         ((power-of-2-p (1- m))
+          (dotimes (i (log2-int (1- m))) (emit '(A=A<<1)))  ; A = x*2^b
+          (emit `(A+=Rx ,orig-reg)))                          ; A = x*(2^b+1)
+         ;; M = 2^b - 1: one shift - original  (e.g. 7,15,31...)
+         ;; Handles strides 28,60... (e.g. 7-col or 15-col int arrays)
+         ((power-of-2-p (1+ m))
+          (dotimes (i (log2-int (1+ m))) (emit '(A=A<<1)))  ; A = x*2^b
+          (emit `(A-=Rx ,orig-reg)))                          ; A = x*(2^b-1)
+         ;; General M: accumulate each set bit — needs a second temp
+         (t
+          (let* ((bits (loop for i from 0 below 32 when (logbitp i m) collect i))
+                 (acc-reg (alloc-temp-reg)))
+            (emit `(A=Rx ,orig-reg))
+            (dotimes (i (first bits)) (emit '(A=A<<1)))
+            (emit `(Rx=A ,acc-reg))
+            (dolist (bit (rest bits))
+              (emit `(A=Rx ,orig-reg))
+              (dotimes (i bit) (emit '(A=A<<1)))
+              (emit `(A+=Rx ,acc-reg))
+              (emit `(Rx=A ,acc-reg)))
+            (emit `(A=Rx ,acc-reg))
+            (free-temp-reg acc-reg))))
+       ;; Apply trailing factor 2^a
+       (dotimes (i a) (emit '(A=A<<1)))
+       (free-temp-reg orig-reg))
+     t)))
 
 (defun emit-divide-by-constant (size)
   "Divide A by a constant SIZE. Uses shifts for powers of 2, else general divide."
@@ -2701,8 +2746,9 @@
   (emit-divide-by-constant elem-size))
 
 (defun constant-multiply-is-simple-p (size)
-  "Check if multiplying by SIZE can be done with just shifts (no function call)"
-  (power-of-2-p size))
+  "Check if multiplying by SIZE can be done without a __mul function call.
+   Always true since emit-multiply-by-constant uses shift-add decomposition."
+  (and (integerp size) (> size 0)))
 
 (defun expression-uses-mul-p (node)
   "Check if expression contains struct array access that will call __MUL"
@@ -3544,37 +3590,20 @@
          (elem-type (get-subscript-element-type node))
          (elem-size (if elem-type (type-size elem-type) 4))
          (is-simple (constant-multiply-is-simple-p elem-size)))
-    ;; For non-power-of-2 sizes (e.g., structs), we need to call __MUL
-    ;; or inline multiply. Both can clobber R0-R5 (inline uses temp regs).
-    ;; In physical mode, use local register (R6+) to preserve base address.
-    ;; In virtual mode, just use alloc-temp-reg - calling convention preserves regs.
-    (if is-simple
-        ;; Simple case: power-of-2 element size, use shifts
-        (let ((base-reg (alloc-temp-reg)))
-          ;; Get array base address
-          (generate-expression array)
-          (emit `(Rx=A ,base-reg))  ; save base
-          ;; Get index
-          (generate-expression index)
-          ;; Multiply by element size using shifts
-          (emit-multiply-by-constant elem-size)
-          ;; Add to base
-          (emit `(A+=Rx ,base-reg))
-          (free-temp-reg base-reg))
-        ;; Complex case: non-power-of-2, need general multiply
-        (let ((base-save-reg (if *use-virtual-regs*
-                                 (alloc-temp-reg)
-                                 (get-local-reg *local-reg-count*))))
-          ;; Step 1: Get array base address and save to safe register
-          (generate-expression array)
-          (emit `(Rx=A ,base-save-reg))  ; save base (safe from multiply)
-          ;; Step 2: Compute index * elem_size (may call __MUL or inline, clobbers R0-R5)
-          (generate-expression index)
-          (emit-multiply-by-constant elem-size)
-          ;; Step 3: Add base (in safe reg) to offset (in A)
-          (emit `(A+=Rx ,base-save-reg))
-          (when *use-virtual-regs*
-            (free-temp-reg base-save-reg))))))
+    ;; Evaluate the array expression first, then allocate base-reg.
+    ;; Deferring the alloc reduces peak register pressure for nested subscript
+    ;; chains (e.g. A[i][k]) where each level would otherwise hold a base-reg
+    ;; while evaluating the inner subscript, leading to 7+ simultaneous regs.
+    ;; With the defer, internal temps from array-eval are freed before base-reg
+    ;; is allocated, keeping peak usage to 6 even in deeply nested cases.
+    (declare (ignore is-simple))
+    (generate-expression array)   ; A = base address (all internal temps freed)
+    (let ((base-reg (alloc-temp-reg)))
+      (emit `(Rx=A ,base-reg))    ; save base
+      (generate-expression index)
+      (emit-multiply-by-constant elem-size)
+      (emit `(A+=Rx ,base-reg))
+      (free-temp-reg base-reg))))
 
 ;;; ===========================================================================
 ;;; Struct Member Access
@@ -4337,9 +4366,10 @@
            (setf init-value (second init-value)))  ; extract the label symbol
          ;; For arrays without initializer, emit zeroes for each element
          (if (type-desc-array-size var-type)
-             (let* ((array-size (type-desc-array-size var-type))
-                    (elem-size (type-desc-size var-type)))
-               (dotimes (i array-size)
+             (let* ((total-elems (total-array-elements (type-desc-array-size var-type)))
+                    (elem-type (get-array-element-type var-type))
+                    (elem-size (if elem-type (type-size elem-type) 4)))
+               (dotimes (i total-elems)
                  (case elem-size
                    (1 (emit `(abyte 0)))
                    (2 (emit `(aword 0)))
