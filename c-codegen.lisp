@@ -4538,37 +4538,42 @@
                           (2 (emit `(aword ,val)))
                           (otherwise (emit `(adword ,val))))
                         (incf current-offset member-size)))))))
-             ;; Non-designated: iterate through members and pop elements in order
+             ;; Non-designated: iterate through members and pop elements in order.
+             ;; Members from inlined anonymous unions share the same offset; skip
+             ;; any member whose offset is already covered (< current-offset) so
+             ;; that they don't consume an extra initializer element.
              (loop for member in members
-                   for elem = (pop init-elements)
                    do (let* ((member-type (struct-member-type member))
                              (member-offset (struct-member-offset member))
                              (member-size (type-size member-type)))
-                        ;; Emit padding if needed
-                        (when (> member-offset current-offset)
-                          (dotimes (i (- member-offset current-offset))
-                            (emit `(abyte 0))))
-                        (setf current-offset member-offset)
-                        (cond
-                          ;; Nested init-list for nested struct/array
-                          ((and elem
-                                (ast-node-p elem)
-                                (eq (ast-node-type elem) 'init-list))
-                           (generate-global-init-list elem member-type)
-                           (incf current-offset (type-size member-type)))
-                          ;; Value (or nil for uninitialized)
-                          (t
-                           (let ((val (if elem
-                                          (or (evaluate-constant-expression elem) 0)
-                                          0)))
-                             ;; Check if val is a label reference (:label SYMBOL)
-                             (when (and (listp val) (eq (car val) :label))
-                               (setf val (second val)))
-                             (case member-size
-                               (1 (emit `(abyte ,val)))
-                               (2 (emit `(aword ,val)))
-                               (otherwise (emit `(adword ,val))))
-                             (incf current-offset member-size)))))))
+                        ;; Skip union duplicates at already-covered offsets
+                        (when (>= member-offset current-offset)
+                          ;; Emit padding if needed
+                          (when (> member-offset current-offset)
+                            (dotimes (i (- member-offset current-offset))
+                              (emit `(abyte 0))))
+                          (setf current-offset member-offset)
+                          (let ((elem (pop init-elements)))
+                            (cond
+                              ;; Nested init-list for nested struct/array
+                              ((and elem
+                                    (ast-node-p elem)
+                                    (eq (ast-node-type elem) 'init-list))
+                               (generate-global-init-list elem member-type)
+                               (incf current-offset (type-size member-type)))
+                              ;; Value (or nil for uninitialized)
+                              (t
+                               (let ((val (if elem
+                                              (or (evaluate-constant-expression elem) 0)
+                                              0)))
+                                 ;; Check if val is a label reference (:label SYMBOL)
+                                 (when (and (listp val) (eq (car val) :label))
+                                   (setf val (second val)))
+                                 (case member-size
+                                   (1 (emit `(abyte ,val)))
+                                   (2 (emit `(aword ,val)))
+                                   (otherwise (emit `(adword ,val))))
+                                 (incf current-offset member-size)))))))))
          ;; Emit trailing padding to reach struct size
          (let ((struct-size (struct-def-size struct-def)))
            (when (< current-offset struct-size)
