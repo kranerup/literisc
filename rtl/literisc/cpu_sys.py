@@ -113,7 +113,8 @@ def rom(
 def cpu_sys(
         clk,
         sync_rstn,
-        axi
+        axi,
+        conf
         ):
 
     # Memory map:
@@ -480,9 +481,12 @@ def cpu_sys(
 00000110: 01 80 83 FF 1C 81 00 10 B1 00 1A F1 F1 F1 F1 F1  |................|
 00000120: F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 F1 70  |...............p|
 00000130: F5 01 1E FE F6 90 0B AF FF 0D 91 CB A6 76 F7 FE  |.............v..|""")
-
-
-
+        
+        # conf read coreversion loop
+        program = hexdump_to_prog("""\
+00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
+        program = hexdump_to_prog("""\
+00000000: 80 83 FF 1C 40 80 99 0E 10 80 83 FF 28 70 A0 70  |....@.......(p.p|""")
 
     boot_code = prog_to_tuples( program )
 
@@ -507,98 +511,145 @@ def cpu_sys(
     # single beat, non-pipelined master
 
     M_IDLE = 0
-    M_WAIT_RVALID = 1
-    M_WAIT_ARREADY = 2
-    M_WAIT_AWREADY = 3
-    M_WAIT_WREADY = 4
+    M_WAIT_READ = 1
+    M_WAIT_WRITE = 2
 
     m_state = signal(3)
 
     @always(clk.posedge)
     def axi_master():
         axi.arlen.next = 0
+        axi.rready.next = 0
+        axi.arvalid.next = 0
+        axi.araddr.next = 0
+        axi.awaddr.next = 0
+        axi.awvalid.next = 0
+        axi.wdata.next = 0
+        axi.wvalid.next = 0
 
+        #if sync_rstn == 0:
+        #    axi.rready.next = 0
+        #    axi.arvalid.next = 0
+        #    axi.araddr.next = 0
+        #    axi.awaddr.next = 0
+        #    axi.awvalid.next = 0
+        #    axi.wdata.next = 0
+        #    axi.wvalid.next = 0
+        #    req_done.next = 0
+        #    req_rdata.next = 0
+        #    m_state.next = M_IDLE
+        #else:
+
+        #    if m_state == M_IDLE:
+        #        req_done.next = 0
+        #        axi.rready.next = 0
+        #        axi.arvalid.next = 0
+
+        #        if req_rd == 1:
+        #            print("axi req_rd")
+        #            axi.arvalid.next = 1
+        #            axi.araddr.next = req_addr
+        #            if axi.arready == 1:
+        #                m_state.next = M_WAIT_RVALID
+        #            else:
+        #                m_state.next = M_WAIT_ARREADY
+        #        elif req_wr == 1:
+        #            print("axi req_wr")
+        #            axi.awvalid.next = 1
+        #            axi.awaddr.next = req_addr
+        #            axi.wvalid.next = 1
+        #            axi.wdata.next = req_wdata
+        #            if axi.awready == 1:
+        #                m_state.next = M_WAIT_WREADY
+        #            else:
+        #                m_state.next = M_WAIT_AWREADY
+
+        #    elif m_state == M_WAIT_ARREADY:
+        #        if axi.arready == 1:
+        #            if axi.rvalid == 1:
+        #                axi.rready.next = 1
+        #                req_rdata.next = axi.rdata
+        #                print("axi req_done")
+        #                req_done.next = 1
+        #                m_state.next = M_IDLE
+        #            else:
+        #                m_state.next = M_WAIT_RVALID
+        #        else:
+        #            m_state.next = M_WAIT_ARREADY
+        #    elif m_state == M_WAIT_RVALID:
+        #        axi.arvalid.next = 0
+        #        if axi.rvalid == 1:
+        #            axi.rready.next = 1
+        #            req_rdata.next = axi.rdata
+        #            print("axi req_done")
+        #            req_done.next = 1
+        #            m_state.next = M_IDLE
+        #        else:
+        #            m_state.next = M_WAIT_RVALID
+
+        #    elif m_state == M_WAIT_AWREADY:
+        #        if axi.awready == 1:
+        #            axi.awvalid.next = 0
+        #            if axi.wready == 1:
+        #                axi.wvalid.next = 0
+        #                req_done.next = 1
+        #                print("axi req_done")
+        #                m_state.next = M_IDLE
+        #            else:
+        #                m_state.next = M_WAIT_WREADY
+        #        else:
+        #            m_state.next = M_WAIT_AWREADY
+        #    elif m_state == M_WAIT_WREADY:
+        #        if axi.wready == 1:
+        #            axi.wvalid.next = 0
+        #            req_done.next = 1
+        #            print("axi req_done")
+        #            m_state.next = M_IDLE
+        #        else:
+        #            m_state.next = M_WAIT_WREADY
+
+    @always(clk.posedge)
+    def conf_master():
         if sync_rstn == 0:
-            axi.rready.next = 0
-            axi.arvalid.next = 0
-            axi.araddr.next = 0
-            axi.awaddr.next = 0
-            axi.awvalid.next = 0
-            axi.wdata.next = 0
-            axi.wvalid.next = 0
+            conf.master_request_address.next = 0
+            conf.master_request_data.next = 0
+            conf.master_request_id.next = 0
+            conf.master_request_type.next = 0
+            conf.master_request_we.next = 0
+            conf.master_request_re.next = 0
             req_done.next = 0
             req_rdata.next = 0
             m_state.next = M_IDLE
         else:
-
             if m_state == M_IDLE:
+                conf.master_request_address.next = 0
+                conf.master_request_data.next = 0
+                conf.master_request_id.next = 0
+                conf.master_request_type.next = 0
+                conf.master_request_we.next = 0
+                conf.master_request_re.next = 0
                 req_done.next = 0
-                axi.rready.next = 0
-                axi.arvalid.next = 0
-
                 if req_rd == 1:
-                    print("axi req_rd")
-                    axi.arvalid.next = 1
-                    axi.araddr.next = req_addr
-                    if axi.arready == 1:
-                        m_state.next = M_WAIT_RVALID
-                    else:
-                        m_state.next = M_WAIT_ARREADY
+                    print("req_rd")
+                    conf.master_request_address.next = req_addr
+                    conf.master_request_re.next = 1
+                    m_state.next = M_WAIT_READ
+                    print(m_state.next)
                 elif req_wr == 1:
-                    print("axi req_wr")
-                    axi.awvalid.next = 1
-                    axi.awaddr.next = req_addr
-                    axi.wvalid.next = 1
-                    axi.wdata.next = req_wdata
-                    if axi.awready == 1:
-                        m_state.next = M_WAIT_WREADY
-                    else:
-                        m_state.next = M_WAIT_AWREADY
-
-            elif m_state == M_WAIT_ARREADY:
-                if axi.arready == 1:
-                    if axi.rvalid == 1:
-                        axi.rready.next = 1
-                        req_rdata.next = axi.rdata
-                        print("axi req_done")
-                        req_done.next = 1
-                        m_state.next = M_IDLE
-                    else:
-                        m_state.next = M_WAIT_RVALID
-                else:
-                    m_state.next = M_WAIT_ARREADY
-            elif m_state == M_WAIT_RVALID:
-                axi.arvalid.next = 0
-                if axi.rvalid == 1:
-                    axi.rready.next = 1
-                    req_rdata.next = axi.rdata
-                    print("axi req_done")
+                    print("req_wr")
+                    conf.master_request_address.next = req_addr
+                    conf.master_request_data.next = req_wdata
+                    conf.master_request_we.next = 1
+                    m_state.next = M_WAIT_WRITE
+            elif m_state == M_WAIT_READ:
+                print("yes1")
+                if conf.master_reply_status != 0:
+                    req_rdata.next = conf.master_reply_data
                     req_done.next = 1
                     m_state.next = M_IDLE
-                else:
-                    m_state.next = M_WAIT_RVALID
-
-            elif m_state == M_WAIT_AWREADY:
-                if axi.awready == 1:
-                    axi.awvalid.next = 0
-                    if axi.wready == 1:
-                        axi.wvalid.next = 0
-                        req_done.next = 1
-                        print("axi req_done")
-                        m_state.next = M_IDLE
-                    else:
-                        m_state.next = M_WAIT_WREADY
-                else:
-                    m_state.next = M_WAIT_AWREADY
-            elif m_state == M_WAIT_WREADY:
-                if axi.wready == 1:
-                    axi.wvalid.next = 0
+            elif m_state == M_WAIT_WRITE:
+                print("yes2")
+                if conf.master_reply_status != 0:
                     req_done.next = 1
-                    print("axi req_done")
                     m_state.next = M_IDLE
-                else:
-                    m_state.next = M_WAIT_WREADY
-
     return instances()
-
-
