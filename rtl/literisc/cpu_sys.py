@@ -122,9 +122,12 @@ def cpu_sys(
     # X - 8191          : IMEM (and accessible from DMEM bus)
     # 8192 - 8192+32768 : DMEM
     # 65536-100 - 65535 : IO
+    # 
+    # 
     perip_addr_bits = 16
     perip_data_bits = 32
     cpu_dmem_data_bits = 32
+    #dmem_depth = 16384 # 32768 # reduced to fit FPGA BRAM ( 65536)
     dmem_depth = 16384 # 32768 # reduced to fit FPGA BRAM ( 65536)
     imem_depth = 8192
 
@@ -132,8 +135,10 @@ def cpu_sys(
     imem_high = imem_depth - 1
     dmem_low = imem_depth
     dmem_high = dmem_low + dmem_depth - 1
-    IO_LOW = 65536-100
-    IO_HIGH = 65535
+    IO_LOW = 2**16
+    IO_HIGH = 2**17 - 8
+    TICKS_ADDRESS = IO_HIGH + 1
+    IRQ_ADDRESS = IO_HIGH
 
     cpu_imem_radr = signal(16)
     n_deferred_cpu_imem_radr = signal(16)
@@ -165,6 +170,8 @@ def cpu_sys(
     clk_en = signal()
     rom_clk_en = signal()
   
+    do_irq = signal()
+
     icpu = cpu(
             cpu_clk,
             clk_en,
@@ -196,7 +203,6 @@ def cpu_sys(
 
     IO_WAIT = 1
     IMEM_WAIT = 2
-     
 
     @always_comb
     def cg():
@@ -319,6 +325,12 @@ def cpu_sys(
                     n_req_reading.next = dmem_rd
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
+                elif cpu_dmem_adr == IRQ_ADDRESS and dmem_wr:
+                    do_irq.next = 1
+                elif cpu_dmem_adr == TICKS_ADDRESS and dmem_rd:
+                    if dmem_rd == 1:
+                        sel_axi_rd_data.next = 1
+                        req_rdata.next = conf.ticks
                 # --- dmem access -------------
                 elif cpu_dmem_adr >= dmem_low and cpu_dmem_adr <= dmem_high:
                     n_cpu_waiting.next = 0
@@ -485,12 +497,16 @@ def cpu_sys(
         # conf read coreversion loop
 #        program = hexdump_to_prog("""\
 #00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
-        program = hexdump_to_prog("""\
-00000000: 80 83 FF 1C 40 80 99 0E 10 80 83 FF 28 70 A0 70  |....@.......(p.p|""")
+        # conf read CoreVersion register, write to Scratch register
+#        program = hexdump_to_prog("""\
+#00000000: 80 83 FF 1C 40 80 99 0E 10 80 83 FF 28 70 A0 70  |....@.......(p.p|""")
 #        program = hexdump_to_prog("""\
 #00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
 #        program = hexdump_to_prog("""\
 #00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
+
+        program = hexdump_to_prog("""\
+00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
 
     boot_code = prog_to_tuples( program )
 
@@ -519,6 +535,11 @@ def cpu_sys(
     M_WAIT_WRITE = 2
 
     m_state = signal(3)
+
+    @always(clk.posedge)
+    def irq_pulse():
+        conf.irq.next = 1 if do_irq else 0
+        do_irq.next = 0
 
     @always(clk.posedge)
     def axi_master():
