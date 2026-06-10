@@ -13,3 +13,5 @@ class Conf(Struct):
         self.master_reply_id = signal()
         self.master_reply_status = signal(2)
         self.master_reply_data = signal(32)
+        self.ticks = signal(5)
+        self.irq = signal()

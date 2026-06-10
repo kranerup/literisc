@@ -483,10 +483,14 @@ def cpu_sys(
 00000130: F5 01 1E FE F6 90 0B AF FF 0D 91 CB A6 76 F7 FE  |.............v..|""")
         
         # conf read coreversion loop
-        program = hexdump_to_prog("""\
-00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
         program = hexdump_to_prog("""\
 00000000: 80 83 FF 1C 40 80 99 0E 10 80 83 FF 28 70 A0 70  |....@.......(p.p|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 83 FF 1C 40 A0 79 00 00 00 00 00 00 00 00 00  |....@.y.........|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
 
     boot_code = prog_to_tuples( program )
 
@@ -610,6 +614,14 @@ def cpu_sys(
 
     @always(clk.posedge)
     def conf_master():
+        if conf.master_request_re == 1 or conf.master_request_we == 1:
+            conf.master_request_address.next = 0
+            conf.master_request_data.next = 0
+            conf.master_request_id.next = 0
+            conf.master_request_type.next = 0
+            conf.master_request_we.next = 0
+            conf.master_request_re.next = 0
+
         if sync_rstn == 0:
             conf.master_request_address.next = 0
             conf.master_request_data.next = 0
@@ -622,33 +634,23 @@ def cpu_sys(
             m_state.next = M_IDLE
         else:
             if m_state == M_IDLE:
-                conf.master_request_address.next = 0
-                conf.master_request_data.next = 0
-                conf.master_request_id.next = 0
-                conf.master_request_type.next = 0
-                conf.master_request_we.next = 0
-                conf.master_request_re.next = 0
                 req_done.next = 0
                 if req_rd == 1:
-                    print("req_rd")
-                    conf.master_request_address.next = req_addr
+                    # divide by 4 to translate from byte addressing to word addressing
+                    conf.master_request_address.next = req_addr // 4
                     conf.master_request_re.next = 1
                     m_state.next = M_WAIT_READ
-                    print(m_state.next)
                 elif req_wr == 1:
-                    print("req_wr")
-                    conf.master_request_address.next = req_addr
+                    conf.master_request_address.next = req_addr // 4
                     conf.master_request_data.next = req_wdata
                     conf.master_request_we.next = 1
                     m_state.next = M_WAIT_WRITE
             elif m_state == M_WAIT_READ:
-                print("yes1")
                 if conf.master_reply_status != 0:
                     req_rdata.next = conf.master_reply_data
                     req_done.next = 1
                     m_state.next = M_IDLE
             elif m_state == M_WAIT_WRITE:
-                print("yes2")
                 if conf.master_reply_status != 0:
                     req_done.next = 1
                     m_state.next = M_IDLE
