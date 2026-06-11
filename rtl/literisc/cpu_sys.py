@@ -1,3 +1,5 @@
+from os import sync
+
 from myhdl import *
 
 from modules.common.memory import memory
@@ -9,6 +11,26 @@ from tb import load_a_rx, load_rx, jump_relative
 from dp_mem import dp_mem
 from cpu_common import flop
 import re
+
+# Memory map:
+# 0 - X             : boot rom
+# X - 8191          : IMEM (and accessible from DMEM bus)
+# 8192 - 8192+32768 : DMEM
+# 65536-100 - 65535 : IO
+
+PERIP_ADDR_BITS    = 16
+PERIP_DATA_BITS    = 32
+CPU_DMEM_DATA_BITS = 32
+DMEM_DEPTH  = 16384
+IMEM_DEPTH  = 8192
+IMEM_LOW    = 0
+IMEM_HIGH   = IMEM_DEPTH - 1
+DMEM_LOW    = IMEM_DEPTH
+DMEM_HIGH   = DMEM_LOW + DMEM_DEPTH - 1
+IO_LOW      = 2**16
+IO_HIGH     = 2**17 - 1
+IRQ_ADDRESS   = IO_HIGH + 1
+TICKS_ADDRESS = IO_HIGH + 2
 
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
@@ -117,35 +139,12 @@ def cpu_sys(
         conf
         ):
 
-    # Memory map:
-    # 0 - X             : boot rom
-    # X - 8191          : IMEM (and accessible from DMEM bus)
-    # 8192 - 8192+32768 : DMEM
-    # 65536-100 - 65535 : IO
-    # 
-    # 
-    perip_addr_bits = 16
-    perip_data_bits = 32
-    cpu_dmem_data_bits = 32
-    #dmem_depth = 16384 # 32768 # reduced to fit FPGA BRAM ( 65536)
-    dmem_depth = 16384 # 32768 # reduced to fit FPGA BRAM ( 65536)
-    imem_depth = 8192
-
-    imem_low = 0 # if changed there needs to be added some offset calc
-    imem_high = imem_depth - 1
-    dmem_low = imem_depth
-    dmem_high = dmem_low + dmem_depth - 1
-    IO_LOW = 2**16
-    IO_HIGH = 2**17 - 8
-    TICKS_ADDRESS = IO_HIGH + 1
-    IRQ_ADDRESS = IO_HIGH
-
-    cpu_imem_radr = signal(16)
-    n_deferred_cpu_imem_radr = signal(16)
-    deferred_cpu_imem_radr = signal(16)
-    dmem_imem_radr = Signal(modbv(0)[16:])
-    imem_radr = Signal(modbv(0)[16:])
-    imem_wadr = Signal(modbv(0)[16:])
+    cpu_imem_radr = signal(32)
+    n_deferred_cpu_imem_radr = signal(32)
+    deferred_cpu_imem_radr = signal(32)
+    dmem_imem_radr = Signal(modbv(0)[32:])
+    imem_radr = Signal(modbv(0)[32:])
+    imem_wadr = Signal(modbv(0)[32:])
     imem_din = Signal(modbv(0)[8:])
     imem_dout = Signal(modbv(0)[8:])
     cpu_imem_rd = Signal(modbv(0)[1:])
@@ -153,11 +152,11 @@ def cpu_sys(
     imem_rd = Signal(modbv(0)[1:])
     imem_wr = Signal(modbv(0)[1:])
     
-    dmem_adr = signal(16)
-    cpu_dmem_adr = signal(16)
-    dmem_din = signal(cpu_dmem_data_bits )
-    dmem_dout = signal(cpu_dmem_data_bits)
-    dmem_muxed_dout = signal(cpu_dmem_data_bits)
+    dmem_adr = signal(32)
+    cpu_dmem_adr = signal(32)
+    dmem_din = signal(CPU_DMEM_DATA_BITS )
+    dmem_dout = signal(CPU_DMEM_DATA_BITS)
+    dmem_muxed_dout = signal(CPU_DMEM_DATA_BITS)
     dmem_rd = signal()
     dmem_wr = signal()
     dmem_wr_sz = signal(2)
@@ -203,6 +202,7 @@ def cpu_sys(
 
     IO_WAIT = 1
     IMEM_WAIT = 2
+    SIGNAL_WAIT = 3
 
     @always_comb
     def cg():
@@ -224,9 +224,9 @@ def cpu_sys(
     req_rd = signal()
     req_wr = signal()
     req_done = signal()
-    req_addr = signal(perip_addr_bits)
-    req_wdata = signal(perip_data_bits)
-    req_rdata = signal(perip_data_bits)
+    req_addr = signal(PERIP_ADDR_BITS)
+    req_wdata = signal(PERIP_DATA_BITS)
+    req_rdata = signal(PERIP_DATA_BITS)
     req_reading = signal()
     n_req_reading = signal()
     dmem_renable = signal()
@@ -236,9 +236,12 @@ def cpu_sys(
     imem_src = signal()
     n_imem_src2 = signal()
     imem_src2 = signal()
-    imem_hold_data = signal(cpu_dmem_data_bits)
-    n_imem_hold_data = signal(cpu_dmem_data_bits)
+    imem_hold_data = signal(CPU_DMEM_DATA_BITS)
+    n_imem_hold_data = signal(CPU_DMEM_DATA_BITS)
+    n_sel_ticks_rd_data = signal(3)
+    sel_ticks_rd_data = signal(3)
 
+    itick = flop(n_sel_ticks_rd_data, sel_ticks_rd_data, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     icw   = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
     icwio = flop( n_wait_type,   wait_type,   clk_en=None, clk=clk, sync_rstn=sync_rstn )
     ird   = flop( n_req_reading, req_reading, clk_en=None, clk=clk, sync_rstn=sync_rstn )
@@ -256,10 +259,11 @@ def cpu_sys(
             n_imem_hold_data.next = imem_dout
         n_imem_src2.next = imem_src
 
-
     @always_comb
     def dmux():
-        if sel_axi_rd_data == 1:
+        if sel_ticks_rd_data != 0:
+            dmem_muxed_dout.next = conf.ticks
+        elif sel_axi_rd_data == 1:
             dmem_muxed_dout.next = req_rdata
         elif imem_src2 == 1:
             dmem_muxed_dout.next = imem_hold_data
@@ -293,6 +297,7 @@ def cpu_sys(
         n_req_reading.next = 0
         dmem_imem_rd.next = 0
         n_deferred_cpu_imem_radr.next = cpu_imem_radr
+        do_irq.next = 1
 
         sel_axi_rd_data.next = req_reading
         sel_imem_src.next = 0
@@ -309,9 +314,15 @@ def cpu_sys(
                     n_wait_type.next = IO_WAIT
             elif wait_type == IMEM_WAIT:
                 n_cpu_waiting.next = 0
+            elif wait_type == SIGNAL_WAIT:
+                n_sel_ticks_rd_data.next = sel_ticks_rd_data - 1
+                if sel_ticks_rd_data == 0:
+                    n_cpu_waiting.next = 0
             else:
                 assert False, "wait type error"
         else:
+            n_sel_ticks_rd_data.next = 0
+            print(cpu_dmem_adr)
             n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
                 # --- IO access ---------------
@@ -325,19 +336,27 @@ def cpu_sys(
                     n_req_reading.next = dmem_rd
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
-                elif cpu_dmem_adr == IRQ_ADDRESS and dmem_wr:
+                elif cpu_dmem_adr == IRQ_ADDRESS and dmem_wr == 1:
+                    n_cpu_waiting.next = 1
                     do_irq.next = 1
-                elif cpu_dmem_adr == TICKS_ADDRESS and dmem_rd:
-                    if dmem_rd == 1:
-                        sel_axi_rd_data.next = 1
-                        req_rdata.next = conf.ticks
+                    n_req_reading.next = dmem_wr
+                    n_wait_type.next = SIGNAL_WAIT
+                    dmem_renable.next = 0
+                    dmem_wenable.next = 0
+                elif cpu_dmem_adr == TICKS_ADDRESS and dmem_rd == 1:
+                    n_cpu_waiting.next = 1
+                    n_sel_ticks_rd_data.next = 3
+                    n_wait_type.next = SIGNAL_WAIT
+                    dmem_renable.next = 0
+                    dmem_wenable.next = 0
+                    print("YES")
                 # --- dmem access -------------
-                elif cpu_dmem_adr >= dmem_low and cpu_dmem_adr <= dmem_high:
+                elif cpu_dmem_adr >= DMEM_LOW and cpu_dmem_adr <= DMEM_HIGH:
                     n_cpu_waiting.next = 0
                     dmem_renable.next = dmem_rd
                     dmem_wenable.next = dmem_wr
                 # --- imem access -------------
-                elif cpu_dmem_adr >= imem_low and cpu_dmem_adr <= imem_high:
+                elif cpu_dmem_adr >= IMEM_LOW and cpu_dmem_adr <= IMEM_HIGH:
                     if dmem_wr == 0: # writes do not need delay
                         n_cpu_waiting.next = 1
                         n_wait_type.next = IMEM_WAIT
@@ -363,7 +382,7 @@ def cpu_sys(
 
     @always_comb
     def aoffs():
-        dmem_adr.next = cpu_dmem_adr - dmem_low
+        dmem_adr.next = cpu_dmem_adr - DMEM_LOW
 
     if False:
         dmem = memory(
@@ -376,7 +395,7 @@ def cpu_sys(
             wmask   = dmem_wmask,
             clk = cpu_clk,
             rstn = rstn,
-            depth = dmem_depth,
+            depth = DMEM_DEPTH,
             input_flops = 0,
             output_flops = 0,
             name = 'dmem')
@@ -391,7 +410,7 @@ def cpu_sys(
             wmask   = dmem_wmask,
             clk = cpu_clk,
             clk_en = clk_en,
-            depth = dmem_depth,
+            depth = DMEM_DEPTH,
             name = 'dmem')
 
     if False:
@@ -505,8 +524,14 @@ def cpu_sys(
 #        program = hexdump_to_prog("""\
 #00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
 
+#        program = hexdump_to_prog("""\
+#00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 88 80 00 F8 40 A0 78 00 00 00 00 00 00 00 00  |.....@.x........|""")
         program = hexdump_to_prog("""\
-00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
+00000000: 80 88 80 01 F8 40 A0 78 00 00 00 00 00 00 00 00  |.....@.x........|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 00 F8 40 A0 7A 00 00 00 00 00 00 00 00 00 00  |...@.z..........|""")
 
     boot_code = prog_to_tuples( program )
 
@@ -520,7 +545,7 @@ def cpu_sys(
         clk          = cpu_clk,
         clk_en       = rom_clk_en,
         sync_rstn    = sync_rstn,
-        depth        = imem_depth,
+        depth        = IMEM_DEPTH,
         input_flops  = 0,
         output_flops = 0,
         content      = boot_code,
@@ -538,8 +563,7 @@ def cpu_sys(
 
     @always(clk.posedge)
     def irq_pulse():
-        conf.irq.next = 1 if do_irq else 0
-        do_irq.next = 0
+        conf.irq.next = do_irq
 
     @always(clk.posedge)
     def axi_master():
