@@ -203,6 +203,7 @@ def cpu_sys(
     IO_WAIT = 1
     IMEM_WAIT = 2
     SIGNAL_WAIT = 3
+    CONF_SLAVE_WAIT = 4
 
     @always_comb
     def cg():
@@ -240,6 +241,24 @@ def cpu_sys(
     n_imem_hold_data = signal(CPU_DMEM_DATA_BITS)
     n_sel_ticks_rd_data = signal(3)
     sel_ticks_rd_data = signal(3)
+
+    # --- conf slave DMEM port signals ---
+    conf_slave_dmem_radr    = signal(32)
+    conf_slave_dmem_wadr    = signal(32)
+    conf_slave_dmem_din     = signal(CPU_DMEM_DATA_BITS)
+    conf_slave_dmem_dout    = signal(CPU_DMEM_DATA_BITS)
+    conf_slave_dmem_renable = signal()
+    conf_slave_dmem_wenable = signal()
+    conf_slave_dmem_wmask   = signal(4)
+ 
+    # muxed signals going into dp_mem
+    dmem_final_radr    = signal(32)
+    dmem_final_wadr    = signal(32)
+    dmem_final_din     = signal(CPU_DMEM_DATA_BITS)
+    dmem_final_renable = signal()
+    dmem_final_wenable = signal()
+    dmem_final_wmask   = signal(4)
+    dmem_final_dout    = signal(CPU_DMEM_DATA_BITS)
 
     itick = flop(n_sel_ticks_rd_data, sel_ticks_rd_data, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     icw   = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
@@ -284,6 +303,23 @@ def cpu_sys(
         n_imem_src.next = sel_imem_src
 
     @always_comb
+    def dmem_port_mux():
+        if slave_state != SLAVE_IDLE:
+            dmem_final_radr.next    = conf_slave_dmem_radr
+            dmem_final_wadr.next    = conf_slave_dmem_wadr
+            dmem_final_din.next     = conf_slave_dmem_din
+            dmem_final_renable.next = conf_slave_dmem_renable
+            dmem_final_wenable.next = conf_slave_dmem_wenable
+            dmem_final_wmask.next   = conf_slave_dmem_wmask
+        else:
+            dmem_final_radr.next    = dmem_adr
+            dmem_final_wadr.next    = dmem_adr
+            dmem_final_din.next     = dmem_din
+            dmem_final_renable.next = dmem_renable
+            dmem_final_wenable.next = dmem_wenable
+            dmem_final_wmask.next   = dmem_wmask
+
+    @always_comb
     def decode():
         req_rd.next = 0
         req_wr.next = 0
@@ -302,7 +338,9 @@ def cpu_sys(
         sel_axi_rd_data.next = req_reading
         sel_imem_src.next = 0
 
-        if cpu_waiting == 1:
+        if slave_state != SLAVE_IDLE:
+            pass
+        elif cpu_waiting == 1:
             if wait_type == IO_WAIT:
                 n_req_reading.next = req_reading
                 if req_done == 1:
@@ -322,7 +360,6 @@ def cpu_sys(
                 assert False, "wait type error"
         else:
             n_sel_ticks_rd_data.next = 0
-            print(cpu_dmem_adr)
             n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
                 # --- IO access ---------------
@@ -349,7 +386,6 @@ def cpu_sys(
                     n_wait_type.next = SIGNAL_WAIT
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
-                    print("YES")
                 # --- dmem access -------------
                 elif cpu_dmem_adr >= DMEM_LOW and cpu_dmem_adr <= DMEM_HIGH:
                     n_cpu_waiting.next = 0
@@ -386,13 +422,13 @@ def cpu_sys(
 
     if False:
         dmem = memory(
-            idata = dmem_din,
+            idata = dmem_final_din,
             odata = dmem_dout,
-            raddr = dmem_adr,
-            waddr = dmem_adr,
-            renable = dmem_renable,
-            wenable = dmem_wenable,
-            wmask   = dmem_wmask,
+            raddr = dmem_final_radr,
+            waddr = dmem_final_wadr,
+            renable = dmem_final_renable,
+            wenable = dmem_final_wenable,
+            wmask   = dmem_final_wmask,
             clk = cpu_clk,
             rstn = rstn,
             depth = DMEM_DEPTH,
@@ -401,13 +437,13 @@ def cpu_sys(
             name = 'dmem')
     else:
         dmem = dp_mem(
-            idata = dmem_din,
+            idata = dmem_final_din,
             odata = dmem_dout,
-            raddr = dmem_adr,
-            waddr = dmem_adr,
-            renable = dmem_renable,
-            wenable = dmem_wenable,
-            wmask   = dmem_wmask,
+            raddr = dmem_final_radr,
+            waddr = dmem_final_wadr,
+            renable = dmem_final_renable,
+            wenable = dmem_final_wenable,
+            wmask   = dmem_final_wmask,
             clk = cpu_clk,
             clk_en = clk_en,
             depth = DMEM_DEPTH,
@@ -528,8 +564,8 @@ def cpu_sys(
 #00000000: 80 99 0E 10 80 83 FF 28 70 A0 75 00 00 00 00 00  |.......(p.u.....|""")
 #        program = hexdump_to_prog("""\
 #00000000: 80 88 80 00 F8 40 A0 78 00 00 00 00 00 00 00 00  |.....@.x........|""")
-        program = hexdump_to_prog("""\
-00000000: 80 88 80 01 F8 40 A0 78 00 00 00 00 00 00 00 00  |.....@.x........|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 88 80 01 F8 40 A0 78 00 00 00 00 00 00 00 00  |.....@.x........|""")
 #        program = hexdump_to_prog("""\
 #00000000: 80 00 F8 40 A0 7A 00 00 00 00 00 00 00 00 00 00  |...@.z..........|""")
 
@@ -699,4 +735,96 @@ def cpu_sys(
                 if conf.master_reply_status != 0:
                     req_done.next = 1
                     m_state.next = M_IDLE
+
+    SLAVE_IDLE   = 0
+    SLAVE_READ1  = 1
+    SLAVE_READ2  = 2
+    SLAVE_WRITE  = 3
+
+    slave_state = signal(2)  # declare as Signal outside the process
+
+    @always(clk.posedge)
+    def conf_slave():
+        conf.slave_reply_status.next      = 0
+        #conf.slave_reply_data.next        = 0
+        conf.slave_reply_id.next          = 0
+        conf_slave_dmem_renable.next      = 0
+        conf_slave_dmem_wenable.next      = 0
+        conf_slave_dmem_wmask.next        = 0b1111
+        conf_slave_dmem_din.next          = 0
+
+        if sync_rstn == 0:
+            slave_state.next = SLAVE_IDLE
+
+        else:
+            if slave_state == SLAVE_IDLE:
+                if conf.slave_request_we:
+                    conf_slave_dmem_wadr.next    = conf.slave_request_address
+                    conf_slave_dmem_din.next     = conf.slave_request_data
+                    conf_slave_dmem_wenable.next = 1
+                    conf_slave_dmem_wmask.next   = 0b1111
+                    conf.slave_reply_id.next     = conf.slave_request_id
+                    slave_state.next             = SLAVE_WRITE
+
+                elif conf.slave_request_re:
+                    conf_slave_dmem_radr.next    = conf.slave_request_address
+                    conf_slave_dmem_renable.next = 1
+                    slave_state.next             = SLAVE_READ1
+
+            elif slave_state == SLAVE_WRITE:
+                conf.slave_reply_status.next = 1
+                conf.slave_reply_id.next     = conf.slave_request_id
+                slave_state.next             = SLAVE_IDLE
+
+            elif slave_state == SLAVE_READ1:
+                slave_state.next       = SLAVE_READ2
+
+            elif slave_state == SLAVE_READ2:
+                conf.slave_reply_data.next   = dmem_dout
+                print("dmem_out: ", dmem_dout)
+                print("slave_reply_data:", conf.slave_reply_data.next)
+                conf.slave_reply_status.next = 1
+                conf.slave_reply_id.next     = conf.slave_request_id
+                slave_state.next             = SLAVE_IDLE
+
+    #@always(clk.posedge)
+    #def conf_slave():
+    #    conf.slave_reply_status.next = 0
+    #    conf.slave_reply_data.next   = 0
+    #    conf.slave_reply_id.next     = 0
+    #    conf_slave_dmem_renable.next      = 0
+    #    conf_slave_dmem_wenable.next      = 0
+    #    conf_slave_dmem_wmask.next        = 0b1111
+    #    conf_slave_dmem_din.next     = 0
+    #    conf_slave_active.next = 0
+    #        #n_conf_slave_active.next          = 0
+
+    #    if sync_rstn == 0:
+    #        print("e")
+    #        #n_conf_slave_active.next = 0
+    #    else:
+    #        if conf_slave_active == 1:
+    #            print(dmem_muxed_dout)
+    #            # second cycle: read data is now valid on dmem_final_dout
+    #            conf.slave_reply_data.next   = dmem_muxed_dout 
+    #            conf.slave_reply_status.next = 1
+    #            conf.slave_reply_id.next     = conf.slave_request_id
+    #            conf_slave_active.next          = 0
+    #        elif conf.slave_request_we == 1:
+    #            print("b")
+    #            # write: single cycle, data latched by RAM on this edge
+    #            conf_slave_dmem_wadr.next    = conf.slave_request_address
+    #            conf_slave_dmem_din.next     = conf.slave_request_data
+    #            conf_slave_dmem_wenable.next = 1
+    #            conf_slave_dmem_wmask.next   = 0b1111
+    #            conf_slave_active.next     = 1
+    #            conf.slave_reply_id.next     = conf.slave_request_id
+    #        elif conf.slave_request_re == 1:
+    #            print("c")
+    #            # read: issue to RAM this cycle, capture result next cycle
+    #            conf_slave_dmem_radr.next    = conf.slave_request_address
+    #            conf_slave_dmem_renable.next = 1
+    #            conf_slave_active.next     = 1
+    #            print("d")
+
     return instances()
