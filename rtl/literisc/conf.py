@@ -5,7 +5,7 @@ import re
 class Conf(Struct):
     def __init__(self):
 
-        self.slave_request_address = signal(16)
+        self.slave_request_address = signal(32)
         self.slave_request_data = signal(32)
         self.slave_request_id = signal(2)
         self.slave_request_type = signal(2)
@@ -14,7 +14,7 @@ class Conf(Struct):
         self.slave_reply_data = signal(32)
         self.slave_reply_id = signal()
         self.slave_reply_status = signal(2)
-        self.master_request_address = signal(16)
+        self.master_request_address = signal(32)
         self.master_request_data = signal(32)
         self.master_request_id = signal(2)
         self.master_request_type = signal(2)
