@@ -569,6 +569,10 @@ def cpu_sys(
 #        program = hexdump_to_prog("""\
 #00000000: 80 00 F8 40 A0 7A 00 00 00 00 00 00 00 00 00 00  |...@.z..........|""")
 
+        # only jumps to the same label in loop
+        program = hexdump_to_prog("""\
+00000000: A0 7E 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |.~..............|""")
+
     boot_code = prog_to_tuples( program )
 
     imem = rom(
