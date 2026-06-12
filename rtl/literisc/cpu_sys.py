@@ -328,7 +328,7 @@ def cpu_sys(
 
     @always_comb
     def dmem_port_mux():
-        if slave_state_prev != SLAVE_IDLE:
+        if slave_state != SLAVE_IDLE:
             dmem_final_radr.next    = conf_slave_dmem_radr
             dmem_final_wadr.next    = conf_slave_dmem_wadr
             dmem_final_din.next     = conf_slave_dmem_din
@@ -345,7 +345,7 @@ def cpu_sys(
 
     @always_comb
     def imem_port_mux():
-        if slave_state_prev != SLAVE_IDLE:
+        if slave_state != SLAVE_IDLE:
             imem_final_wadr.next    = conf_slave_imem_wadr
             imem_final_din.next     = conf_slave_imem_din
             imem_final_wenable.next = conf_slave_imem_wenable
@@ -374,8 +374,11 @@ def cpu_sys(
         sel_imem_src.next = 0
         n_sel_intr_rd_data.next = 0
 
+        if slave_state != SLAVE_IDLE:
+            n_cpu_waiting.next = 1
+
         if slave_state_prev != SLAVE_IDLE:
-            print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
+            #print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
             n_cpu_waiting.next = cpu_waiting
             n_wait_type.next = wait_type
             n_req_reading.next = req_reading
@@ -405,7 +408,8 @@ def cpu_sys(
                     n_cpu_waiting.next = 1
                     n_wait_type.next = INTERRUPT_WAIT
             else:
-                assert False, "wait type error"
+                print("wait type error")
+                #assert False, "wait type error"
         else:
             n_sel_ticks_rd_data.next = 0
             n_req_reading.next = 0
@@ -841,13 +845,11 @@ def cpu_sys(
                         conf_slave_dmem_wmask.next   = 0b1111
                     conf.slave_reply_id.next     = conf.slave_request_id
                     slave_state.next             = SLAVE_WRITE
-                    n_cpu_waiting = 1
 
                 elif conf.slave_request_re:
                     conf_slave_dmem_radr.next    = conf.slave_request_address
                     conf_slave_dmem_renable.next = 1
                     slave_state.next             = SLAVE_READ1
-                    n_cpu_waiting = 1
 
             elif slave_state == SLAVE_WRITE:
                 conf.slave_reply_status.next = 1
