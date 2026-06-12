@@ -31,6 +31,7 @@ IO_LOW      = 2**16
 IO_HIGH     = 2**17 - 1
 IRQ_ADDRESS   = IO_HIGH + 1
 TICKS_ADDRESS = IO_HIGH + 2
+INTERRUPT_ADDRESS = IO_HIGH + 3
 
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
@@ -168,6 +169,7 @@ def cpu_sys(
     cpu_clk = signal()
     clk_en = signal()
     rom_clk_en = signal()
+    mem_clk_en = signal()
   
     do_irq = signal()
 
@@ -197,16 +199,18 @@ def cpu_sys(
     # --------------- cpu clock gating ------------
     cpu_waiting = signal()
     n_cpu_waiting = signal()
-    wait_type = signal(2)
-    n_wait_type = signal(2)
+    wait_type = signal(4)
+    n_wait_type = signal(4)
 
     IO_WAIT = 1
     IMEM_WAIT = 2
     SIGNAL_WAIT = 3
     CONF_SLAVE_WAIT = 4
+    INTERRUPT_WAIT = 5
 
     @always_comb
     def cg():
+        mem_clk_en.next = 1
         if sync_rstn == 0:
             clk_en.next = 1
             rom_clk_en.next = 1
@@ -250,7 +254,12 @@ def cpu_sys(
     conf_slave_dmem_renable = signal()
     conf_slave_dmem_wenable = signal()
     conf_slave_dmem_wmask   = signal(4)
- 
+
+    # --- conf slave IMEM port signals ---
+    conf_slave_imem_wadr    = signal(32)
+    conf_slave_imem_din     = signal(CPU_DMEM_DATA_BITS)
+    conf_slave_imem_wenable = signal()
+
     # muxed signals going into dp_mem
     dmem_final_radr    = signal(32)
     dmem_final_wadr    = signal(32)
@@ -260,6 +269,11 @@ def cpu_sys(
     dmem_final_wmask   = signal(4)
     dmem_final_dout    = signal(CPU_DMEM_DATA_BITS)
 
+    # muxed signals going into imem write port
+    imem_final_wadr    = signal(32)
+    imem_final_din     = signal(CPU_DMEM_DATA_BITS)
+    imem_final_wenable = signal()
+
     itick = flop(n_sel_ticks_rd_data, sel_ticks_rd_data, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     icw   = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
     icwio = flop( n_wait_type,   wait_type,   clk_en=None, clk=clk, sync_rstn=sync_rstn )
@@ -268,6 +282,14 @@ def cpu_sys(
     iis2  = flop( n_imem_src2,   imem_src2,    clk_en=None, clk=clk, sync_rstn=sync_rstn )
     iih   = flop( n_imem_hold_data,    imem_hold_data,    clk_en=None, clk=clk, sync_rstn=sync_rstn )
     idf   = flop( n_deferred_cpu_imem_radr, deferred_cpu_imem_radr, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    # interrupt-address blocking mechanism
+    intr_addr_valid    = signal()
+    intr_addr_data     = signal(CPU_DMEM_DATA_BITS)
+    n_sel_intr_rd_data = signal()
+    sel_intr_rd_data   = signal()
+
+    iisr = flop(n_sel_intr_rd_data, sel_intr_rd_data, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     sel_axi_rd_data = signal()
 
@@ -284,6 +306,8 @@ def cpu_sys(
             dmem_muxed_dout.next = conf.ticks
         elif sel_axi_rd_data == 1:
             dmem_muxed_dout.next = req_rdata
+        elif sel_intr_rd_data == 1:
+            dmem_muxed_dout.next = intr_addr_data
         elif imem_src2 == 1:
             dmem_muxed_dout.next = imem_hold_data
         else:
@@ -304,7 +328,7 @@ def cpu_sys(
 
     @always_comb
     def dmem_port_mux():
-        if slave_state != SLAVE_IDLE:
+        if slave_state_prev != SLAVE_IDLE:
             dmem_final_radr.next    = conf_slave_dmem_radr
             dmem_final_wadr.next    = conf_slave_dmem_wadr
             dmem_final_din.next     = conf_slave_dmem_din
@@ -318,6 +342,17 @@ def cpu_sys(
             dmem_final_renable.next = dmem_renable
             dmem_final_wenable.next = dmem_wenable
             dmem_final_wmask.next   = dmem_wmask
+
+    @always_comb
+    def imem_port_mux():
+        if slave_state_prev != SLAVE_IDLE:
+            imem_final_wadr.next    = conf_slave_imem_wadr
+            imem_final_din.next     = conf_slave_imem_din
+            imem_final_wenable.next = conf_slave_imem_wenable
+        else:
+            imem_final_wadr.next    = dmem_adr
+            imem_final_din.next     = dmem_din
+            imem_final_wenable.next = imem_wenable
 
     @always_comb
     def decode():
@@ -337,9 +372,15 @@ def cpu_sys(
 
         sel_axi_rd_data.next = req_reading
         sel_imem_src.next = 0
+        n_sel_intr_rd_data.next = 0
 
-        if slave_state != SLAVE_IDLE:
-            pass
+        if slave_state_prev != SLAVE_IDLE:
+            print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
+            n_cpu_waiting.next = cpu_waiting
+            n_wait_type.next = wait_type
+            n_req_reading.next = req_reading
+            n_sel_ticks_rd_data.next = sel_ticks_rd_data
+            n_sel_intr_rd_data.next = sel_intr_rd_data
         elif cpu_waiting == 1:
             if wait_type == IO_WAIT:
                 n_req_reading.next = req_reading
@@ -356,6 +397,13 @@ def cpu_sys(
                 n_sel_ticks_rd_data.next = sel_ticks_rd_data - 1
                 if sel_ticks_rd_data == 0:
                     n_cpu_waiting.next = 0
+            elif wait_type == INTERRUPT_WAIT:
+                if intr_addr_valid == 1:
+                    n_cpu_waiting.next = 0
+                    n_sel_intr_rd_data.next = 1
+                else:
+                    n_cpu_waiting.next = 1
+                    n_wait_type.next = INTERRUPT_WAIT
             else:
                 assert False, "wait type error"
         else:
@@ -384,6 +432,12 @@ def cpu_sys(
                     n_cpu_waiting.next = 1
                     n_sel_ticks_rd_data.next = 3
                     n_wait_type.next = SIGNAL_WAIT
+                    dmem_renable.next = 0
+                    dmem_wenable.next = 0
+                elif cpu_dmem_adr == INTERRUPT_ADDRESS and dmem_rd == 1:
+                    print("hlleoman")
+                    n_cpu_waiting.next = 1
+                    n_wait_type.next = INTERRUPT_WAIT
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
                 # --- dmem access -------------
@@ -445,7 +499,7 @@ def cpu_sys(
             wenable = dmem_final_wenable,
             wmask   = dmem_final_wmask,
             clk = cpu_clk,
-            clk_en = clk_en,
+            clk_en = mem_clk_en,
             depth = DMEM_DEPTH,
             name = 'dmem')
 
@@ -573,17 +627,21 @@ def cpu_sys(
         program = hexdump_to_prog("""\
 00000000: A0 7E 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |.~..............|""")
 
+        # boot-read-interrupt.lisp, reads INTERRUPT_ADDRESS and then jumps to PC=512
+        program = hexdump_to_prog("""\
+00000000: 80 88 80 02 F8 40 80 84 00 10 FE 00 00 00 00 00  |.....@..........|""")
+
     boot_code = prog_to_tuples( program )
 
     imem = rom(
         odata        = imem_dout,
-        idata        = dmem_din,
+        idata        = imem_final_din,
         raddr        = imem_radr,
         renable      = imem_rd,
-        waddr        = dmem_adr,
-        wenable      = imem_wenable,
+        waddr        = imem_final_wadr,
+        wenable      = imem_final_wenable,
         clk          = cpu_clk,
-        clk_en       = rom_clk_en,
+        clk_en       = mem_clk_en,
         sync_rstn    = sync_rstn,
         depth        = IMEM_DEPTH,
         input_flops  = 0,
@@ -746,39 +804,56 @@ def cpu_sys(
     SLAVE_WRITE  = 3
 
     slave_state = signal(2)  # declare as Signal outside the process
+    slave_state_prev = signal(2)
+    isp = flop(slave_state, slave_state_prev, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     @always(clk.posedge)
     def conf_slave():
         conf.slave_reply_status.next      = 0
-        #conf.slave_reply_data.next        = 0
+        conf.slave_reply_data.next        = 0
         conf.slave_reply_id.next          = 0
         conf_slave_dmem_renable.next      = 0
         conf_slave_dmem_wenable.next      = 0
         conf_slave_dmem_wmask.next        = 0b1111
         conf_slave_dmem_din.next          = 0
+        conf_slave_imem_wenable.next      = 0
+        conf_slave_imem_din.next          = 0
+        intr_addr_valid.next              = 0
 
         if sync_rstn == 0:
             slave_state.next = SLAVE_IDLE
-
         else:
             if slave_state == SLAVE_IDLE:
                 if conf.slave_request_we:
-                    conf_slave_dmem_wadr.next    = conf.slave_request_address
-                    conf_slave_dmem_din.next     = conf.slave_request_data
-                    conf_slave_dmem_wenable.next = 1
-                    conf_slave_dmem_wmask.next   = 0b1111
+                    print("address: ", conf.slave_request_address)
+                    if conf.slave_request_address == INTERRUPT_ADDRESS:
+                        intr_addr_valid.next = 1
+                        intr_addr_data.next  = conf.slave_request_data
+                    elif conf.slave_request_address <= IMEM_HIGH:
+                        print("imem")
+                        conf_slave_imem_wadr.next    = conf.slave_request_address
+                        conf_slave_imem_din.next     = conf.slave_request_data
+                        conf_slave_imem_wenable.next = 1
+                    else:
+                        conf_slave_dmem_wadr.next    = conf.slave_request_address
+                        conf_slave_dmem_din.next     = conf.slave_request_data
+                        conf_slave_dmem_wenable.next = 1
+                        conf_slave_dmem_wmask.next   = 0b1111
                     conf.slave_reply_id.next     = conf.slave_request_id
                     slave_state.next             = SLAVE_WRITE
+                    n_cpu_waiting = 1
 
                 elif conf.slave_request_re:
                     conf_slave_dmem_radr.next    = conf.slave_request_address
                     conf_slave_dmem_renable.next = 1
                     slave_state.next             = SLAVE_READ1
+                    n_cpu_waiting = 1
 
             elif slave_state == SLAVE_WRITE:
                 conf.slave_reply_status.next = 1
                 conf.slave_reply_id.next     = conf.slave_request_id
                 slave_state.next             = SLAVE_IDLE
+                print("slave back to IDLE, cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
 
             elif slave_state == SLAVE_READ1:
                 slave_state.next       = SLAVE_READ2
