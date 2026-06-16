@@ -57,7 +57,7 @@ SLAVE_RESULT1 = 8196
 SLAVE_INPUT0  = 8200
 SLAVE_INPUT1  = 8204
 
-CPU_RESULT0   = DMEM_LOW + SLAVE_RESULT0
+CPU_RESULT0   = DMEM_LOW + SLAVE_RESULT0 # 8192 + 8192
 CPU_RESULT1   = DMEM_LOW + SLAVE_RESULT1
 CPU_INPUT0    = DMEM_LOW + SLAVE_INPUT0
 CPU_INPUT1    = DMEM_LOW + SLAVE_INPUT1
@@ -141,10 +141,68 @@ def _read_data(conf, clk, address, out):
         yield clk.posedge
     out[0] = int(conf.slave_reply_data)
 
+def print_program_hex(name, prog_bytes):
+    """Print an assembled program as a hexdump."""
+    print(f"\n{name} ({len(prog_bytes)} bytes):")
+    for i, byte in enumerate(prog_bytes):
+        if i % 16 == 0:
+            print(f"  {i:08X}: ", end="")
+        print(f"{byte:02X}", end=" ")
+        if i % 16 == 15:
+            print()
+    if len(prog_bytes) % 16 != 0:
+        print()
 
 # ---------------------------------------------------------------------------
 # Individual test runners
 # ---------------------------------------------------------------------------
+
+#
+def test_slave_write_during_boot():
+    """Test 5: Write during boot-read-interrupt."""
+    result    = [None]
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        icpu = cpu_sys(clk, rstn, axi, conf)
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = PROG_BASE
+            yield _write_data(conf, clk, 32, addr)
+            for i in range(50):
+                yield clk.posedge
+            #for byte in _PROG_ADD_TWO:
+            #    yield _write_data(conf, clk, byte, addr)
+            #    addr += 1
+            #    yield clk.posedge
+
+            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_slave_write_during_boot'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_slave_write_during_boot" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
 
 def test_slave_dmem_rw():
     """Test 1: slave DMEM write/read roundtrip (no CPU program needed)."""
@@ -233,7 +291,7 @@ def test_cpu_stores_constant():
 
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
-            for _ in range(MAX_POLLS):
+            for i in range(MAX_POLLS):
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if readback[0] == EXPECTED:
@@ -295,7 +353,8 @@ def test_slave_write_cpu_doubles():
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for i in range(MAX_POLLS):
-                if i % 5 != 0:
+                if i % 15 != 0:
+                    yield clk.posedge
                     continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
@@ -350,6 +409,9 @@ def test_slave_write_cpu_sum():
             rstn.next = 1
             yield clk.posedge
 
+            for i in range(50):
+                yield clk.posedge
+
             addr = PROG_BASE
             for byte in _PROG_ADD_TWO:
                 yield _write_data(conf, clk, byte, addr)
@@ -389,10 +451,14 @@ def test_slave_write_cpu_sum():
 
 if __name__ == "__main__":
     results = []
-    #results.append(test_slave_dmem_rw())
-    #results.append(test_cpu_stores_constant())
+
+    print_program_hex("PROG_STORE_CONSTANT",    _PROG_STORE_CONSTANT)
+
+    #results.append(test_slave_write_during_boot())
+    results.append(test_slave_dmem_rw())
+    results.append(test_cpu_stores_constant())
     results.append(test_slave_write_cpu_doubles())
-    #results.append(test_slave_write_cpu_sum())
+    results.append(test_slave_write_cpu_sum())
 
     passed = sum(results)
     total  = len(results)

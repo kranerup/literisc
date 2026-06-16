@@ -12,6 +12,9 @@ from dp_mem import dp_mem
 from cpu_common import flop
 import re
 
+#TODO: When clk_en goes to 0 use the previous value of imem_dout
+#TODO: Fix the problem of cpu making a master request and then being stopped by a slave_request, causing it to miss the reply. Fix by accepting slave_request when cpu is in an acceptable state.
+
 # Memory map:
 # 0 - X             : boot rom
 # X - 8191          : IMEM (and accessible from DMEM bus)
@@ -148,6 +151,8 @@ def cpu_sys(
     imem_wadr = Signal(modbv(0)[32:])
     imem_din = Signal(modbv(0)[8:])
     imem_dout = Signal(modbv(0)[8:])
+    imem_final_dout = Signal(modbv(0)[8:])
+    imem_dout_cached = Signal(modbv(0)[8:])
     cpu_imem_rd = Signal(modbv(0)[1:])
     dmem_imem_rd = Signal(modbv(0)[1:])
     imem_rd = Signal(modbv(0)[1:])
@@ -177,7 +182,7 @@ def cpu_sys(
             cpu_clk,
             clk_en,
             sync_rstn,
-            imem_dout,
+            imem_final_dout,
             cpu_imem_radr,
             cpu_imem_rd,
             dmem_din,
@@ -198,9 +203,12 @@ def cpu_sys(
 
     # --------------- cpu clock gating ------------
     cpu_waiting = signal()
+    prev_cpu_waiting = signal()
     n_cpu_waiting = signal()
     wait_type = signal(4)
     n_wait_type = signal(4)
+
+    icpuwait = flop(cpu_waiting, prev_cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     IO_WAIT = 1
     IMEM_WAIT = 2
@@ -217,10 +225,13 @@ def cpu_sys(
         else:
             clk_en.next = ~cpu_waiting
             if cpu_waiting == 1:
+                rom_clk_en.next = 1
                 if wait_type == IMEM_WAIT:
                     rom_clk_en.next = 1
-                else:
-                    rom_clk_en.next = 0
+                #else:
+                #    rom_clk_en.next = 0
+                #elif slave_state == :
+                #    rom_clk_en.next = 0
             else:
                 rom_clk_en.next = 1
         cpu_clk.next = clk
@@ -293,10 +304,30 @@ def cpu_sys(
 
     sel_axi_rd_data = signal()
 
+    n_imem_dout_cached = Signal(modbv(0)[8:])
+    imem_dout_cached = Signal(modbv(0)[8:])
+    icache = flop(n_imem_dout_cached, imem_dout_cached, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    @always_comb
+    def imem_cache():
+        # capture on rising edge of cpu_waiting
+        if prev_cpu_waiting == 0 and cpu_waiting == 1:
+            n_imem_dout_cached.next = imem_dout
+        else:
+            n_imem_dout_cached.next = imem_dout_cached  # hold
+
+    @always_comb
+    def imem_dout_mux():
+        if prev_cpu_waiting == 1 and cpu_waiting == 0:
+            imem_final_dout.next = imem_dout_cached
+        else:
+            imem_final_dout.next = imem_dout
+
     @always_comb
     def ihold():
         n_imem_hold_data.next = imem_hold_data
         if imem_src == 1:
+            #n_imem_hold_data.next = imem_dout
             n_imem_hold_data.next = imem_dout
         n_imem_src2.next = imem_src
 
@@ -376,8 +407,10 @@ def cpu_sys(
 
         if slave_state != SLAVE_IDLE:
             n_cpu_waiting.next = 1
-            n_wait_type.next = wait_type
-            n_req_reading.next = req_reading
+        else:
+            n_cpu_waiting.next = 0
+            #n_wait_type.next = wait_type
+            #n_req_reading.next = req_reading
             #n_sel_ticks_rd_data.next = sel_ticks_rd_data
             #n_sel_intr_rd_data.next = sel_intr_rd_data
 
@@ -419,7 +452,7 @@ def cpu_sys(
                     n_cpu_waiting.next = 1
                     n_wait_type.next = INTERRUPT_WAIT
             else:
-                print("wait type error")
+                n_cpu_waiting.next = 0
                 #assert False, "wait type error"
         else:
             n_sel_ticks_rd_data.next = 0
@@ -450,7 +483,6 @@ def cpu_sys(
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
                 elif cpu_dmem_adr == INTERRUPT_ADDRESS and dmem_rd == 1:
-                    print("hlleoman")
                     n_cpu_waiting.next = 1
                     n_wait_type.next = INTERRUPT_WAIT
                     dmem_renable.next = 0
@@ -656,7 +688,7 @@ def cpu_sys(
         waddr        = imem_final_wadr,
         wenable      = imem_final_wenable,
         clk          = cpu_clk,
-        clk_en       = mem_clk_en,
+        clk_en       = rom_clk_en,
         sync_rstn    = sync_rstn,
         depth        = IMEM_DEPTH,
         input_flops  = 0,
@@ -845,7 +877,6 @@ def cpu_sys(
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = conf.slave_request_data
                     elif conf.slave_request_address <= IMEM_HIGH:
-                        print("imem")
                         conf_slave_imem_wadr.next    = conf.slave_request_address
                         conf_slave_imem_din.next     = conf.slave_request_data
                         conf_slave_imem_wenable.next = 1
@@ -873,8 +904,8 @@ def cpu_sys(
 
             elif slave_state == SLAVE_READ2:
                 conf.slave_reply_data.next   = dmem_dout
-                print("dmem_out: ", dmem_dout)
-                print("slave_reply_data:", conf.slave_reply_data.next)
+                #print("dmem_out: ", dmem_dout)
+                #print("slave_reply_data:", conf.slave_reply_data.next)
                 conf.slave_reply_status.next = 1
                 conf.slave_reply_id.next     = conf.slave_request_id
                 slave_state.next             = SLAVE_IDLE
