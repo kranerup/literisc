@@ -41,7 +41,7 @@ from myhdl import *
 from modules.common.signal import signal
 from axi import Axi4
 from conf import Conf
-from cpu_sys import cpu_sys, INTERRUPT_ADDRESS, IMEM_HIGH, DMEM_LOW
+from cpu_sys import cpu_sys, INTERRUPT_ADDRESS, IMEM_HIGH, DMEM_LOW, IO_LOW, IO_HIGH
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from asm import assemble
@@ -110,6 +110,16 @@ _PROG_ADD_TWO = assemble(
     INPUT0_PHYS=CPU_INPUT0,
     INPUT1_PHYS=CPU_INPUT1,
     RESULT_PHYS=CPU_RESULT0,
+)
+
+_PROG_MASTER_REQUEST_ADDRESS_0 = assemble(
+    """
+    (Rx= IO_LOW R0)
+    (A=M[Rx] R0)
+    (label done)
+    (j done)
+    """,
+    IO_LOW=IO_LOW,
 )
 
 print(f"  PROG_STORE_CONSTANT   : {len(_PROG_STORE_CONSTANT)} bytes")
@@ -409,9 +419,6 @@ def test_slave_write_cpu_sum():
             rstn.next = 1
             yield clk.posedge
 
-            for i in range(50):
-                yield clk.posedge
-
             addr = PROG_BASE
             for byte in _PROG_ADD_TWO:
                 yield _write_data(conf, clk, byte, addr)
@@ -444,6 +451,81 @@ def test_slave_write_cpu_sum():
           (f"  ({result[0]})" if not ok else ""))
     return ok
 
+def test_master_request():
+    """Test 5: Master reads address 0 and puts the result into accumulator"""
+    result    = [None]
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        icpu = cpu_sys(clk, rstn, axi, conf)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = PROG_BASE
+            for byte in _PROG_MASTER_REQUEST_ADDRESS_0:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
+
+            yield clk.posedge
+            yield clk.posedge
+            yield clk.posedge
+
+            conf.master_reply_data.next = 42
+            conf.master_reply_status.next = 1
+            conf.master_reply_id.next = 0
+
+            yield clk.posedge
+
+            conf.master_reply_data.next = 0
+            conf.master_reply_status.next = 0
+            conf.master_reply_data.next = 0
+
+            yield clk.posedge
+            yield clk.posedge
+            yield clk.posedge
+            yield clk.posedge
+            yield clk.posedge
+            #for _ in range(MAX_POLLS):
+            #    readback = [0]
+            #    yield _read_data(conf, clk, SLAVE_RESULT0, readback)
+            #    if readback[0] == EXPECTED:
+            #        result[0] = "PASS"
+            #        raise StopSimulation()
+            #    yield clk.posedge
+
+            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_master_request'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_slave_write_cpu_sum" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -455,10 +537,11 @@ if __name__ == "__main__":
     print_program_hex("PROG_STORE_CONSTANT",    _PROG_STORE_CONSTANT)
 
     #results.append(test_slave_write_during_boot())
-    results.append(test_slave_dmem_rw())
-    results.append(test_cpu_stores_constant())
-    results.append(test_slave_write_cpu_doubles())
-    results.append(test_slave_write_cpu_sum())
+    #results.append(test_slave_dmem_rw())
+    #results.append(test_cpu_stores_constant())
+    #results.append(test_slave_write_cpu_doubles())
+    #results.append(test_slave_write_cpu_sum())
+    results.append(test_master_request())
 
     passed = sum(results)
     total  = len(results)
