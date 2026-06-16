@@ -376,15 +376,26 @@ def cpu_sys(
 
         if slave_state != SLAVE_IDLE:
             n_cpu_waiting.next = 1
-
-        if slave_state_prev != SLAVE_IDLE:
-            #print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
-            n_cpu_waiting.next = cpu_waiting
             n_wait_type.next = wait_type
             n_req_reading.next = req_reading
-            n_sel_ticks_rd_data.next = sel_ticks_rd_data
-            n_sel_intr_rd_data.next = sel_intr_rd_data
-        elif cpu_waiting == 1:
+            #n_sel_ticks_rd_data.next = sel_ticks_rd_data
+            #n_sel_intr_rd_data.next = sel_intr_rd_data
+
+        #if conf.slave_request_we == 1 or conf.slave_request_re == 1 or slave_state != SLAVE_IDLE:
+        #    n_cpu_waiting.next = 1
+
+        #if slave_state != SLAVE_IDLE:
+        #if conf.slave_request_we == 1 or conf.slave_request_re == 1:
+        #    n_cpu_waiting.next = 1
+
+        #if slave_state_prev != SLAVE_IDLE:
+        #    #print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
+        #    n_cpu_waiting.next = cpu_waiting
+        #    n_wait_type.next = wait_type
+        #    n_req_reading.next = req_reading
+        #    n_sel_ticks_rd_data.next = sel_ticks_rd_data
+        #    n_sel_intr_rd_data.next = sel_intr_rd_data
+        if cpu_waiting == 1:
             if wait_type == IO_WAIT:
                 n_req_reading.next = req_reading
                 if req_done == 1:
