@@ -315,6 +315,7 @@ def cpu_sys(
     tick_wait_valid = signal()
     n_tick_wait_valid = signal()
     prev_tick_bit = signal()
+    tick_bit = signal()
 
     itw = flop(n_tick_wait_valid, tick_wait_valid, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
@@ -323,13 +324,15 @@ def cpu_sys(
     n_cpu_rstn = signal()
     icpurstn = flop(n_cpu_rstn, cpu_rstn, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
+    cur = signal()
+
     @always_comb
     def cpu_reset_mux():
         cpu_sync_rstn.next = sync_rstn & cpu_rstn
 
-    @always(clk.posedge)
+    @always_comb
     def tick_edge_detect():
-        cur = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
+        cur.next = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
         n_tick_wait_valid.next = (cur == 1 and prev_tick_bit == 0)  # rising edge
         prev_tick_bit.next = cur
 
