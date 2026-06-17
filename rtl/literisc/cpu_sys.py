@@ -12,8 +12,10 @@ from dp_mem import dp_mem
 from cpu_common import flop
 import re
 
-#TODO: When clk_en goes to 0 use the previous value of imem_dout
 #TODO: Fix the problem of cpu making a master request and then being stopped by a slave_request, causing it to miss the reply. Fix by accepting slave_request when cpu is in an acceptable state.
+
+#TODO: Fix cpu doing write or read on the same cycle that a request_we or request_re is issued. This leads to next cycle a read/write from cpu and read/write from slave is possible. dmem_port_mux makes the slave read/write take priority, making it so the dmem_wenable or dmem_renable gets ignored. Could maybe be fixed by having a mux that sets cpu_waiting to 1 in @always_comb when conf.slave_request_we or conf.slave_request_re is true.
+
 
 # Memory map:
 # 0 - X             : boot rom
@@ -33,8 +35,9 @@ DMEM_HIGH   = DMEM_LOW + DMEM_DEPTH - 1
 IO_LOW      = 2**16
 IO_HIGH     = 2**17 - 1
 IRQ_ADDRESS   = IO_HIGH + 1
-TICKS_ADDRESS = IO_HIGH + 2
+TICK_ADDRESS = IO_HIGH + 2
 INTERRUPT_ADDRESS = IO_HIGH + 3
+CPU_RESET_ADDRESS = IO_HIGH + 4
 
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
@@ -178,10 +181,12 @@ def cpu_sys(
   
     do_irq = signal()
 
+    cpu_sync_rstn = signal()
+
     icpu = cpu(
             cpu_clk,
             clk_en,
-            sync_rstn,
+            cpu_sync_rstn,
             imem_final_dout,
             cpu_imem_radr,
             cpu_imem_rd,
@@ -212,7 +217,7 @@ def cpu_sys(
 
     IO_WAIT = 1
     IMEM_WAIT = 2
-    SIGNAL_WAIT = 3
+    TICK_WAIT = 3
     CONF_SLAVE_WAIT = 4
     INTERRUPT_WAIT = 5
 
@@ -243,6 +248,7 @@ def cpu_sys(
     req_addr = signal(PERIP_ADDR_BITS)
     req_wdata = signal(PERIP_DATA_BITS)
     req_rdata = signal(PERIP_DATA_BITS)
+    req_got_reply = signal()
     req_reading = signal()
     n_req_reading = signal()
     dmem_renable = signal()
@@ -254,8 +260,6 @@ def cpu_sys(
     imem_src2 = signal()
     imem_hold_data = signal(CPU_DMEM_DATA_BITS)
     n_imem_hold_data = signal(CPU_DMEM_DATA_BITS)
-    n_sel_ticks_rd_data = signal(3)
-    sel_ticks_rd_data = signal(3)
 
     # --- conf slave DMEM port signals ---
     conf_slave_dmem_radr    = signal(32)
@@ -285,7 +289,6 @@ def cpu_sys(
     imem_final_din     = signal(CPU_DMEM_DATA_BITS)
     imem_final_wenable = signal()
 
-    itick = flop(n_sel_ticks_rd_data, sel_ticks_rd_data, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     icw   = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
     icwio = flop( n_wait_type,   wait_type,   clk_en=None, clk=clk, sync_rstn=sync_rstn )
     ird   = flop( n_req_reading, req_reading, clk_en=None, clk=clk, sync_rstn=sync_rstn )
@@ -307,6 +310,28 @@ def cpu_sys(
     n_imem_dout_cached = Signal(modbv(0)[8:])
     imem_dout_cached = Signal(modbv(0)[8:])
     icache = flop(n_imem_dout_cached, imem_dout_cached, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    tick_sel  = signal(3)   # which bit to watch, 1-5 (0 = disabled)
+    tick_wait_valid = signal()
+    n_tick_wait_valid = signal()
+    prev_tick_bit = signal()
+
+    itw = flop(n_tick_wait_valid, tick_wait_valid, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    # cpu reset
+    cpu_rstn = signal()
+    n_cpu_rstn = signal()
+    icpurstn = flop(n_cpu_rstn, cpu_rstn, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    @always_comb
+    def cpu_reset_mux():
+        cpu_sync_rstn.next = sync_rstn & cpu_rstn
+
+    @always(clk.posedge)
+    def tick_edge_detect():
+        cur = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
+        n_tick_wait_valid.next = (cur == 1 and prev_tick_bit == 0)  # rising edge
+        prev_tick_bit.next = cur
 
     @always_comb
     def imem_cache():
@@ -333,9 +358,7 @@ def cpu_sys(
 
     @always_comb
     def dmux():
-        if sel_ticks_rd_data != 0:
-            dmem_muxed_dout.next = conf.ticks
-        elif sel_axi_rd_data == 1:
+        if sel_axi_rd_data == 1:
             dmem_muxed_dout.next = req_rdata
         elif sel_intr_rd_data == 1:
             dmem_muxed_dout.next = intr_addr_data
@@ -399,12 +422,13 @@ def cpu_sys(
         n_req_reading.next = 0
         dmem_imem_rd.next = 0
         n_deferred_cpu_imem_radr.next = cpu_imem_radr
-        do_irq.next = 1
+        do_irq.next = 0
 
         sel_axi_rd_data.next = req_reading
         sel_imem_src.next = 0
         n_sel_intr_rd_data.next = 0
 
+        #if slave_state != SLAVE_IDLE or conf.slave_request_we or conf.slave_request_re:
         if slave_state != SLAVE_IDLE:
             n_cpu_waiting.next = 1
         else:
@@ -440,10 +464,13 @@ def cpu_sys(
                     n_wait_type.next = IO_WAIT
             elif wait_type == IMEM_WAIT:
                 n_cpu_waiting.next = 0
-            elif wait_type == SIGNAL_WAIT:
-                n_sel_ticks_rd_data.next = sel_ticks_rd_data - 1
-                if sel_ticks_rd_data == 0:
+            elif wait_type == TICK_WAIT:
+                if tick_wait_valid == 1:
                     n_cpu_waiting.next = 0
+                else:
+                    n_cpu_waiting.next = 1
+                    n_wait_type.next = TICK_WAIT
+
             elif wait_type == INTERRUPT_WAIT:
                 if intr_addr_valid == 1:
                     n_cpu_waiting.next = 0
@@ -455,7 +482,6 @@ def cpu_sys(
                 n_cpu_waiting.next = 0
                 #assert False, "wait type error"
         else:
-            n_sel_ticks_rd_data.next = 0
             n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
                 # --- IO access ---------------
@@ -470,18 +496,18 @@ def cpu_sys(
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
                 elif cpu_dmem_adr == IRQ_ADDRESS and dmem_wr == 1:
-                    n_cpu_waiting.next = 1
+                    #n_cpu_waiting.next = 1
                     do_irq.next = 1
-                    n_req_reading.next = dmem_wr
-                    n_wait_type.next = SIGNAL_WAIT
+                    #n_req_reading.next = dmem_wr
+                    #n_wait_type.next = SIGNAL_WAIT
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
-                elif cpu_dmem_adr == TICKS_ADDRESS and dmem_rd == 1:
+                elif cpu_dmem_adr == TICK_ADDRESS and dmem_wr == 1:
+                    tick_sel.next = dmem_din[3:]
+
+                elif cpu_dmem_adr == TICK_ADDRESS and dmem_rd == 1:
                     n_cpu_waiting.next = 1
-                    n_sel_ticks_rd_data.next = 3
-                    n_wait_type.next = SIGNAL_WAIT
-                    dmem_renable.next = 0
-                    dmem_wenable.next = 0
+                    n_wait_type.next = TICK_WAIT
                 elif cpu_dmem_adr == INTERRUPT_ADDRESS and dmem_rd == 1:
                     n_cpu_waiting.next = 1
                     n_wait_type.next = INTERRUPT_WAIT
@@ -821,10 +847,12 @@ def cpu_sys(
             conf.master_request_re.next = 0
             req_done.next = 0
             req_rdata.next = 0
+            req_got_reply.next = 0
             m_state.next = M_IDLE
         else:
             if m_state == M_IDLE:
                 req_done.next = 0
+                req_got_reply.next = 0
                 if req_rd == 1:
                     # divide by 4 to translate from byte addressing to word addressing
                     conf.master_request_address.next = req_addr // 4
@@ -837,11 +865,21 @@ def cpu_sys(
                     m_state.next = M_WAIT_WRITE
             elif m_state == M_WAIT_READ:
                 if conf.master_reply_status != 0:
+                    req_got_reply.next = 1
                     req_rdata.next = conf.master_reply_data
+                    if slave_state != SLAVE_WRITE and slave_state != SLAVE_READ1:
+                        req_done.next = 1
+                        m_state.next = M_IDLE
+                elif req_got_reply == 1 and slave_state != SLAVE_WRITE and slave_state != SLAVE_READ1:
                     req_done.next = 1
                     m_state.next = M_IDLE
             elif m_state == M_WAIT_WRITE:
                 if conf.master_reply_status != 0:
+                    req_got_reply.next
+                    if slave_state != SLAVE_WRITE and slave_state != SLAVE_READ1:
+                        req_done.next = 1
+                        m_state.next = M_IDLE
+                elif req_got_reply == 1 and slave_state != SLAVE_WRITE and slave_state != SLAVE_READ1:
                     req_done.next = 1
                     m_state.next = M_IDLE
 
@@ -865,6 +903,7 @@ def cpu_sys(
         conf_slave_dmem_din.next          = 0
         conf_slave_imem_wenable.next      = 0
         conf_slave_imem_din.next          = 0
+        n_cpu_rstn.next = 1
         intr_addr_valid.next              = 0
 
         if sync_rstn == 0:
@@ -876,6 +915,8 @@ def cpu_sys(
                     if conf.slave_request_address == INTERRUPT_ADDRESS:
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = conf.slave_request_data
+                    elif conf.slave_request_address == CPU_RESET_ADDRESS:
+                        n_cpu_rstn.next = 0
                     elif conf.slave_request_address <= IMEM_HIGH:
                         conf_slave_imem_wadr.next    = conf.slave_request_address
                         conf_slave_imem_din.next     = conf.slave_request_data
