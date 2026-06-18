@@ -78,9 +78,11 @@
 
 ;;; Struct member
 (defstruct struct-member
-  name          ; string: member name
-  type          ; type-desc: member type
-  offset)       ; integer: byte offset within struct
+  name                 ; string: member name
+  type                 ; type-desc: member type
+  offset               ; integer: byte offset of storage unit within struct
+  bitfield-width       ; nil for normal members; integer bit-count for bitfields
+  bitfield-bit-offset) ; bit offset within storage unit (0-31); nil for normal members
 
 ;;; Struct definition
 (defstruct struct-def
@@ -999,6 +1001,10 @@
         (format t "~%AST (before optimization):~%")
         (print-ast ast))
 
+
+      ;; Dead function elimination (removes functions not reachable from main)
+      (setf ast (eliminate-dead-functions ast))
+
       ;; Apply optimizations
       (when optimize
         ;; Function inlining only when full optimization is enabled
@@ -1031,6 +1037,9 @@
         (when verbose
           (format t "~%AST (after CSE):~%")
           (print-ast ast)))
+
+      ;; Dead function elimination (removes functions not reachable from main)
+      ;;(setf ast (eliminate-dead-functions ast))
 
       ;; Dead code elimination (removes unused variables after constant propagation)
       (setf ast (dead-code-elimination ast))
@@ -1066,6 +1075,7 @@
     (setf (compiler-state-tokens *state*) (tokenize source))
     (scan-address-taken-variables)
     (let ((ast (parse-program)))
+      (setf ast (eliminate-dead-functions ast))
       (when optimize
         (setf ast (inline-functions ast)))
       (setf ast (fold-constants ast))

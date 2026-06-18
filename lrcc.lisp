@@ -3,6 +3,8 @@
 ;;; Command-line compiler for C to liteRISC machine code
 
 (require :asdf)
+(let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+  (when (probe-file ql-setup) (load ql-setup)))
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
   (pushnew script-directory asdf:*central-registry* :test #'equal))
 (handler-case

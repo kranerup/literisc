@@ -1272,6 +1272,103 @@
                  :source-loc (ast-node-source-loc ast)))
 
 ;;; ===========================================================================
+;;; Dead Function Elimination
+;;; ===========================================================================
+
+(defun build-call-graph (ast)
+  "Build a call graph from all function definitions in AST.
+   Returns a hash table mapping function-name -> hash-set of directly called function names."
+  (let ((graph (make-hash-table :test 'equal)))
+    (dolist (child (ast-node-children ast))
+      (when (and (ast-node-p child) (eq (ast-node-type child) 'function))
+        (let ((name (ast-node-value child))
+              (callees (make-hash-table :test 'equal)))
+          (setf (gethash name graph) callees)
+          (labels ((walk (n)
+                     (when (and n (ast-node-p n))
+                       (when (eq (ast-node-type n) 'call)
+                         (let ((func-expr (first (ast-node-children n))))
+                           (when (and (ast-node-p func-expr)
+                                      (eq (ast-node-type func-expr) 'var-ref))
+                             (setf (gethash (ast-node-value func-expr) callees) t))))
+                       (dolist (c (ast-node-children n))
+                         (walk c)))))
+            ;; Walk the function body (second child)
+            (walk (second (ast-node-children child)))))))
+    graph))
+
+(defun collect-address-taken-functions (ast defined-functions)
+  "Find functions whose address is taken (var-ref in non-call position).
+   These must be kept even if not directly reachable from main."
+  (let ((address-taken (make-hash-table :test 'equal)))
+    (labels ((walk (n call-func-p)
+               (when (and n (ast-node-p n))
+                 (cond
+                   ((eq (ast-node-type n) 'call)
+                    ;; First child is the callee expression — mark it as call position
+                    (walk (first (ast-node-children n)) t)
+                    (dolist (arg (rest (ast-node-children n)))
+                      (walk arg nil)))
+                   ((and (eq (ast-node-type n) 'var-ref)
+                         (not call-func-p)
+                         (gethash (ast-node-value n) defined-functions))
+                    (setf (gethash (ast-node-value n) address-taken) t))
+                   (t
+                    (dolist (c (ast-node-children n))
+                      (walk c nil)))))))
+      (walk ast nil))
+    address-taken))
+
+(defun eliminate-dead-functions (ast)
+  "Mark functions not reachable from main (or via function pointers) as dead.
+   Skipped entirely when no main is defined (e.g. library translation units).
+   Operates via compiler-state-dead-functions so generate-function skips them."
+  (when (null ast)
+    (return-from eliminate-dead-functions nil))
+
+  (let ((defined-functions (make-hash-table :test 'equal)))
+    (dolist (child (ast-node-children ast))
+      (when (and (ast-node-p child) (eq (ast-node-type child) 'function))
+        (setf (gethash (ast-node-value child) defined-functions) t)))
+
+    ;; Only perform reachability analysis when main exists
+    (when (gethash "main" defined-functions)
+      (let ((call-graph (build-call-graph ast))
+            (address-taken (collect-address-taken-functions ast defined-functions))
+            (reachable (make-hash-table :test 'equal))
+            (worklist nil))
+
+        ;; Seed the worklist with main and any address-taken functions
+        (setf (gethash "main" reachable) t)
+        (push "main" worklist)
+        (maphash (lambda (name _)
+                   (declare (ignore _))
+                   (unless (gethash name reachable)
+                     (setf (gethash name reachable) t)
+                     (push name worklist)))
+                 address-taken)
+
+        ;; BFS over the call graph
+        (loop while worklist do
+          (let ((current (pop worklist)))
+            (maphash (lambda (callee _)
+                       (declare (ignore _))
+                       (unless (gethash callee reachable)
+                         (setf (gethash callee reachable) t)
+                         (push callee worklist)))
+                     (or (gethash current call-graph)
+                         (make-hash-table)))))
+
+        ;; Mark unreachable defined functions as dead
+        (maphash (lambda (name _)
+                   (declare (ignore _))
+                   (unless (gethash name reachable)
+                     (setf (gethash name (compiler-state-dead-functions *state*)) t)))
+                 defined-functions))))
+
+  ast)
+
+;;; ===========================================================================
 ;;; Loop Unrolling
 ;;; ===========================================================================
 

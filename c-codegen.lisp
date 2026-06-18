@@ -1338,6 +1338,64 @@
         (emit-sign-extend type))))
 
 ;;; ===========================================================================
+;;; Bitfield Helpers
+;;; ===========================================================================
+
+(defun emit-bitfield-extract (width bit-offset unsigned-p)
+  "Extract a bitfield from value in A. Result in A.
+   Shifts right by bit-offset, masks to width bits, then sign-extends if signed."
+  ;; Shift right to align bitfield to bit 0 (logical shift)
+  (dotimes (i bit-offset) (emit '(A=A>>1)))
+  ;; Mask to width bits
+  (let ((mask (1- (ash 1 width)))
+        (temp (alloc-temp-reg)))
+    (emit `(Rx= ,mask ,temp))
+    (emit `(A&=Rx ,temp))
+    (free-temp-reg temp))
+  ;; Sign-extend if signed: shift left by (32-width), then arithmetic right by (32-width)
+  (unless unsigned-p
+    (let ((shift-count (- 32 width)))
+      (dotimes (i shift-count) (emit '(A=A<<1)))
+      (dotimes (i shift-count) (emit '(asr-a))))))
+
+(defun generate-bitfield-store (member value-reg)
+  "Perform a read-modify-write store for a bitfield member.
+   A = address of storage unit, value-reg = new bitfield value (not yet shifted/masked)."
+  (let* ((width (struct-member-bitfield-width member))
+         (bit-offset (struct-member-bitfield-bit-offset member))
+         (mask (1- (ash 1 width)))
+         ;; Clear mask: all bits set except the bitfield's position
+         (clear-mask (logand #xFFFFFFFF (lognot (ash mask bit-offset))))
+         (addr-reg (alloc-temp-reg))
+         (existing-reg (alloc-temp-reg))
+         (mask-reg (alloc-temp-reg)))
+    ;; Save address so we can store back
+    (emit `(Rx=A ,addr-reg))
+    ;; Load existing storage unit word
+    (emit `(Rx=M[A] ,existing-reg))
+    ;; Clear the bitfield's bits in existing: existing &= clear_mask
+    (emit `(A=Rx ,existing-reg))
+    (emit `(Rx= ,clear-mask ,mask-reg))
+    (emit `(A&=Rx ,mask-reg))
+    (emit `(Rx=A ,existing-reg))
+    ;; Mask the new value to bitfield width, then shift into position
+    (emit `(A=Rx ,value-reg))
+    (emit `(Rx= ,mask ,mask-reg))
+    (emit `(A&=Rx ,mask-reg))
+    (dotimes (i bit-offset) (emit '(A=A<<1)))
+    ;; OR the new bits into the existing word
+    (emit `(A\|=Rx ,existing-reg))
+    ;; Store back through saved address
+    (let ((result-reg (alloc-temp-reg)))
+      (emit `(Rx=A ,result-reg))
+      (emit `(A=Rx ,addr-reg))
+      (emit `(M[A]=Rx ,result-reg))
+      (free-temp-reg result-reg))
+    (free-temp-reg mask-reg)
+    (free-temp-reg existing-reg)
+    (free-temp-reg addr-reg)))
+
+;;; ===========================================================================
 ;;; Main Code Generation Entry Points
 ;;; ===========================================================================
 
@@ -3355,7 +3413,11 @@
               (struct-type (if (eq access-type :pointer)
                                (get-dereferenced-type base-type) base-type))
               (member (lookup-struct-member struct-type member-name)))
-         (emit-store-sized (struct-member-type member) value-reg))
+         (if (struct-member-bitfield-width member)
+             ;; Bitfield: read-modify-write
+             (generate-bitfield-store member value-reg)
+             ;; Normal member: sized store
+             (emit-store-sized (struct-member-type member) value-reg)))
        (when (or *use-virtual-regs* (not needs-safe-reg))
          (free-temp-reg value-reg))))
     (otherwise
@@ -3677,16 +3739,25 @@
     (unless member (compiler-error "Unknown struct member: ~a" member-name))
     (generate-member-address node)
     (let ((member-type (struct-member-type member)))
-      ;; If member is an array, just return its address (array decays to pointer)
-      (if (type-desc-array-size member-type)
-          ;; Address is already in A, nothing more to do
-          nil
-          ;; Non-array: load the value
-          (let ((temp (alloc-temp-reg)))
-            (emit-load-sized member-type temp)
-            (emit `(A=Rx ,temp))
-            (free-temp-reg temp)
-            (emit-promote-to-int member-type))))))
+      (cond
+        ;; Array member: return address (array decays to pointer)
+        ((type-desc-array-size member-type) nil)
+        ;; Bitfield member: load storage unit, extract bits
+        ((struct-member-bitfield-width member)
+         (let ((temp (alloc-temp-reg)))
+           (emit `(Rx=M[A] ,temp))
+           (emit `(A=Rx ,temp))
+           (free-temp-reg temp))
+         (emit-bitfield-extract (struct-member-bitfield-width member)
+                                (struct-member-bitfield-bit-offset member)
+                                (type-desc-unsigned-p member-type)))
+        ;; Normal member: load sized value
+        (t
+         (let ((temp (alloc-temp-reg)))
+           (emit-load-sized member-type temp)
+           (emit `(A=Rx ,temp))
+           (free-temp-reg temp))
+         (emit-promote-to-int member-type))))))
 
 (defun generate-ternary (node)
   "Generate code for ternary conditional"
