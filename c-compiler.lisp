@@ -986,11 +986,11 @@
     (setf (compiler-state-peephole *state*) peephole)
 
     ;; Lexical analysis
-    (setf (compiler-state-tokens *state*) (tokenize source))
+    (setf (compiler-state-tokens *state*) (coerce (tokenize source) 'vector))
     (when verbose
       (format t "~%Tokens:~%")
-      (dolist (tok (compiler-state-tokens *state*))
-        (format t "  ~a~%" tok)))
+      (loop for tok across (compiler-state-tokens *state*)
+            do (format t "  ~a~%" tok)))
 
     ;; Pre-scan for address-taken variables (affects register allocation)
     (scan-address-taken-variables)
@@ -1072,7 +1072,7 @@
     (setf (compiler-state-source-annotations *state*) nil)
     (setf (compiler-state-optimize *state*) optimize)
     (setf (compiler-state-optimize-size *state*) optimize-size)
-    (setf (compiler-state-tokens *state*) (tokenize source))
+    (setf (compiler-state-tokens *state*) (coerce (tokenize source) 'vector))
     (scan-address-taken-variables)
     (let ((ast (parse-program)))
       (setf ast (eliminate-dead-functions ast))

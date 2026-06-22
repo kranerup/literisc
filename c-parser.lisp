@@ -14,7 +14,7 @@
   (let ((pos (compiler-state-token-pos *state*))
         (tokens (compiler-state-tokens *state*)))
     (if (< pos (length tokens))
-        (nth pos tokens)
+        (aref tokens pos)
         nil)))
 
 (defun peek-token (&optional (offset 0))
@@ -22,7 +22,7 @@
   (let ((pos (+ (compiler-state-token-pos *state*) offset))
         (tokens (compiler-state-tokens *state*)))
     (if (< pos (length tokens))
-        (nth pos tokens)
+        (aref tokens pos)
         nil)))
 
 (defun advance-token ()
@@ -142,8 +142,8 @@
   (let ((tokens (compiler-state-tokens *state*))
         (addr-taken (compiler-state-address-taken *state*)))
     (loop for i from 0 below (1- (length tokens))
-          for tok = (nth i tokens)
-          for next-tok = (nth (1+ i) tokens)
+          for tok = (aref tokens i)
+          for next-tok = (aref tokens (1+ i))
           when (and (eq (token-type tok) 'operator)
                     (string= (token-value tok) "&")
                     (eq (token-type next-tok) 'identifier))
