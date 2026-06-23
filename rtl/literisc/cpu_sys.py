@@ -236,8 +236,8 @@ def cpu_sys(
                 rom_clk_en.next = 1
                 if wait_type == IMEM_WAIT:
                     rom_clk_en.next = 1
-                else:
-                    rom_clk_en.next = 0
+                #else:
+                #    rom_clk_en.next = 0
             else:
                 rom_clk_en.next = 1
         cpu_clk.next = clk
