@@ -1,0 +1,218 @@
+[*]
+[*] GTKWave Analyzer v3.4.0 (w)1999-2022 BSI
+[*] Tue Jun 23 07:48:03 2026
+[*]
+[dumpfile] "/home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/rtl/literisc/trace_run.vcd"
+[dumpfile_mtime] "Tue Jun 23 07:42:05 2026"
+[dumpfile_size] 1750058
+[savefile] "/home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/rtl/literisc/dwa.gtkw"
+[timestart] 52
+[size] 3774 2091
+[pos] -27 -24
+*-3.939868 171 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+[markername] AA
+[markername] BB
+[markername] CC
+[markername] DD
+[markername] EE
+[markername] FF
+[markername] GG
+[markername] HH
+[markername] II
+[markername] JJ
+[markername] KK
+[markername] LL
+[markername] MM
+[markername] NN
+[markername] OO
+[markername] PP
+[markername] QQ
+[markername] RR
+[markername] SS
+[markername] TT
+[markername] UU
+[markername] VV
+[markername] WW
+[markername] XX
+[markername] YY
+[markername] ZZ
+[treeopen] tb.
+[treeopen] tb.icpu.
+[treeopen] tb.icpu.icpu.
+[treeopen] tb.icpu.icpu.icpu.
+[treeopen] tb.icpu.imem.pmem.
+[sst_width] 278
+[signals_width] 294
+[sst_expanded] 1
+[sst_vpaned_height] 670
+@22
+tb.conf_master_reply_data[31:0]
+@28
+tb.conf_master_reply_id
+tb.conf_master_reply_status[1:0]
+@22
+tb.conf_master_request_address[31:0]
+tb.conf_master_request_data[31:0]
+@28
+tb.conf_master_request_id[1:0]
+tb.conf_master_request_re
+tb.conf_master_request_type[1:0]
+tb.conf_master_request_we
+@22
+tb.conf_slave_reply_data[31:0]
+@28
+tb.conf_slave_reply_id
+tb.conf_slave_reply_status[1:0]
+@24
+tb.conf_slave_request_address[31:0]
+@28
+tb.icpu.conf_slave_request_re
+tb.icpu.conf_slave_request_we
+@22
+tb.icpu.req_rdata[31:0]
+tb.icpu.dmem_muxed_dout[31:0]
+@24
+tb.icpu.icpu.icpu.dmem_adr[31:0]
+tb.icpu.dmem_final_wadr[31:0]
+@22
+tb.icpu.dmem_final_din[31:0]
+tb.icpu.dmem_final_dout[31:0]
+tb.icpu.dmem_final_radr[31:0]
+@28
+tb.icpu.dmem_final_renable
+@22
+tb.icpu.dmem_final_wadr[31:0]
+@28
+tb.icpu.dmem_final_wenable
+@22
+tb.icpu.dmem_final_wmask[3:0]
+@28
+tb.icpu.dmem_wenable
+tb.icpu.slave_state[1:0]
+tb.icpu.conf_slave_request_we
+tb.icpu.conf_slave_request_re
+tb.icpu.cpu_waiting
+@22
+tb.icpu.wait_type[3:0]
+tb.icpu.icpu.icpu.pc[15:0]
+@28
+tb.icpu.intr_addr_valid
+@4023
+^>2 /home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/gtkwave-trace-filter.lisp
+tb.icpu.icpu.icpu.obs_trace[68:0]
+@22
+tb.icpu.icpu.icpu.obs_trace[68:0]
+tb.icpu.imem_final_dout[7:0]
+tb.icpu.imem_dout[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(0)[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(1)[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(2)[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(3)[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(4)[7:0]
+tb.icpu.icpu.icpu.raw_bytes.raw_bytes(5)[7:0]
+tb.icpu.icpu.icpu.ir[7:0]
+tb.icpu.icpu.icpu.ir2[7:0]
+tb.icpu.icpu.icpu.op[3:0]
+tb.icpu.icpu.icpu.op2[3:0]
+tb.icpu.icpu.icpu.state[3:0]
+@28
+tb.icpu.mem_clk_en
+@22
+tb.icpu.imem_dout_cached[7:0]
+@28
+tb.icpu.clk
+tb.icpu.icpu.icpu.ir[7:0]
+tb.icpu.icpu.icpu.dmem_wr
+@22
+tb.icpu.dmem.data.data(8191)[31:0]
+tb.icpu.dmem.data.data(8192)[31:0]
+@28
+tb.icpu.mem_clk_en
+@22
+tb.icpu.icpu.icpu.acc[31:0]
+tb.icpu.icpu.icpu.reg_bank.reg_bank(1)[31:0]
+tb.conf_slave_request_data[31:0]
+tb.icpu.conf_slave_dmem_din[31:0]
+tb.icpu.conf_slave_dmem_dout[31:0]
+tb.icpu.conf_slave_dmem_radr[31:0]
+@28
+tb.icpu.conf_slave_dmem_renable
+@22
+tb.icpu.conf_slave_dmem_wadr[31:0]
+@28
+tb.icpu.conf_slave_dmem_wenable
+@22
+tb.icpu.conf_slave_dmem_wmask[3:0]
+tb.icpu.conf_slave_imem_din[31:0]
+tb.icpu.conf_slave_imem_wadr[31:0]
+@28
+tb.icpu.conf_slave_imem_wenable
+@22
+tb.icpu.imem_final_din[31:0]
+tb.icpu.imem_final_wadr[31:0]
+@28
+tb.icpu.imem_final_wenable
+tb.icpu.icpu.icpu.curr_ir[7:0]
+@24
+tb.icpu.cpu_dmem_adr[31:0]
+@28
+tb.icpu.dmem_rd
+@22
+tb.icpu.icpu.icpu.op[3:0]
+tb.icpu.icpu.icpu.pc[15:0]
+@28
+tb.icpu.icpu.icpu.clk_en
+@22
+tb.icpu.icpu.icpu.state[3:0]
+tb.icpu.icpu.icpu.next_state[3:0]
+@28
+tb.icpu.icpu.icpu.imm_more
+tb.icpu.rom_clk_en
+tb.icpu.clk_en
+tb.icpu.imem_rd
+@24
+tb.icpu.imem_radr[31:0]
+@28
+tb.icpu.cpu_imem_rd
+@24
+tb.icpu.conf_slave_imem_din[31:0]
+@28
+tb.icpu.icpu.icpu.load_ir
+tb.icpu.icpu.icpu.n_load_ir
+tb.rstn
+tb.icpu.icpu.icpu.dmem_rd
+@22
+tb.icpu.imem_final_dout[7:0]
+tb.icpu.n_imem_dout_cached[7:0]
+tb.icpu.imem_dout_cached[7:0]
+@28
+tb.icpu.prev_cpu_waiting
+@22
+tb.icpu.icpu.icpu.imem_dout[7:0]
+@24
+tb.icpu.cpu_imem_radr[31:0]
+@22
+tb.icpu.imem.pmem.data.data(512)[31:0]
+tb.icpu.imem.pmem.data.data(496)[31:0]
+tb.icpu.imem.pmem.data.data(497)[31:0]
+tb.icpu.imem.pmem.data.data(498)[31:0]
+tb.icpu.imem.pmem.data.data(499)[31:0]
+tb.icpu.imem.pmem.data.data(500)[31:0]
+tb.icpu.imem.pmem.data.data(501)[31:0]
+tb.icpu.imem.pmem.data.data(502)[31:0]
+@28
+tb.conf_slave_request_id[1:0]
+tb.conf_slave_request_re
+tb.conf_slave_request_type[1:0]
+tb.conf_slave_request_we
+@22
+tb.conf_ticks[4:0]
+tb.icpu.wait_type[3:0]
+tb.icpu.n_wait_type[3:0]
+@28
+tb.icpu.cpu_waiting
+tb.icpu.n_cpu_waiting
+tb.icpu.slave_state[1:0]
+tb.icpu.slave_state_prev[1:0]
+[pattern_trace] 1
+[pattern_trace] 0
