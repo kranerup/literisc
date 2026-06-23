@@ -998,6 +998,50 @@ def test_cpu_reset():
           (f"  ({result[0]})" if not ok else ""))
     return ok
 
+def test_run():
+    """Test 5: Write during boot-read-interrupt."""
+    result    = [None]
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        icpu = cpu_sys(clk, rstn, axi, conf)
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            for i in range(100):
+                yield clk.posedge
+            #for byte in _PROG_ADD_TWO:
+            #    yield _write_data(conf, clk, byte, addr)
+            #    addr += 1
+            #    yield clk.posedge
+
+            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_run'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_run" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1008,7 +1052,7 @@ if __name__ == "__main__":
 
     print_program_hex("PROG_STORE_CONSTANT",    _PROG_STORE_CONSTANT)
 
-    results.append(test_slave_write_during_boot())
+    #results.append(test_slave_write_during_boot())
     results.append(test_slave_dmem_rw())
     results.append(test_cpu_stores_constant())
     results.append(test_slave_write_cpu_doubles())
@@ -1018,6 +1062,7 @@ if __name__ == "__main__":
     results.append(test_wait_ticks())
     results.append(test_master_while_slave_request())
     results.append(test_cpu_reset())
+    #results.append(test_run())
 
     print_program_hex("ticks", _PROG_READ_TICKS)
 

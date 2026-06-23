@@ -183,6 +183,8 @@ def cpu_sys(
 
     cpu_sync_rstn = signal()
 
+    obs_trace = Signal(modbv(0)[69:])
+
     icpu = cpu(
             cpu_clk,
             clk_en,
@@ -198,11 +200,12 @@ def cpu_sys(
             dmem_wr_sz,
             halt,
             intr,
-            False,
+            True,
             None,
             None,
             None,
             None,
+            obs_trace,
             False)
 
 
@@ -234,8 +237,6 @@ def cpu_sys(
                 if wait_type == IMEM_WAIT:
                     rom_clk_en.next = 1
                 #else:
-                #    rom_clk_en.next = 0
-                #elif slave_state == :
                 #    rom_clk_en.next = 0
             else:
                 rom_clk_en.next = 1
@@ -350,13 +351,14 @@ def cpu_sys(
             imem_final_dout.next = imem_dout_cached
         else:
             imem_final_dout.next = imem_dout
+        #imem_final_dout.next = imem_dout
 
     @always_comb
     def ihold():
         n_imem_hold_data.next = imem_hold_data
         if imem_src == 1:
             #n_imem_hold_data.next = imem_dout
-            n_imem_hold_data.next = imem_dout
+            n_imem_hold_data.next = imem_final_dout
         n_imem_src2.next = imem_src
 
     @always_comb
@@ -707,6 +709,40 @@ def cpu_sys(
         program = hexdump_to_prog("""\
 00000000: 80 88 80 02 F8 40 80 84 00 10 FE 00 00 00 00 00  |.....@..........|""")
 
+#        program = hexdump_to_prog("""\
+#00000010: F4 02 82 13 12 02 1A B2 32 12 0A F5 02 1E FE F6  |........2.......|
+#00000020: F4 03 1F 80 7C B0 0F 1F 5A 00 90 02 12 02 90 03  |....|...Z.......|
+#00000030: 12 0A 13 0B AF 5A 1A 02 83 8F FF FF FF 7F 13 D2  |.....Z..........|
+#00000040: 02 1F 23 00 13 62 1F 80 04 B0 0F F5 03 F7 FE F6  |..#..b..........|
+#00000050: F4 02 1F 80 7C B0 0F 1F 82 00 B2 02 12 0A AF FF  |....|...........|
+#00000060: 3E 1A 90 0A 1F 80 04 B0 0F F5 02 F7 FE 00 00 00  |>...............|""")
+#
+#        # writes 596 to scratch, reads from scratch
+#        program = hexdump_to_prog("""
+#00000010: 48 B0 0F 82 05 83 08 13 33 12 F1 F1 B3 33 13 91  |H.......3....3..|
+#00000020: B2 04 1F 54 2C 84 08 14 34 1F 25 2C 15 F1 F1 B4  |...T,...4.%,....|
+#00000030: 34 1F 54 28 1F 24 28 14 90 D3 05 86 84 54 16 E5  |4.T(.$(......T..|
+#00000040: 03 90 D4 05 90 E5 04 85 08 15 35 12 F1 F1 B5 63  |..........5....c|
+#00000050: 1F 23 28 13 91 B2 02 1F 52 24 14 02 83 08 13 33  |.#(.....R$.....3|
+#00000060: 1F 24 24 14 F1 F1 B3 62 1F 22 24 1F 82 30 B2 02  |.$$....b."$..0..|
+#00000070: 1F 52 20 82 05 1F 52 1C 82 08 12 32 1F 23 1C 13  |.R ...R....2.#..|
+#00000080: F1 F1 B2 32 1F 52 18 22 1C 12 91 B2 02 1F 52 10  |...2.R."......R.|
+#00000090: 82 08 12 32 1F 23 10 13 F1 F1 B2 32 1F 52 0C 1F  |...2.#.....2.R..|
+#000000A0: 22 0C 52 14 22 18 83 8F FF FF FF 7F 13 D2 02 83  |".R."...........|
+#000000B0: 88 80 80 80 00 D3 83 00 C3 A5 04 83 7F A0 02 83  |................|
+#000000C0: 00 1F 23 14 84 8F FF FF FF 7F 14 D3 03 84 88 80  |..#.............|
+#000000D0: 80 80 00 D4 84 00 C4 A5 04 84 7F A0 02 84 00 13  |................|
+#000000E0: 90 E2 02 83 88 80 80 80 00 D3 83 00 C3 A5 04 83  |................|
+#000000F0: 7F A0 02 83 00 1F 24 20 14 62 53 04 1F 22 20 8A  |......$ .bS.." .|
+#00000100: 00 1F 80 38 B0 0F F5 06 1E FE 00 00 00 00 00 00  |...8............|""")
+#
+#        # reads core version
+#        program = hexdump_to_prog("""
+#00000000: 8F 82 80 00 AF 06 A0 7E 00 00 02 00 F4 04 1F 80  |.......~........|
+#00000010: 70 B0 0F 1F 82 0C B2 02 83 00 84 08 14 34 13 F1  |p............4..|
+#00000020: F1 B4 33 84 8F FF FF FF 7F 14 D3 03 12 63 8A 00  |..3..........c..|
+#00000030: 1F 80 10 B0 0F F5 04 1E FE 00 00 00 00 00 00 00  |................|""")
+
     boot_code = prog_to_tuples( program )
 
     imem = rom(
@@ -878,7 +914,7 @@ def cpu_sys(
                     m_state.next = M_IDLE
             elif m_state == M_WAIT_WRITE:
                 if conf.master_reply_status != 0:
-                    req_got_reply.next
+                    req_got_reply.next = 1
                     if slave_state != SLAVE_WRITE and slave_state != SLAVE_READ1:
                         req_done.next = 1
                         m_state.next = M_IDLE

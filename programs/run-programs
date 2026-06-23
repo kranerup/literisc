@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Run all C algorithm programs and compare lrcc output against clang.
 # Usage: programs/run-programs [program.c ...]

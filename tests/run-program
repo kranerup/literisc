@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Run a single C program test and compare lrcc output against clang.
 # Usage: tests/run-program <test.c>

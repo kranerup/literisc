@@ -78,9 +78,11 @@
 
 ;;; Struct member
 (defstruct struct-member
-  name          ; string: member name
-  type          ; type-desc: member type
-  offset)       ; integer: byte offset within struct
+  name                 ; string: member name
+  type                 ; type-desc: member type
+  offset               ; integer: byte offset of storage unit within struct
+  bitfield-width       ; nil for normal members; integer bit-count for bitfields
+  bitfield-bit-offset) ; bit offset within storage unit (0-31); nil for normal members
 
 ;;; Struct definition
 (defstruct struct-def
@@ -984,11 +986,11 @@
     (setf (compiler-state-peephole *state*) peephole)
 
     ;; Lexical analysis
-    (setf (compiler-state-tokens *state*) (tokenize source))
+    (setf (compiler-state-tokens *state*) (coerce (tokenize source) 'vector))
     (when verbose
       (format t "~%Tokens:~%")
-      (dolist (tok (compiler-state-tokens *state*))
-        (format t "  ~a~%" tok)))
+      (loop for tok across (compiler-state-tokens *state*)
+            do (format t "  ~a~%" tok)))
 
     ;; Pre-scan for address-taken variables (affects register allocation)
     (scan-address-taken-variables)
@@ -998,6 +1000,10 @@
       (when verbose
         (format t "~%AST (before optimization):~%")
         (print-ast ast))
+
+
+      ;; Dead function elimination (removes functions not reachable from main)
+      (setf ast (eliminate-dead-functions ast))
 
       ;; Apply optimizations
       (when optimize
@@ -1032,6 +1038,9 @@
           (format t "~%AST (after CSE):~%")
           (print-ast ast)))
 
+      ;; Dead function elimination (removes functions not reachable from main)
+      ;;(setf ast (eliminate-dead-functions ast))
+
       ;; Dead code elimination (removes unused variables after constant propagation)
       (setf ast (dead-code-elimination ast))
       (when verbose
@@ -1063,9 +1072,10 @@
     (setf (compiler-state-source-annotations *state*) nil)
     (setf (compiler-state-optimize *state*) optimize)
     (setf (compiler-state-optimize-size *state*) optimize-size)
-    (setf (compiler-state-tokens *state*) (tokenize source))
+    (setf (compiler-state-tokens *state*) (coerce (tokenize source) 'vector))
     (scan-address-taken-variables)
     (let ((ast (parse-program)))
+      (setf ast (eliminate-dead-functions ast))
       (when optimize
         (setf ast (inline-functions ast)))
       (setf ast (fold-constants ast))

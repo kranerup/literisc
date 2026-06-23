@@ -6903,7 +6903,164 @@ int printf(char *fmt, int a0, int a1, int a2) {
     (test-phase28-loop-unrolling-volatile)
     (test-phase29-cse-infrastructure)
     (test-phase30-stdio)
-    (test-phase31-const-mul)))
+    (test-phase31-const-mul)
+    (test-phase32-bitfields)))
+
+;;; ===========================================================================
+;;; Phase 32: Bitfield Tests
+;;; ===========================================================================
+
+(deftest test-bitfield-basic ()
+  "Test: basic bitfield read and write"
+  (combine-results
+    (check "single bitfield read/write"
+           (= 5 (run-and-get-result "
+struct S { unsigned int x : 4; };
+int main() { struct S s; s.x = 5; return s.x; }")))
+    (check "bitfield max value (3-bit = 7)"
+           (= 7 (run-and-get-result "
+struct S { unsigned int x : 3; };
+int main() { struct S s; s.x = 7; return s.x; }")))
+    (check "bitfield truncation (write 9 to 3-bit field, expect 1)"
+           (= 1 (run-and-get-result "
+struct S { unsigned int x : 3; };
+int main() { struct S s; s.x = 9; return s.x; }")))
+    (check "1-bit unsigned bitfield stores 1"
+           (= 1 (run-and-get-result "
+struct S { unsigned int flag : 1; };
+int main() { struct S s; s.flag = 1; return s.flag; }")))
+    (check "1-bit unsigned bitfield stores 0"
+           (= 0 (run-and-get-result "
+struct S { unsigned int flag : 1; };
+int main() { struct S s; s.flag = 0; return s.flag; }")))))
+
+(deftest test-bitfield-packing ()
+  "Test: multiple bitfields packed in one storage unit"
+  (combine-results
+    (check "two adjacent bitfields"
+           (= 3 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; s.a = 1; s.b = 2; return s.a + s.b; }")))
+    (check "bitfields don't clobber each other on write"
+           (= 5 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; s.a = 2; s.b = 3; s.a = 2; return s.a + s.b; }")))
+    (check "three packed bitfields"
+           (= 6 (run-and-get-result "
+struct S { unsigned int r : 3; unsigned int g : 3; unsigned int b : 3; };
+int main() { struct S s; s.r = 1; s.g = 2; s.b = 3; return s.r + s.g + s.b; }")))
+    (check "write second field does not corrupt first"
+           (= 7 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; s.a = 7; s.b = 5; return s.a; }")))
+    (check "write first field does not corrupt second"
+           (= 5 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; s.a = 7; s.b = 5; s.a = 3; return s.b; }")))))
+
+(deftest test-bitfield-signed ()
+  "Test: signed bitfield sign extension"
+  (combine-results
+    (check "signed 4-bit stores -1"
+           (result= -1 (run-and-get-result "
+struct S { int x : 4; };
+int main() { struct S s; s.x = -1; return s.x; }")))
+    (check "signed 4-bit max positive (7)"
+           (= 7 (run-and-get-result "
+struct S { int x : 4; };
+int main() { struct S s; s.x = 7; return s.x; }")))
+    (check "signed 4-bit min negative (-8)"
+           (result= -8 (run-and-get-result "
+struct S { int x : 4; };
+int main() { struct S s; s.x = -8; return s.x; }")))
+    (check "signed 3-bit -1 and unsigned 3-bit neighbor independent"
+           (= 5 (run-and-get-result "
+struct S { int a : 3; unsigned int b : 3; };
+int main() { struct S s; s.a = -1; s.b = 5; return s.b; }")))))
+
+(deftest test-bitfield-layout ()
+  "Test: bitfield struct size and layout"
+  (combine-results
+    (check "single bitfield struct is 4 bytes"
+           (= 4 (run-and-get-result "
+struct S { unsigned int x : 1; };
+int main() { return sizeof(struct S); }")))
+    (check "32 bits fills one word"
+           (= 4 (run-and-get-result "
+struct S { unsigned int a : 16; unsigned int b : 16; };
+int main() { return sizeof(struct S); }")))
+    (check "overflow to next unit gives 8 bytes"
+           (= 8 (run-and-get-result "
+struct S { unsigned int a : 17; unsigned int b : 16; };
+int main() { return sizeof(struct S); }")))
+    (check "bitfield followed by int: int aligns after storage unit"
+           (= 8 (run-and-get-result "
+struct S { unsigned int a : 3; int x; };
+int main() { return sizeof(struct S); }")))
+    (check "int then bitfield"
+           (= 8 (run-and-get-result "
+struct S { int x; unsigned int a : 3; };
+int main() { return sizeof(struct S); }")))))
+
+(deftest test-bitfield-mixed-struct ()
+  "Test: bitfields mixed with regular struct members"
+  (combine-results
+    (check "int member before bitfields"
+           (= 42 (run-and-get-result "
+struct S { int x; unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; s.x = 42; s.a = 3; s.b = 5; return s.x; }")))
+    (check "bitfields before int member"
+           (= 99 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; int x; };
+int main() { struct S s; s.a = 1; s.b = 2; s.x = 99; return s.x; }")))
+    (check "bitfield between int members"
+           (= 15 (run-and-get-result "
+struct S { int x; unsigned int flags : 8; int y; };
+int main() { struct S s; s.x = 10; s.flags = 0xFF; s.y = 5; return s.x + s.y; }")))
+    (check "bitfields do not clobber surrounding int members"
+           (= 1001 (run-and-get-result "
+struct S { int x; unsigned int a : 4; unsigned int b : 4; int y; };
+int main() { struct S s; s.x = 1000; s.a = 3; s.b = 7; s.y = 1;
+             return s.x + s.y; }")))))
+
+(deftest test-bitfield-pointer ()
+  "Test: bitfield access through pointer"
+  (combine-results
+    (check "write bitfield via pointer"
+           (= 6 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; struct S *p = &s; p->a = 2; p->b = 4; return p->a + p->b; }")))
+    (check "read bitfield via pointer"
+           (= 9 (run-and-get-result "
+struct S { unsigned int x : 5; };
+int main() { struct S s; s.x = 9; struct S *p = &s; return p->x; }")))
+    (check "write via pointer, read via struct"
+           (= 3 (run-and-get-result "
+struct S { unsigned int a : 4; unsigned int b : 4; };
+int main() { struct S s; struct S *p = &s; p->a = 1; p->b = 2; return s.a + s.b; }")))))
+
+(deftest test-bitfield-overflow ()
+  "Test: bitfield spanning storage unit boundary"
+  (combine-results
+    (check "17-bit field after 17-bit field goes to next unit"
+           (= 3 (run-and-get-result "
+struct S { unsigned int a : 17; unsigned int b : 17; };
+int main() { struct S s; s.a = 1; s.b = 2; return s.a + s.b; }")))
+    (check "wide bitfields independent in separate units"
+           (= 0 (run-and-get-result "
+struct S { unsigned int a : 17; unsigned int b : 17; };
+int main() { struct S s; s.a = 0xAAAAA; s.b = 0; return s.b; }")))))
+
+(deftest test-phase32-bitfields ()
+  "Phase 32: Bitfield support"
+  (combine-results
+    (test-bitfield-basic)
+    (test-bitfield-packing)
+    (test-bitfield-signed)
+    (test-bitfield-layout)
+    (test-bitfield-mixed-struct)
+    (test-bitfield-pointer)
+    (test-bitfield-overflow)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.

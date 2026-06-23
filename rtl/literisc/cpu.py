@@ -6,6 +6,9 @@ from modules.common.Common import copySignal
 from cpu_common import flop
 from sub_always import sub3_w_sig
 
+
+# TODO: When clk_en goes to 0 use the previous value of imem_dout
+
 # byte 1: [ o o o o  r r r r ]
 # opcode field (upper 4 bits) in byte 1:
 OPC_A_RX      = 0  # Rx = A
@@ -196,6 +199,7 @@ def cpu( clk, clk_en, sync_rstn,
          obs_acc,
          obs_cc,
          obs_op,
+         obs_trace,
          sim_print):
 
 
@@ -206,6 +210,11 @@ def cpu( clk, clk_en, sync_rstn,
     acc = Signal(modbv(0)[32:])
     acc_ff = Signal(modbv(0)[32:])
     acc_next = Signal(modbv(0)[32:])
+
+    raw_bytes = [Signal(modbv(0)[8:]) for _ in range(6)]
+    obs_trace = Signal(modbv(0)[69:])  # valid(1) + pc(16) + len(4) + 6 bytes(48) = 69
+
+    instr_len = Signal(modbv(1)[4:])  # max 6 bytes
 
     n_n = Signal(modbv(0)[1:]) 
     n_c = Signal(modbv(0)[1:]) 
@@ -347,6 +356,8 @@ def cpu( clk, clk_en, sync_rstn,
     PC = 0
 
     # op code outer
+
+    test_clk_en = Signal(modbv(1)[1:])
 
     ist   = flop( next_state,         state,            clk_en, clk, sync_rstn, reset_value=ST_RESET )
     iir   = flop( n_ir,               ir,               clk_en, clk, sync_rstn  )
@@ -1489,29 +1500,77 @@ def cpu( clk, clk_en, sync_rstn,
                 print("wr R",reg_dest,"=",reg_wr_op)
 
     if enable_obs:
-        @always_comb
-        def obsreg():
-            for i in range(16):
-                obs_regs[i].next = reg_bank[i]
-            obs_acc.next = acc
-            obs_cc.next = cc
+        #@always_comb
+        #def obsreg():
+        #    for i in range(16):
+        #        obs_regs[i].next = reg_bank[i]
+        #    obs_acc.next = acc
+        #    obs_cc.next = cc
 
+        #@always(clk.posedge)
+        #def obsff():
+        #    if clk_en == 1:
+        #        obs_trace.next = 0
+        #        emit = modbv(0)[1:]
+        #        if state == ST_NEXT_INSTR:
+        #            if not (op == OPC_NEXT and r_field == OPCI_NEXT):
+        #                emit[:] = 1
+        #        #elif state == ST_READ_PART2:
+        #        #    emit[:] = 1
+
+        #        if emit == 1:
+        #            obs_trace.next = concat(
+        #                modbv(1)[1:],   # valid
+        #                pc[16:],        # pc at start of instruction
+        #                raw_bytes[5],   # oldest byte = byte 0 of instruction
+        #                raw_bytes[4],
+        #                raw_bytes[3],
+        #                raw_bytes[2],
+        #                raw_bytes[1],
+        #                raw_bytes[0],   # newest byte
+        #            )
         @always(clk.posedge)
         def obsff():
             if clk_en == 1:
-                obs_op.valid.next = 0
-                if state == ST_NEXT_INSTR:
-                    if not ( op == OPC_NEXT and r_field == OPCI_NEXT ):
-                        obs_op.valid.next = 1
-                        obs_op.op.next = op
-                        obs_op.op_jmp.next = r_field
-                        obs_op.op_inner.next = r_field
-                elif state == ST_READ_PART2:
-                    obs_op.valid.next = 1
-                    obs_op.op.next = op
-                    obs_op.op_jmp.next = r_field
-                    obs_op.op_inner.next = r_field
-                    obs_op.op_inner2.next = op2
+                obs_trace.next = 0
+                if inc_pc == 1:
+                    instr_len.next = instr_len + 1
+                if next_state == ST_NEXT_INSTR and state != ST_RESET:
+                    instr_len.next = 1
+                    obs_trace.next = concat(
+                        modbv(1)[1:],    # valid, bit 68
+                        instr_pc[16:],   # pc, bits 67:52
+                        instr_len[4:],   # len, bits 51:48
+                        raw_bytes[5],    # oldest byte, bits 47:40
+                        raw_bytes[4],
+                        raw_bytes[3],
+                        raw_bytes[2],
+                        raw_bytes[1],
+                        raw_bytes[0],    # newest byte, bits 7:0
+                    )
+
+    @always_comb
+    def capture_raw_0():
+        raw_bytes[0].next = imem_dout
+
+    @always(clk.posedge)
+    def capture_raw():
+        if clk_en == 1:
+            if inc_pc == 1:
+                #raw_bytes[0].next = imem_dout
+                raw_bytes[1].next = raw_bytes[0]
+                raw_bytes[2].next = raw_bytes[1]
+                raw_bytes[3].next = raw_bytes[2]
+                raw_bytes[4].next = raw_bytes[3]
+                raw_bytes[5].next = raw_bytes[4]
+
+    instr_pc = Signal(modbv(0)[16:])
+
+    @always(clk.posedge)
+    def capture_instr_pc():
+        if clk_en == 1:
+            if state == ST_NEXT_INSTR:
+                instr_pc.next = pc
 
     @always_comb
     def extr_instr():

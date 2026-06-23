@@ -14,7 +14,7 @@
   (let ((pos (compiler-state-token-pos *state*))
         (tokens (compiler-state-tokens *state*)))
     (if (< pos (length tokens))
-        (nth pos tokens)
+        (aref tokens pos)
         nil)))
 
 (defun peek-token (&optional (offset 0))
@@ -22,7 +22,7 @@
   (let ((pos (+ (compiler-state-token-pos *state*) offset))
         (tokens (compiler-state-tokens *state*)))
     (if (< pos (length tokens))
-        (nth pos tokens)
+        (aref tokens pos)
         nil)))
 
 (defun advance-token ()
@@ -142,8 +142,8 @@
   (let ((tokens (compiler-state-tokens *state*))
         (addr-taken (compiler-state-address-taken *state*)))
     (loop for i from 0 below (1- (length tokens))
-          for tok = (nth i tokens)
-          for next-tok = (nth (1+ i) tokens)
+          for tok = (aref tokens i)
+          for next-tok = (aref tokens (1+ i))
           when (and (eq (token-type tok) 'operator)
                     (string= (token-value tok) "&")
                     (eq (token-type next-tok) 'identifier))
@@ -366,8 +366,10 @@
            (setf (compiler-state-token-pos *state*) saved-pos)  ; restore position
            is-ptr))))
 
-(defun parse-struct-member-declaration (current-offset)
-  "Parse struct member declaration. Returns (member-list new-offset)"
+(defun parse-struct-member-declaration (current-offset &optional (bf-unit-start nil) (bf-bit-offset 0))
+  "Parse struct member declaration.
+   Returns (values member-list new-offset new-bf-unit-start new-bf-bit-offset).
+   bf-unit-start/bf-bit-offset track the current open bitfield storage unit across calls."
   (let ((member-type (parse-type))
         (members nil)
         (offset current-offset))
@@ -375,7 +377,7 @@
     (if (and (or (eq (type-desc-base member-type) 'struct)
                  (eq (type-desc-base member-type) 'union))
              (check-token 'punctuation ";"))
-        ;; Anonymous struct/union - inline its members with adjusted offsets
+        ;; Anonymous struct/union - inline its members with adjusted offsets; closes any bitfield unit
         (let* ((tag (type-desc-struct-tag member-type))
                (nested-def (or (lookup-struct-def tag)
                                (lookup-union-def tag))))
@@ -385,25 +387,36 @@
                 (let ((adjusted-member (make-struct-member
                                         :name (struct-member-name nested-member)
                                         :type (struct-member-type nested-member)
-                                        :offset (+ aligned-base (struct-member-offset nested-member)))))
+                                        :offset (+ aligned-base (struct-member-offset nested-member))
+                                        :bitfield-width (struct-member-bitfield-width nested-member)
+                                        :bitfield-bit-offset (struct-member-bitfield-bit-offset nested-member))))
                   (push adjusted-member members)))
               (setf offset (+ aligned-base (struct-def-size nested-def)))))
           (expect-token 'punctuation ";")
-          (values (nreverse members) offset))
-        ;; Named member(s)
+          (values (nreverse members) offset nil 0))
+        ;; Named member(s) or unnamed bitfield(s)
         (progn
           (loop
             (let (name final-type)
               ;; Check for function pointer pattern: int (*name)()
               (if (check-function-pointer-pattern)
-                  (multiple-value-setq (name final-type)
-                    (parse-function-pointer-declarator member-type))
-                  ;; Normal member
                   (progn
-                    (setf name (token-value (expect-token 'identifier)))
+                    ;; Function pointer - ends any open bitfield unit
+                    (setf bf-unit-start nil bf-bit-offset 0)
+                    (multiple-value-setq (name final-type)
+                      (parse-function-pointer-declarator member-type)))
+                  ;; Normal member or bitfield (name is optional for unnamed bitfields)
+                  (progn
                     (setf final-type member-type)
-                    ;; Check for array (supports multi-dimensional)
-                    (when (check-token 'punctuation "[")
+                    (if (check-token 'identifier)
+                        (setf name (token-value (advance-token)))
+                        ;; No identifier - only valid for unnamed bitfield ': width'
+                        (progn
+                          (setf name nil)
+                          (unless (check-token 'punctuation ":")
+                            (compiler-error "Expected member name"))))
+                    ;; Check for array dimensions (named non-bitfield members only)
+                    (when (and name (check-token 'punctuation "["))
                       (let ((dimensions nil))
                         (loop while (match-token 'punctuation "[")
                               do (let ((dim (number-token-value (expect-token 'number))))
@@ -418,16 +431,52 @@
                                                              :array-size array-size
                                                              :struct-tag (type-desc-struct-tag member-type)
                                                              :struct-scope (type-desc-struct-scope member-type)))))))))
-              (let* ((aligned-offset (align-to offset (type-alignment final-type)))
-                     (member (make-struct-member :name name
-                                                 :type final-type
-                                                 :offset aligned-offset)))
-                (push member members)
-                (setf offset (+ aligned-offset (type-size final-type)))))
-            (unless (match-token 'punctuation ",")
-              (return)))
+              ;; Check for bitfield width specifier ': constant'
+              (if (match-token 'punctuation ":")
+                  ;; Bitfield member
+                  (let ((width (number-token-value (expect-token 'number))))
+                    (cond
+                      ;; width=0 (unnamed only): force alignment to next storage unit boundary
+                      ((= width 0)
+                       (when name
+                         (compiler-error "Named bitfield '~a' cannot have zero width" name))
+                       (when bf-unit-start
+                         (setf offset (+ bf-unit-start 4)))
+                       (setf bf-unit-start nil bf-bit-offset 0))
+                      ;; Normal bitfield
+                      (t
+                       ;; Open a new storage unit if we don't have one yet
+                       (when (null bf-unit-start)
+                         (setf bf-unit-start (align-to offset 4))
+                         (setf bf-bit-offset 0)
+                         (setf offset (+ bf-unit-start 4)))
+                       ;; If bitfield doesn't fit in the current unit, start a new one
+                       (when (> (+ bf-bit-offset width) 32)
+                         (setf bf-unit-start (+ bf-unit-start 4))
+                         (setf bf-bit-offset 0)
+                         (setf offset (+ bf-unit-start 4)))
+                       ;; Create the member (skip unnamed bitfields - they just occupy space)
+                       (when name
+                         (push (make-struct-member :name name
+                                                   :type final-type
+                                                   :offset bf-unit-start
+                                                   :bitfield-width width
+                                                   :bitfield-bit-offset bf-bit-offset)
+                               members))
+                       (incf bf-bit-offset width))))
+                  ;; Not a bitfield - close any open bitfield unit and place normally
+                  (progn
+                    (setf bf-unit-start nil bf-bit-offset 0)
+                    (let* ((aligned-offset (align-to offset (type-alignment final-type)))
+                           (member (make-struct-member :name name
+                                                       :type final-type
+                                                       :offset aligned-offset)))
+                      (push member members)
+                      (setf offset (+ aligned-offset (type-size final-type))))))
+              (unless (match-token 'punctuation ",")
+                (return))))
           (expect-token 'punctuation ";")
-          (values (nreverse members) offset)))))
+          (values (nreverse members) offset bf-unit-start bf-bit-offset)))))
 
 (defun parse-struct-specifier ()
   "Parse: struct [tag] [{ member-list }]"
@@ -439,15 +488,18 @@
     ;; Optional body
     (when (match-token 'punctuation "{")
       (setf has-body t)
-      (let ((members nil) (current-offset 0) (max-align 1))
+      (let ((members nil) (current-offset 0) (max-align 1)
+            (bf-unit-start nil) (bf-bit-offset 0))
         (loop until (check-token 'punctuation "}")
-              do (multiple-value-bind (member-list next-offset)
-                     (parse-struct-member-declaration current-offset)
+              do (multiple-value-bind (member-list next-offset next-bf-unit next-bf-bit)
+                     (parse-struct-member-declaration current-offset bf-unit-start bf-bit-offset)
                    (dolist (m member-list)
                      (setf max-align (max max-align
                                           (type-alignment (struct-member-type m)))))
                    (setf members (append members member-list))
-                   (setf current-offset next-offset)))
+                   (setf current-offset next-offset)
+                   (setf bf-unit-start next-bf-unit)
+                   (setf bf-bit-offset next-bf-bit)))
         (expect-token 'punctuation "}")
         (let ((def (make-struct-def :tag tag-name
                                     :members members
@@ -478,13 +530,15 @@
       (setf has-body t)
       (let ((members nil) (max-size 0) (max-align 1))
         (loop until (check-token 'punctuation "}")
-              do (multiple-value-bind (member-list next-offset)
-                     (parse-struct-member-declaration 0)  ; Always pass 0 for union
-                   (declare (ignore next-offset))
+              do (multiple-value-bind (member-list next-offset next-bf-unit next-bf-bit)
+                     ;; Each union declaration line is independent; always start from offset 0
+                     (parse-struct-member-declaration 0)
+                   (declare (ignore next-offset next-bf-unit next-bf-bit))
                    (dolist (m member-list)
-                     ;; For union, override offset to 0 and track max size
+                     ;; For union, all members overlap at offset 0; bitfield-bit-offset stays
                      (setf (struct-member-offset m) 0)
                      (let ((member-type (struct-member-type m)))
+                       ;; Bitfield storage unit is the size of the underlying type
                        (setf max-size (max max-size (type-size member-type)))
                        (setf max-align (max max-align (type-alignment member-type)))))
                    (setf members (append members member-list))))
