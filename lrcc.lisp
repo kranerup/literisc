@@ -22,6 +22,7 @@
   (format t "  -S               Output assembly code only (pretty printed)~%")
   (format t "  -r, --run        Run program in emulator (program output to stdout,~%")
   (format t "                   return value to stderr)~%")
+  (format t "  --ui             Run program in curses emulator UI (interactive debugger)~%")
   (format t "  -I <dir>         Add directory to preprocessor include search path~%")
   (format t "  -O               Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
   (format t "  -Os              Optimize for size (inlining, peephole, library mul/div/mod)~%")
@@ -33,6 +34,7 @@
   (format t "  lrcc -S hello.c                    # Print assembly~%")
   (format t "  lrcc -o hello.hex hello.c          # Compile to hex file~%")
   (format t "  lrcc -r hello.c                    # Compile and run~%")
+  (format t "  lrcc --ui hello.c                  # Interactive curses debugger~%")
   (format t "  lrcc -I include -Os -r hello.c     # With stdio.h, optimized for size~%")
   (format t "  lrcc -O -r hello.c                 # Full optimization for speed~%"))
 
@@ -110,6 +112,7 @@
          (output-file nil)
          (asm-only nil)
          (run-program nil)
+         (run-ui nil)
          (optimize nil)
          (peephole nil)
          (optimize-size t)
@@ -134,6 +137,8 @@
                (setf asm-only t))
               ((or (string= arg "-r") (string= arg "--run"))
                (setf run-program t))
+              ((string= arg "--ui")
+               (setf run-ui t))
               ((string= arg "-O")
                ;; Optimize for speed: inlining, peephole, inline mul/div/mod
                (setf optimize t)
@@ -182,54 +187,69 @@
     ;; Preprocess with cpp (resolves #include, #define, etc.)
     (let ((source (cpp-preprocess source-file (nreverse include-dirs))))
 
-      (handler-case
-          (cond
-            ;; Assembly output only
-            (asm-only
-             (let ((asm (compile-c source :verbose verbose
-                                          :annotate t
-                                          :optimize optimize
-                                          :optimize-size optimize-size
-                                          :peephole peephole)))
-               (if output-file
-                   (with-open-file (*standard-output* output-file
-                                                      :direction :output
-                                                      :if-exists :supersede)
-                     (pretty-print-asm asm))
-                   (pretty-print-asm asm))))
+      (handler-bind
+          ((error (lambda (e)
+                    (format *error-output* "Compilation error: ~a~%" e)
+                    (sb-debug:print-backtrace :count 30 :stream *error-output*)
+                    (sb-ext:exit :code 1))))
+        (cond
+          ;; Assembly output only
+          (asm-only
+           (let ((asm (compile-c source :verbose verbose
+                                        :annotate t
+                                        :optimize optimize
+                                        :optimize-size optimize-size
+                                        :peephole peephole)))
+             (if output-file
+                 (with-open-file (*standard-output* output-file
+                                                    :direction :output
+                                                    :if-exists :supersede)
+                   (pretty-print-asm asm))
+                 (pretty-print-asm asm))))
 
-            ;; Run in emulator
-            (run-program
-             (when verbose
-               (format t "Compiling ~a...~%" source-file))
-             (let ((result (run-c-program source :verbose verbose
+          ;; Run in emulator
+          (run-program
+           (when verbose
+             (format t "Compiling ~a...~%" source-file))
+           (let ((result (run-c-program source :verbose verbose
+                                               :optimize optimize
+                                               :optimize-size optimize-size
+                                               :peephole peephole
+                                               :max-cycles 1000000)))
+             (format *error-output* "~a~%" result)
+             (sb-ext:exit :code (logand result 255))))
+
+          ;; Run in curses UI debugger
+          (run-ui
+           (when verbose
+             (format t "Compiling ~a...~%" source-file))
+           (let* ((asm (compile-c source :verbose verbose
+                                         :annotate nil
+                                         :optimize optimize
+                                         :optimize-size optimize-size
+                                         :peephole peephole))
+                  (symtab (make-hash-table :test 'eql))
+                  (mcode (assemble (strip-asm-comments asm) verbose symtab))
+                  (dmem (lr-emulator:make-dmem #x1000000))
+                  (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
+             (lr-emulator:run-with-curses emul symtab)))
+
+          ;; Compile to binary
+          (t
+           (when verbose
+             (format t "Compiling ~a...~%" source-file))
+           (let ((mcode (compile-c-to-asm source :verbose verbose
                                                  :optimize optimize
                                                  :optimize-size optimize-size
-                                                 :peephole peephole
-                                                 :max-cycles 1000000)))
-               (format *error-output* "~a~%" result)
-               (sb-ext:exit :code (logand result 255))))
-
-            ;; Compile to binary
-            (t
-             (when verbose
-               (format t "Compiling ~a...~%" source-file))
-             (let ((mcode (compile-c-to-asm source :verbose verbose
-                                                   :optimize optimize
-                                                   :optimize-size optimize-size
-                                                   :peephole peephole)))
-               (if output-file
-                   (progn
-                     (if (string-suffix-p output-file ".bin")
-                         (write-binary-file mcode output-file)
-                         (write-hex-file mcode output-file))
-                     (when verbose
-                       (format t "Wrote ~a bytes to ~a~%" (length mcode) output-file)))
-                   (lr-asm:hexdump mcode)))))
-
-        (error (e)
-          (format *error-output* "Compilation error: ~a~%" e)
-          (sb-ext:exit :code 1))))))
+                                                 :peephole peephole)))
+             (if output-file
+                 (progn
+                   (if (string-suffix-p output-file ".bin")
+                       (write-binary-file mcode output-file)
+                       (write-hex-file mcode output-file))
+                   (when verbose
+                     (format t "Wrote ~a bytes to ~a~%" (length mcode) output-file)))
+                 (lr-asm:hexdump mcode)))))))))
 
 (defun string-suffix-p (string suffix)
   "Check if STRING ends with SUFFIX"

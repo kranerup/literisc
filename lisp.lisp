@@ -1,5 +1,6 @@
 (asdf:load-system :literisc)
 (use-package :lr-asm)
+(use-package :lr-disasm)
 (use-package :lr-emulator)
 (use-package :unit)
 (use-package :lr-soc)
