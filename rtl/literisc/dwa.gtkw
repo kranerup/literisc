@@ -1,15 +1,15 @@
 [*]
 [*] GTKWave Analyzer v3.4.0 (w)1999-2022 BSI
-[*] Tue Jun 23 07:48:03 2026
+[*] Tue Jun 23 08:07:23 2026
 [*]
-[dumpfile] "/home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/rtl/literisc/trace_run.vcd"
-[dumpfile_mtime] "Tue Jun 23 07:42:05 2026"
-[dumpfile_size] 1750058
+[dumpfile] "/home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/rtl/literisc/trace_cpu_stores_constant.vcd"
+[dumpfile_mtime] "Tue Jun 23 07:50:39 2026"
+[dumpfile_size] 2484652
 [savefile] "/home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/rtl/literisc/dwa.gtkw"
-[timestart] 52
-[size] 3774 2091
-[pos] -27 -24
-*-3.939868 171 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+[timestart] 0
+[size] 2830 1559
+[pos] -1 -1
+*-5.939868 58 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 [markername] AA
 [markername] BB
 [markername] CC
@@ -38,13 +38,14 @@
 [markername] ZZ
 [treeopen] tb.
 [treeopen] tb.icpu.
-[treeopen] tb.icpu.icpu.
+[treeopen] tb.icpu.dmem.
 [treeopen] tb.icpu.icpu.icpu.
+[treeopen] tb.icpu.imem.
 [treeopen] tb.icpu.imem.pmem.
 [sst_width] 278
 [signals_width] 294
 [sst_expanded] 1
-[sst_vpaned_height] 670
+[sst_vpaned_height] 484
 @22
 tb.conf_master_reply_data[31:0]
 @28
@@ -57,14 +58,22 @@ tb.conf_master_request_data[31:0]
 tb.conf_master_request_id[1:0]
 tb.conf_master_request_re
 tb.conf_master_request_type[1:0]
-tb.conf_master_request_we
 @22
 tb.conf_slave_reply_data[31:0]
 @28
+tb.conf_master_request_we
 tb.conf_slave_reply_id
-tb.conf_slave_reply_status[1:0]
-@24
+@22
+tb.icpu.conf_slave_request_data[31:0]
 tb.conf_slave_request_address[31:0]
+@28
+tb.conf_slave_reply_status[1:0]
+@22
+tb.icpu.imem_final_wadr[31:0]
+@28
+tb.icpu.imem_final_wenable
+@29
+tb.icpu.rom_clk_en
 @28
 tb.icpu.conf_slave_request_re
 tb.icpu.conf_slave_request_we
@@ -94,15 +103,23 @@ tb.icpu.conf_slave_request_re
 tb.icpu.cpu_waiting
 @22
 tb.icpu.wait_type[3:0]
+@24
 tb.icpu.icpu.icpu.pc[15:0]
+@22
+tb.icpu.dmem.data.data(517)[31:0]
 @28
 tb.icpu.intr_addr_valid
-@4023
-^>2 /home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/gtkwave-trace-filter.lisp
+@4022
+^>1 /home/vilhelm/dev/lcpu/vmodel_for_literisc/liteRISC/gtkwave-trace-filter.lisp
 tb.icpu.icpu.icpu.obs_trace[68:0]
 @22
 tb.icpu.icpu.icpu.obs_trace[68:0]
 tb.icpu.imem_final_dout[7:0]
+tb.icpu.imem_radr[31:0]
+@28
+tb.icpu.imem_rd
+@22
+tb.icpu.cpu_imem_radr[31:0]
 tb.icpu.imem_dout[7:0]
 tb.icpu.icpu.icpu.raw_bytes.raw_bytes(0)[7:0]
 tb.icpu.icpu.icpu.raw_bytes.raw_bytes(1)[7:0]
@@ -214,5 +231,10 @@ tb.icpu.cpu_waiting
 tb.icpu.n_cpu_waiting
 tb.icpu.slave_state[1:0]
 tb.icpu.slave_state_prev[1:0]
+@22
+tb.icpu.dmem.data.data(512)[31:0]
+tb.icpu.cpu_imem_radr[31:0]
+tb.icpu.imem_radr[31:0]
+tb.icpu.imem_radr[31:0]
 [pattern_trace] 1
 [pattern_trace] 0
