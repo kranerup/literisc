@@ -22,6 +22,7 @@
                (:file "disassembler")
                (:file "pty-lib")
                (:file "soc")
+               (:file "coe-emulator")
                (:file "emulator")
                (:file "reg-verifier")
                (:file "c-compiler")

@@ -227,9 +227,10 @@
 (defpackage :lr-emulator
   (:use :cl :unit :lr-asm :lr-disasm
         :charms :charms-extra
-        :lr-opcodes :pty :lr-soc)
+        :lr-opcodes :pty :lr-soc :conf-socket)
   (:export :make-dmem :make-emulator :run-with-curses
            :run-with-curses-io :run-emul :run-emul-io :get-reg
+           :run-with-curses-conf
            :emulated-system-processor
            :processor-add-wr-callback 
            :processor-state-break
@@ -299,6 +300,44 @@
   (let ((proc (emulated-system-processor emul)))
     (processor-add-wr-callback  proc 'uart-write-char-cb)
     (processor-add-rd-callback  proc 'uart-read-char-cb)))
+
+;;; ==========================================================================
+;;; Conf interface emulation
+
+(defparameter *conf-stream* nil)
+
+(defun conf-write-cb (addr data)
+  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (when *conf-stream*
+           (let ((offset (- addr conf-low)))
+             ;; send write request to C, we=1 re=0
+             (send-master-request *conf-stream* offset data 1 0)
+             ;; wait for reply
+             (let ((reply (read-msg *conf-stream*)))
+               (when (not (= (getf reply :type) +msg-master-reply+))
+                 (format t "conf-write-cb: unexpected reply type ~a~%" reply)))))
+         nil)  ; swallow write
+        (t t)))
+
+(defun conf-read-cb (addr)
+  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (when *conf-stream*
+           (let ((offset (- addr conf-low)))
+             ;; send read request, we=0 re=1
+             (send-master-request *conf-stream* offset 0 0 1)
+             ;; wait for reply with data
+             (let ((reply (read-msg *conf-stream*)))
+               (if (= (getf reply :type) +msg-master-reply+)
+                   (getf reply :data)
+                   (progn
+                     (format t "conf-read-cb: unexpected reply type ~a~%" reply)
+                     0))))))
+        (t nil)))
+
+(defun add-conf (emul)
+  (let ((proc (emulated-system-processor emul)))
+    (processor-add-wr-callback proc 'conf-write-cb)
+    (processor-add-rd-callback proc 'conf-read-cb)))
   
 ;;; ==========================================================================
 (defun add-callback (callback-list fn)
@@ -1659,6 +1698,24 @@
       (run-with-curses emul symtab)))
   (setf *uart-fd* nil))
 
+(defun run-with-curses-conf (emul socket-path &optional symtab)
+  (let* ((server (make-server-socket socket-path))
+         (dummy  (format t "waiting for conf connection on ~a~%" socket-path))
+         (client (accept-connection server))
+         (stream (sb-bsd-sockets:socket-make-stream
+                   client
+                   :input t :output t
+                   :element-type '(unsigned-byte 8)
+                   :buffering :none)))
+    (format t "conf connected~%")
+    (setf *conf-stream* stream)
+    (add-conf emul)
+    (unwind-protect
+        (run-with-curses emul symtab)
+      (setf *conf-stream* nil)
+      (sb-bsd-sockets:socket-close client)
+      (sb-bsd-sockets:socket-close server))))
+
 (defun run-emul-io ( emul pty nr-instr &optional symtab )
   (format t "run-emul-io pty:~a~%" pty)
   (add-uart emul) ; add callbacks
@@ -2689,5 +2746,3 @@
     (test-st )
     (test-push-pop )
     (test-run-hello)))
-
-

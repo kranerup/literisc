@@ -212,7 +212,7 @@ def cpu( clk, clk_en, sync_rstn,
     acc_next = Signal(modbv(0)[32:])
 
     raw_bytes = [Signal(modbv(0)[8:]) for _ in range(6)]
-    obs_trace = Signal(modbv(0)[69:])  # valid(1) + pc(16) + len(4) + 6 bytes(48) = 69
+    #obs_trace = Signal(modbv(0)[69:])  # valid(1) + pc(16) + len(4) + 6 bytes(48) = 69
 
     instr_len = Signal(modbv(1)[4:])  # max 6 bytes
 
