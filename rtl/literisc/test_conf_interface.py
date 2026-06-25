@@ -15,24 +15,36 @@ writing any non-zero value to INTERRUPT_ADDRESS.
 
 Address arithmetic
 ------------------
-  IMEM  : byte addresses  0 .. 8191  (slave writes go here when addr <= IMEM_HIGH)
-  DMEM  : byte addresses  8192..24575 (slave writes go here when addr > IMEM_HIGH)
+  IMEM  : byte addresses  0 .. IMEM_HIGH  (slave writes go here when addr <= IMEM_HIGH)
+  DMEM  : byte addresses  DMEM_LOW .. DMEM_HIGH
 
-  Slave DMEM write addr S  →  dp_mem[S]
-  CPU DMEM phys byte  addr P  →  dp_mem[P - DMEM_LOW]
+  Slave DMEM write addr S  ->  dp_mem[S]
+  CPU DMEM phys byte  addr P  ->  dp_mem[P - DMEM_LOW]
 
   So slave addr S and CPU addr P access the same dp_mem word when:
       S = P - DMEM_LOW  (i.e. P = S + DMEM_LOW)
 
-  For slave addr to be a DMEM write (not IMEM), S must be > IMEM_HIGH = 8191.
-  The lowest safe pair: S=8192, P=8192+8192=16384.
+  For slave addr to be a DMEM write (not IMEM), S must be > IMEM_HIGH.
+  The lowest safe pair: S = IMEM_HIGH+1, P = S + DMEM_LOW.
+
+  CONF / master port
+  ------------------
+  The CONF window is CONF_LOW..CONF_HIGH (0x10000..0xFFFFFFFF).
+  CPU master requests: slave_addr = (cpu_addr - CONF_LOW) // 4
+  The window is large enough to reach DMEM slave addresses (> IMEM_HIGH).
+  test_dual_cpu uses SLAVE_RESULT0 as the rendezvous word on B's DMEM.
 
 Tests
 -----
-  1. test_slave_dmem_rw       -- pure slave DMEM write / read roundtrip
-  2. test_cpu_stores_constant -- load program, CPU stores 42 to DMEM, slave reads
-  3. test_slave_write_cpu_doubles -- slave writes 100, CPU reads and shifts left 1 (=200)
-  4. test_slave_write_cpu_sum -- slave writes two inputs, CPU adds them, slave reads result
+  1. test_slave_dmem_rw            -- pure slave DMEM write / read roundtrip
+  2. test_cpu_stores_constant      -- CPU stores 42 to DMEM, slave reads
+  3. test_slave_write_cpu_doubles  -- slave writes 100, CPU doubles it
+  4. test_slave_write_cpu_sum      -- slave writes two inputs, CPU adds them
+  5. test_master_request           -- CPU issues a master read from CONF space
+  6. test_dual_cpu                 -- CPU-A writes to CPU-B's DMEM via master port
+  7. test_wait_ticks               -- CPU accumulates tick counts
+  8. test_master_while_slave_request -- simultaneous master reply + slave write
+  9. test_cpu_reset                -- CPU reset via CPU_RESET_ADDRESS
 """
 
 import sys
@@ -41,7 +53,12 @@ from myhdl import *
 from modules.common.signal import signal
 from axi import Axi4
 from conf import Conf
-from cpu_sys import cpu_sys, INTERRUPT_ADDRESS, IMEM_HIGH, DMEM_LOW, IO_LOW, IO_HIGH, TICK_ADDRESS
+from cpu_sys import cpu_sys
+from constants import (
+    INTERRUPT_ADDRESS, IMEM_HIGH, DMEM_LOW, DMEM_HIGH,
+    TICK_ADDRESS, CPU_RESET_ADDRESS,
+    CONF_LOW, CONF_HIGH,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from asm import assemble
@@ -52,15 +69,23 @@ from asm import assemble
 
 PROG_BASE = 512  # IMEM byte address where user programs are loaded
 
-SLAVE_RESULT0 = 8192
-SLAVE_RESULT1 = 8196
-SLAVE_INPUT0  = 8200
-SLAVE_INPUT1  = 8204
+# Slave-side addresses: must be > IMEM_HIGH to land in DMEM.
+# CPU-side addresses  : slave_addr + DMEM_LOW.
+SLAVE_RESULT0 = IMEM_HIGH + 1        # first word of DMEM via slave
+SLAVE_RESULT1 = SLAVE_RESULT0 + 4
+SLAVE_INPUT0  = SLAVE_RESULT0 + 8
+SLAVE_INPUT1  = SLAVE_RESULT0 + 12
 
-CPU_RESULT0   = DMEM_LOW + SLAVE_RESULT0 # 8192 + 8192
+CPU_RESULT0   = DMEM_LOW + SLAVE_RESULT0
 CPU_RESULT1   = DMEM_LOW + SLAVE_RESULT1
 CPU_INPUT0    = DMEM_LOW + SLAVE_INPUT0
 CPU_INPUT1    = DMEM_LOW + SLAVE_INPUT1
+
+# CONF / master port: CONF_LOW..CONF_HIGH, large enough to reach DMEM on B.
+# CPU master requests: slave_addr = (cpu_addr - CONF_LOW) // 4
+# Use SLAVE_RESULT0 as the rendezvous — it's > IMEM_HIGH so lands in B's DMEM.
+DUAL_CPU_TARGET_CONF   = CONF_LOW + SLAVE_RESULT0      # no *4, master no longer divides by 4
+DUAL_CPU_SLAVE_ADDR_B  = SLAVE_RESULT0                  # slave sees byte offset directly
 
 # ---------------------------------------------------------------------------
 # Assemble test programs
@@ -114,12 +139,12 @@ _PROG_ADD_TWO = assemble(
 
 _PROG_MASTER_REQUEST_ADDRESS_0 = assemble(
     """
-    (Rx= IO_LOW R0)
+    (Rx= CONF_LOW R0)
     (A=M[Rx] R0)
     (label done)
     (j done)
     """,
-    IO_LOW=IO_LOW,
+    CONF_LOW=CONF_LOW,
 )
 
 _PROG_READ_TICKS = assemble(
@@ -142,6 +167,9 @@ _PROG_READ_TICKS = assemble(
     RESULT_PHYS=CPU_RESULT0,
 )
 
+print(f"  SLAVE_RESULT0         : slave=0x{SLAVE_RESULT0:04X}  cpu=0x{CPU_RESULT0:04X}")
+print(f"  SLAVE_INPUT0          : slave=0x{SLAVE_INPUT0:04X}  cpu=0x{CPU_INPUT0:04X}")
+print(f"  DUAL_CPU_TARGET_CONF  : cpu_a=0x{DUAL_CPU_TARGET_CONF:05X}  slave_b=0x{DUAL_CPU_SLAVE_ADDR_B:04X}")
 print(f"  PROG_STORE_CONSTANT   : {len(_PROG_STORE_CONSTANT)} bytes")
 print(f"  PROG_READ_DOUBLE_WRITE: {len(_PROG_READ_DOUBLE_WRITE)} bytes")
 print(f"  PROG_ADD_TWO          : {len(_PROG_ADD_TWO)} bytes")
@@ -186,53 +214,6 @@ def print_program_hex(name, prog_bytes):
 # ---------------------------------------------------------------------------
 # Individual test runners
 # ---------------------------------------------------------------------------
-
-#
-def test_slave_write_during_boot():
-    """Test 5: Write during boot-read-interrupt."""
-    result    = [None]
-
-    def tb():
-        clk  = Signal(bool())
-        rstn = signal()
-        axi  = Axi4(asize=16, dsize=32, idsize=1)
-        conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
-
-        @always(delay(10))
-        def clk_gen():
-            clk.next = not clk
-
-        @instance
-        def seq():
-            rstn.next = 0
-            yield clk.posedge
-            rstn.next = 1
-            yield clk.posedge
-
-            addr = PROG_BASE
-            yield _write_data(conf, clk, 32, addr)
-            for i in range(50):
-                yield clk.posedge
-            #for byte in _PROG_ADD_TWO:
-            #    yield _write_data(conf, clk, byte, addr)
-            #    addr += 1
-            #    yield clk.posedge
-
-            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
-            raise StopSimulation()
-
-        return instances()
-
-    traceSignals.filename = 'trace_slave_write_during_boot'
-    itb = traceSignals(tb)
-    sim = Simulation(itb)
-    sim.run(500000)
-
-    ok = result[0] == "PASS"
-    print(f"{'PASS' if ok else 'FAIL'}: test_slave_write_during_boot" +
-          (f"  ({result[0]})" if not ok else ""))
-    return ok
 
 def test_slave_dmem_rw():
     """Test 1: slave DMEM write/read roundtrip (no CPU program needed)."""
@@ -383,9 +364,6 @@ def test_slave_write_cpu_doubles():
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for i in range(MAX_POLLS):
-                #if i % 15 != 0:
-                #    yield clk.posedge
-                #    continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if readback[0] == EXPECTED:
@@ -449,9 +427,6 @@ def test_slave_write_cpu_sum():
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for i in range(MAX_POLLS):
-                #if i % 15 != 0:
-                #    yield clk.posedge
-                #    continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if readback[0] == EXPECTED:
@@ -475,7 +450,7 @@ def test_slave_write_cpu_sum():
     return ok
 
 def test_master_request():
-    """Test 5: Master reads address 0 and puts the result into accumulator"""
+    """Test 5: Master reads address CONF_LOW and puts the result into accumulator."""
     result    = [None]
     MAX_POLLS = 200
 
@@ -527,15 +502,7 @@ def test_master_request():
             yield clk.posedge
             yield clk.posedge
             yield clk.posedge
-            #for _ in range(MAX_POLLS):
-            #    readback = [0]
-            #    yield _read_data(conf, clk, SLAVE_RESULT0, readback)
-            #    if readback[0] == EXPECTED:
-            #        result[0] = "PASS"
-            #        raise StopSimulation()
-            #    yield clk.posedge
 
-            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
             raise StopSimulation()
 
         return instances()
@@ -632,8 +599,13 @@ def test_dual_cpu():
       CPU-A master  -> CPU-B slave
       CPU-B master  -> CPU-A slave  (not used here, but wired for completeness)
 
-    CPU-A runs a program that writes a value to CPU-B's DMEM via the conf
-    master port, then reads it back.  CPU-B just runs the boot ROM (idle loop).
+    CPU-A writes a value to CPU-B's DMEM via the master (CONF) port,
+    then the TB reads it back via CPU-B's slave port.
+
+    Note: The CONF window is CONF_LOW..CONF_HIGH (0x10000..0xFFFFFFFF).
+    The master port maps: slave_addr = cpu_addr - CONF_LOW
+    SLAVE_RESULT0 > IMEM_HIGH so it lands in B's DMEM.
+    DUAL_CPU_TARGET_CONF = CONF_LOW + SLAVE_RESULT0.
     """
     result = [None]
 
@@ -662,18 +634,6 @@ def test_dual_cpu():
             conf_a.master_reply_status.next   = conf_b.slave_reply_status
             conf_a.master_reply_id.next       = conf_b.slave_reply_id
 
-        # --- tie off B master (nothing drives it) -------------------------
-        #@always_comb
-        #def b_master_tieoff():
-        #    conf_b.master_reply_data.next   = 0
-        #    conf_b.master_reply_status.next = 0
-        #    conf_b.master_reply_id.next     = 0
-        #    # and A slave (nothing uses it)
-        #    conf_a.slave_request_address.next = 0
-        #    conf_a.slave_request_data.next    = 0
-        #    conf_a.slave_request_id.next      = 0
-        #    conf_a.slave_request_we.next      = 0
-        #    conf_a.slave_request_re.next      = 0
         @instance
         def tieoff():
             conf_b.master_reply_data.next   = 0
@@ -702,34 +662,22 @@ def test_dual_cpu():
             rstn.next = 1
             yield clk.posedge
 
-            # Load a program into CPU-A's IMEM via conf_a slave.
-            # Program: write 0xABCD to CPU-B's DMEM via master port,
-            #          then spin forever.
-            #
-            # In cpu_sys the master port uses IO-space addresses:
-            #   req_addr = cpu_dmem_adr - IO_LOW
-            # and then conf_master does:
-            #   conf.master_request_address = req_addr // 4
-            #
-            # On the B side, conf_slave sees that address and writes to
-            # DMEM when address > IMEM_HIGH (8191).
-            #
-            # Pick target slave addr = 8192 (first DMEM word in B).
-            # The CPU must write to IO_LOW + (8192 * 4) = 65536 + 32768 = 98304.
-            # But IO space is IO_LOW..IO_HIGH = 65536..131071, so 98304 is valid.
-
-            TARGET_IO_ADDR = IO_LOW + SLAVE_RESULT0 * 4  # 65536 + 32768
+            # CPU-A program: write EXPECTED to CPU-B's DMEM via CONF port,
+            # then spin. DUAL_CPU_TARGET_CONF >= CONF_LOW so it
+            # triggers a master write. B's slave sees slave_addr=DUAL_CPU_SLAVE_ADDR_B.
+            EXPECTED = 0xABCD
 
             prog = assemble(
                 """
                 (Rx= TARGET R0)
-                (Rx= 43981 R1)
+                (Rx= EXPECTED R1)
                 (A=Rx R1)
                 (M[Rx]=A R0)
                 (label done)
                 (j done)
                 """,
-                TARGET=TARGET_IO_ADDR,
+                TARGET=DUAL_CPU_TARGET_CONF,
+                EXPECTED=EXPECTED,
             )
 
             # write program into CPU-A's IMEM starting at PROG_BASE
@@ -741,13 +689,13 @@ def test_dual_cpu():
             # trigger CPU-A boot jump to PROG_BASE
             yield _write_data(conf_a, clk, 1, INTERRUPT_ADDRESS)
 
-            # wait for CPU-A to issue the master write and for CPU-B's
-            # slave to process it
+            for _ in range(50):
+                yield clk.posedge
+
             MAX_POLLS = 600
-            EXPECTED  = 0xABCD
             for _ in range(MAX_POLLS):
                 readback = [0]
-                yield _read_data(conf_b, clk, SLAVE_RESULT0, readback)
+                yield _read_data(conf_b, clk, DUAL_CPU_SLAVE_ADDR_B, readback)
                 if readback[0] == EXPECTED:
                     result[0] = "PASS"
                     raise StopSimulation()
@@ -774,16 +722,6 @@ def test_master_while_slave_request():
     for the reply, an external slave_request arrives on conf.  This races
     against the master reply to check whether the CPU correctly handles both
     without dropping either.
-
-    Setup:
-      - CPU-A program: read from IO_LOW (triggers master request, CPU stalls),
-        then store the result to DMEM, then spin.
-      - Test bench: after triggering CPU-A, waits a few cycles then issues a
-        slave write to CPU-A's DMEM *while* the master reply is still pending.
-      - Then sends the master reply.
-      - Checks both:
-          (a) the master reply data ends up in CPU-A's DMEM result slot
-          (b) the slave write data is also correctly in CPU-A's DMEM
     """
     result = [None]
 
@@ -806,20 +744,16 @@ def test_master_while_slave_request():
         MASTER_REPLY_VALUE = 0x1234
         SLAVE_WRITE_VALUE  = 0x5678
 
-        # CPU-A program:
-        #   read from IO_LOW -> stalls waiting for master reply
-        #   store result (accumulator) to DMEM result slot
-        #   spin
         prog = assemble(
             """
-            (Rx= IO_LOW R0)
+            (Rx= CONF_LOW R0)
             (A=M[Rx] R0)
             (Rx= RESULT_PHYS R1)
             (M[Rx]=A R1)
             (label done)
             (j done)
             """,
-            IO_LOW=IO_LOW,
+            CONF_LOW=CONF_LOW,
             RESULT_PHYS=CPU_RESULT0,
         )
 
@@ -833,21 +767,23 @@ def test_master_while_slave_request():
             rstn.next = 1
             yield clk.posedge
 
-            # load program into CPU-A IMEM
+            # load program into IMEM
             addr = PROG_BASE
             for byte in prog:
                 yield _write_data(conf, clk, byte, addr)
                 addr += 1
 
-            # trigger boot jump
-            yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
-
-            # wait a few cycles for CPU-A to reach the IO read and stall
             for _ in range(20):
                 yield clk.posedge
 
-            # --- inject a slave_request while master reply is still pending ---
-            # write to a different DMEM slot so we can check it independently
+            # trigger boot jump
+            yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
+
+            # wait for CPU to reach the IO read and stall
+            for _ in range(20):
+                yield clk.posedge
+
+            # inject a slave_request while master reply is still pending
             print("TB: issuing slave write while master reply pending")
             yield _write_data(conf, clk, SLAVE_WRITE_VALUE, SLAVE_RESULT1)
 
@@ -860,11 +796,11 @@ def test_master_while_slave_request():
             conf.master_reply_data.next   = 0
             conf.master_reply_status.next = 0
 
-            yield clk.posedge
-
-            # poll for CPU-A to store the master reply value into RESULT0
+            # poll for CPU to store the master reply value into RESULT0
             MAX_POLLS = 400
-            for _ in range(MAX_POLLS):
+            for i in range(MAX_POLLS):
+                if i % 5 == 0:
+                    yield clk.posedge
                 readback_result = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback_result)
                 if readback_result[0] == MASTER_REPLY_VALUE:
@@ -903,7 +839,6 @@ def test_cpu_reset():
     """Test 8: CPU runs a program that increments a DMEM value once then halts.
     After verifying the first increment, reset the CPU via CPU_RESET_ADDRESS,
     reload the program, trigger it again, and verify a second increment."""
-    from cpu_sys import CPU_RESET_ADDRESS
     result = [None]
 
     _PROG_INCREMENT_ONCE = assemble(
@@ -968,11 +903,7 @@ def test_cpu_reset():
             for _ in range(20):
                 yield clk.posedge
 
-            # --- second run: reload program and trigger again ---
-            #addr = PROG_BASE
-            #for byte in _PROG_INCREMENT_ONCE:
-            #    yield _write_data(conf, clk, byte, addr)
-            #    addr += 1
+            # --- second run: trigger again (program still in IMEM) ---
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for _ in range(MAX_POLLS):
@@ -998,51 +929,6 @@ def test_cpu_reset():
           (f"  ({result[0]})" if not ok else ""))
     return ok
 
-def test_run():
-    """Test 5: Write during boot-read-interrupt."""
-    result    = [None]
-
-    def tb():
-        clk  = Signal(bool())
-        rstn = signal()
-        axi  = Axi4(asize=16, dsize=32, idsize=1)
-        conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
-
-        @always(delay(10))
-        def clk_gen():
-            clk.next = not clk
-
-        @instance
-        def seq():
-            rstn.next = 0
-            yield clk.posedge
-            rstn.next = 1
-            yield clk.posedge
-
-            for i in range(100):
-                yield clk.posedge
-            #for byte in _PROG_ADD_TWO:
-            #    yield _write_data(conf, clk, byte, addr)
-            #    addr += 1
-            #    yield clk.posedge
-
-            #result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
-            raise StopSimulation()
-
-        return instances()
-
-    traceSignals.filename = 'trace_run'
-    itb = traceSignals(tb)
-    sim = Simulation(itb)
-    sim.run(500000)
-
-    ok = result[0] == "PASS"
-    print(f"{'PASS' if ok else 'FAIL'}: test_run" +
-          (f"  ({result[0]})" if not ok else ""))
-    return ok
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1050,9 +936,8 @@ def test_run():
 if __name__ == "__main__":
     results = []
 
-    print_program_hex("PROG_STORE_CONSTANT",    _PROG_STORE_CONSTANT)
+    print_program_hex("PROG_STORE_CONSTANT", _PROG_STORE_CONSTANT)
 
-    #results.append(test_slave_write_during_boot())
     results.append(test_slave_dmem_rw())
     results.append(test_cpu_stores_constant())
     results.append(test_slave_write_cpu_doubles())
@@ -1062,7 +947,6 @@ if __name__ == "__main__":
     results.append(test_wait_ticks())
     results.append(test_master_while_slave_request())
     results.append(test_cpu_reset())
-    #results.append(test_run())
 
     print_program_hex("ticks", _PROG_READ_TICKS)
 
