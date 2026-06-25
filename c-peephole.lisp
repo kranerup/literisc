@@ -272,6 +272,9 @@
                ;; A=Rx: unconditional A write — the earlier A write is dead
                ((string= opname "A=RX")
                 (return-from A-dead-before-next-write-p t))
+               ;; A= v: immediate unconditional write to A — the earlier A write is dead
+               ((string= opname "A=")
+                (return-from A-dead-before-next-write-p t))
                ;; Pure data/label/comment directives: skip
                ((or (string= opname "LABEL")
                     (string= opname "COMMENT")
@@ -310,6 +313,9 @@
              (cond
                ;; Rx=A r: A was stored into r here — A still equals r
                ((and (string= opname "RX=A") (eq last-arg r))
+                (return-from A-already-equals-reg-p t))
+               ;; A=Rx r: r was loaded into A here — A still equals r
+               ((and (string= opname "A=RX") (eq last-arg r))
                 (return-from A-already-equals-reg-p t))
                ;; Any other Rx=... instruction writing r: r has a new value
                ((and (>= oplen 3) (string= opname "RX=" :end1 3)

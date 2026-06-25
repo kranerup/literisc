@@ -232,7 +232,8 @@
                   (mcode (assemble (strip-asm-comments asm) verbose symtab))
                   (dmem (lr-emulator:make-dmem #x1000000))
                   (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
-             (lr-emulator:run-with-curses emul symtab)))
+             ;;(lr-emulator:run-with-curses emul symtab)))
+             (lr-emulator:run-with-curses-conf emul "/tmp/coe_emulator.sock" symtab)))
 
           ;; Compile to binary
           (t
