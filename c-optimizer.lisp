@@ -568,6 +568,11 @@
         (let ((val (get-constant-value expr)))
           ;; Apply type-specific masking
           (cond
+            ;; Cast to pointer - pointers are 32-bit addresses, never truncate
+            ;; to the pointed-to type's size (check BEFORE char/short!)
+            ((and (type-desc-p target-type)
+                  (is-pointer-type target-type))
+             (make-constant-node (logand val #xFFFFFFFF) target-type (ast-node-source-loc node)))
             ;; Cast to char (1 byte)
             ((and (type-desc-p target-type)
                   (eq (type-desc-base target-type) 'char))

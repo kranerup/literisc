@@ -563,6 +563,24 @@
 ;;; Type Parsing
 ;;; ===========================================================================
 
+(defparameter *fixed-width-type-keywords*
+  '("int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
+  "C99 fixed-width type names that are lexed as keywords. They may legitimately
+   appear as a typedef name (e.g. <stdint.h>'s `typedef unsigned char uint8_t;`),
+   in which case we accept the keyword token in the typedef-name position.")
+
+(defun parse-typedef-name ()
+  "Parse the new-name of a typedef. Normally an identifier, but the C99
+   fixed-width type names (uint8_t, ...) are lexed as keywords, so accept those
+   too — a redefinition matching the built-in type is harmless since uses still
+   resolve through the built-in keyword."
+  (let ((tok (current-token)))
+    (if (and tok
+             (eq (token-type tok) 'keyword)
+             (member (token-value tok) *fixed-width-type-keywords* :test #'string=))
+        (token-value (advance-token))
+        (token-value (expect-token 'identifier)))))
+
 (defun parse-typedef-declaration ()
   "Parse: typedef existing-type new-name;"
   (expect-token 'keyword "typedef")
@@ -589,7 +607,7 @@
             (expect-token 'punctuation ";")
             (make-node 'typedef-decl :value typedef-name :result-type ptr-type))
           ;; Normal typedef
-          (let ((typedef-name (token-value (expect-token 'identifier)))
+          (let ((typedef-name (parse-typedef-name))
                 (array-size nil))
             ;; Check for array typedef
             (when (match-token 'punctuation "[")

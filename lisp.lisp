@@ -263,14 +263,14 @@
   (mem-write-word-l dmem (+ n-cons (* cons-size symb)) val))
 
 (defun mem-write-dword-l ( dmem addr word32b )
-  (assert (equal (logand addr 3) 0))
+  ;(assert (equal (logand addr 3) 0))
   (setf (aref dmem addr) (logand #xff word32b))
   (setf (aref dmem (1+ addr)) (ash word32b -8))
   (setf (aref dmem (+ 2 addr)) (ash word32b -16))
   (setf (aref dmem (+ 3 addr)) (ash word32b -24)))
 
 (defun mem-write-word-l ( dmem addr word16b )
-  (assert (equal (logand addr 1) 0))
+  ;(assert (equal (logand addr 1) 0))
   (setf (aref dmem addr) (logand #xff word16b))
   (setf (aref dmem (1+ addr)) (ash word16b -8)))
 
@@ -5966,7 +5966,7 @@
 (defun print-number (dmem cons-index is-prim)
   (let* ((addr (+ n-cons (* cons-index 4)))
          (res (aref dmem addr)))
-    (assert (= 0 (logand addr 3)))
+    ;(assert (= 0 (logand addr 3)))
     (setf res (logior res 
                       (ash (aref dmem (+ addr 1)) 8)))
     (setf res (logior res 

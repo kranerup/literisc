@@ -306,32 +306,108 @@
 
 (defparameter *conf-stream* nil)
 
+;;(defun conf-write-cb (addr data)
+;;  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+;;         (when *conf-stream*
+;;           (let ((offset (- addr conf-low)))
+;;             ;; send write request to C, we=1 re=0
+;;             (send-master-request *conf-stream* offset data 1 0)
+;;             ;; wait for reply
+;;             (let ((reply (read-msg *conf-stream*)))
+;;               (when (not (= (getf reply :type) +msg-master-reply+))
+;;                 (format t "conf-write-cb: unexpected reply type ~a~%" reply)))))
+;;         nil)  ; swallow write
+;;        (t t)))
+
+;;(defun conf-write-cb (addr data)
+;;  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+;;         (when *conf-stream*
+;;           (let ((offset (- addr conf-low)))
+;;             (handler-case
+;;                 (progn
+;;                   (send-master-request *conf-stream* offset data 1 0)
+;;                   (let ((reply (read-msg *conf-stream*)))
+;;                     (when (not (= (getf reply :type) +msg-master-reply+))
+;;                       (format t "conf-write-cb: unexpected reply type ~a~%" reply))))
+;;               (error (e)
+;;                 (format t "conf-write-cb: SOCKET ERROR ~a~%" e)
+;;                 (setf *conf-stream* nil)))))
+;;         nil)
+;;        (t t)))
 (defun conf-write-cb (addr data)
   (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (format t "conf-write-cb: addr=~a data=~a~%" addr data)
          (when *conf-stream*
            (let ((offset (- addr conf-low)))
-             ;; send write request to C, we=1 re=0
-             (send-master-request *conf-stream* offset data 1 0)
-             ;; wait for reply
-             (let ((reply (read-msg *conf-stream*)))
-               (when (not (= (getf reply :type) +msg-master-reply+))
-                 (format t "conf-write-cb: unexpected reply type ~a~%" reply)))))
-         nil)  ; swallow write
+             (handler-case
+                 (progn
+                   (format t "conf-write-cb: sending request~%")
+                   (send-master-request *conf-stream* offset data 1 0)
+                   (format t "conf-write-cb: waiting for reply~%")
+                   (let ((reply (read-msg *conf-stream*)))
+                     (format t "conf-write-cb: got reply ~a~%" reply)
+                     (when (not (= (getf reply :type) +msg-master-reply+))
+                       (format t "conf-write-cb: unexpected reply type ~a~%" reply))))
+               (error (e)
+                 (format t "conf-write-cb: SOCKET ERROR ~a~%" e)
+                 (setf *conf-stream* nil)))))
+         nil)
         (t t)))
 
+;;(defun conf-read-cb (addr)
+;;  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+;;         (when *conf-stream*
+;;           (let ((offset (- addr conf-low)))
+;;             ;; send read request, we=0 re=1
+;;             (send-master-request *conf-stream* offset 0 0 1)
+;;             ;; wait for reply with data
+;;             (let ((reply (read-msg *conf-stream*)))
+;;               (if (= (getf reply :type) +msg-master-reply+)
+;;                   (getf reply :data)
+;;                   (progn
+;;                     (format t "conf-read-cb: unexpected reply type ~a~%" reply)
+;;                     0))))))
+;;        (t nil)))
+
+;;(defun conf-read-cb (addr)
+;;  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+;;         (when *conf-stream*
+;;           (let ((offset (- addr conf-low)))
+;;             (handler-case
+;;                 (progn
+;;                   (send-master-request *conf-stream* offset 0 0 1)
+;;                   (let ((reply (read-msg *conf-stream*)))
+;;                     (if (= (getf reply :type) +msg-master-reply+)
+;;                         (getf reply :data)
+;;                         (progn
+;;                           (format t "conf-read-cb: unexpected reply type ~a~%" reply)
+;;                           0))))
+;;               (error (e)
+;;                 (format t "conf-read-cb: SOCKET ERROR ~a~%" e)
+;;                 (setf *conf-stream* nil)
+;;                 0)))))
+;;        (t nil)))
 (defun conf-read-cb (addr)
   (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (format t "conf-read-cb: addr=~a~%" addr)
          (when *conf-stream*
            (let ((offset (- addr conf-low)))
-             ;; send read request, we=0 re=1
-             (send-master-request *conf-stream* offset 0 0 1)
-             ;; wait for reply with data
-             (let ((reply (read-msg *conf-stream*)))
-               (if (= (getf reply :type) +msg-master-reply+)
-                   (getf reply :data)
-                   (progn
-                     (format t "conf-read-cb: unexpected reply type ~a~%" reply)
-                     0))))))
+             (handler-case
+                 (progn
+                   (format t "conf-read-cb: sending request~%")
+                   (send-master-request *conf-stream* offset 0 0 1)
+                   (format t "conf-read-cb: waiting for reply~%")
+                   (let ((reply (read-msg *conf-stream*)))
+                     (format t "conf-read-cb: got reply ~a~%" reply)
+                     (if (= (getf reply :type) +msg-master-reply+)
+                         (getf reply :data)
+                         (progn
+                           (format t "conf-read-cb: unexpected reply type ~a~%" reply)
+                           0))))
+               (error (e)
+                 (format t "conf-read-cb: SOCKET ERROR ~a~%" e)
+                 (setf *conf-stream* nil)
+                 0)))))
         (t nil)))
 
 (defun add-conf (emul)
@@ -746,7 +822,7 @@
     (if cb-res
         cb-res
         (let ((res (aref dmem addr)))
-          (assert (= 0 (logand addr 3)))
+          ;(assert (= 0 (logand addr 3)))
           (setf res (logior res 
                             (ash (aref dmem (+ addr 1)) 8)))
           (setf res (logior res 
@@ -774,7 +850,7 @@
         (logand #xff (aref dmem addr)))))
 
 (defun mem-read-word (dmem addr &optional read-callbacks)
-  (assert (= 0 (logand addr 1)))
+  ;(assert (= 0 (logand addr 1)))
   (let* ((byte-l (mem-read-byte dmem addr read-callbacks))
          (byte-h (mem-read-byte dmem (1+ addr) read-callbacks)))
     (logior (ash byte-h 8) byte-l)))
@@ -783,7 +859,7 @@
   ;(format t "mem-write-byte a:~a d:~a cb:~a~%" addr data write-callbacks)
   (if (execute-predicate-callbacks write-callbacks addr data)
     (progn ;(format t "mem-write-byte a:~a d:~a~%" addr data)
-      (if (and (>= addr 0) (<= 65535))
+      (if (and (>= addr 0) (< addr (length dmem)))
           (setf (aref dmem addr) (logand #xff data))))))
 
 (defun test-mem-write-b ()
@@ -796,11 +872,11 @@
 
 
 (defun mem-write-dword (dmem addr data &optional (write-callbacks nil))
-  (assert (= 0 (logand addr 3)))
+  ;(assert (= 0 (logand addr 3)))
   ;(format t "mem-write-dword a:~a d:~a~%" addr data)
   (if (execute-predicate-callbacks write-callbacks addr data)
       (progn ;(format t "mem-write-dword do a:~a d:~a~%" addr data)
-        (if (and (>= addr 0) (<= 65535))
+        (if (and (>= addr 0) (< (+ addr 3) (length dmem)))
             (progn
               (setf (aref dmem addr)
                     (logand #xff data))
@@ -812,9 +888,9 @@
                     (logand #xff (ash data -24))))))))
 
 (defun mem-write-word (dmem addr data &optional (write-callbacks nil))
-  (assert (= 0 (logand addr 1)))
+  ;(assert (= 0 (logand addr 1)))
   (if (execute-predicate-callbacks write-callbacks addr data)
-    (if (and (>= addr 0) (<= 65535))
+    (if (and (>= addr 0) (< (+ addr 1) (length dmem)))
         (progn
           (setf (aref dmem addr)
                 (logand #xff data))
@@ -1542,152 +1618,317 @@
              1 row)
         do (setf addr (+ addr 16))))
 
+
+;;(defun run-with-curses ( emul &optional symtab )
+;;  (setq *print-pretty* nil)
+;;  ;(setf (processor-state-debug 
+;;  ;        (emulated-system-processor emul)) nil)
+;;
+;;  (let ((*terminal-io* (if (boundp '*console-io*) ; swank will set *console-io*
+;;                           *console-io*           ; so that ncurses uses correct tty
+;;                           *terminal-io*)))
+;;    (charms:with-curses ()
+;;      (charms:disable-echoing)
+;;      (charms:enable-raw-input) ; :interpret-control-characters t)
+;;      (charms:clear-window (charms:standard-window))
+;;      (let ((disasm-window (charms:make-window  45 49 36 1))
+;;            (output-window (charms:make-window  40 20 01 32))
+;;            (cpu-window (charms:make-window     30 30 01 0))
+;;            (command-window (charms:make-window 30  5  1 45))
+;;            (dump-window (charms:make-window    75 50 87 0))
+;;            (breakpoints (make-hash-table))
+;;            (output-window-need-refresh nil)
+;;            (mem-was-written nil))
+;;        (processor-add-wr-callback 
+;;          (emulated-system-processor emul)
+;;          (lambda (addr data)
+;;            (when (and (>= addr dump-start-address) (<= addr dump-end-address))
+;;              (setf mem-was-written t))
+;;            (when (equal (logand #xffffffff addr) #xffffffff)
+;;              (setf output-window-need-refresh t)
+;;              (write-cb-write-win addr data output-window))
+;;            t))
+;;        (charms:clear-window disasm-window)
+;;        (charms:clear-window output-window)
+;;        (charms:clear-window cpu-window)
+;;        (charms:clear-window command-window)
+;;        (charms:clear-window dump-window)
+;;        (draw-window-box cpu-window)
+;;        (draw-window-box command-window)
+;;        (draw-window-box dump-window)
+;;        (dump-mem (emulated-system-dmem emul) dump-window)
+;;        (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
+;;        (charms/ll:scrollok (charms::window-pointer output-window) 1)
+;;        (charms:enable-non-blocking-mode command-window)
+;;        (charms:refresh-window disasm-window)
+;;        (charms:refresh-window output-window)
+;;        (charms:refresh-window cpu-window)
+;;        (charms:refresh-window command-window)
+;;        (charms:refresh-window dump-window)
+;;        (loop named emulate
+;;              with single-step := nil and run := nil and update-windows := t
+;;              and fcall-break := nil and need-refresh := t
+;;              do (progn
+;;                   (when update-windows
+;;                     (write-processor-state 
+;;                       cpu-window
+;;                       (emulated-system-processor emul)
+;;                       (emulated-system-imem emul))
+;;                     (write-disasm 
+;;                       disasm-window
+;;                       (emulated-system-processor emul)
+;;                       (emulated-system-imem emul)
+;;                       symtab)
+;;                     (when need-refresh
+;;                       (setf need-refresh nil)
+;;                       (charms:refresh-window disasm-window)
+;;                       ;(charms:refresh-window (charms:standard-window))
+;;                       ;(charms:refresh-window command-window)
+;;                       (charms:refresh-window dump-window)
+;;                       (charms:refresh-window cpu-window))
+;;                     (when output-window-need-refresh
+;;                       (charms:refresh-window output-window)
+;;                       (setf output-window-need-refresh nil))
+;;                     (setf update-windows nil))
+;;
+;;                   ;(sleep 0.5)
+;;                   ;(format t "get-char~%")
+;;                   ;(case (charms:get-char charms:*standard-window* :ignore-error t)
+;;                   (case (charms:get-char command-window :ignore-error t)
+;;                     ;(case (charms:get-char disasm-window :ignore-error t)
+;;                     ;(case (charms:get-char the-tty :ignore-error t)
+;;                     ;((nil) nil)
+;;                     ((nil) nil)
+;;                     ((#\Space) (when (not run)
+;;                                  (update-status command-window "stepped")
+;;                                  (setf single-step 1)))
+;;                     ((#\r) (progn
+;;                              (when run
+;;                                (update-status command-window "stopped")
+;;                                (setf need-refresh t)
+;;                                (setf update-windows t))
+;;                              (when (not run)
+;;                                (update-status command-window "running"))
+;;                              (setf run (not run))))
+;;                     ((#\n) (when (not run)
+;;                              (update-status command-window "next subroutine")
+;;                              (setf run t)
+;;                              (setf single-step nil)
+;;                              (setf fcall-break t)))
+;;                     ((#\o) (when (not run)
+;;                              (update-status command-window "over subroutine")
+;;                              (let* ((pc (processor-state-pc (emulated-system-processor emul)))
+;;                                     (instr-len (disasm-length
+;;                                                  (coerce (subseq (emulated-system-dmem emul) pc (+ pc 10)) 'list)))
+;;                                     (bp (+ pc instr-len)))
+;;                                (setf over-bp bp)
+;;                                (setf (gethash bp breakpoints) bp))
+;;                              (setf run t)
+;;                              (setf single-step nil)))
+;;                     ((#\R) (progn
+;;                              (reset-processor (emulated-system-processor emul))
+;;                              (setf update-windows t)))
+;;                     ((#\b) (get-breakpoint breakpoints symtab command-window))
+;;                     ((#\q #\Q) (return-from emulate)))
+;;                   ;(sleep 0.1)
+;;                   (when run (setf need-refresh nil))
+;;                   (when single-step (setf need-refresh t))
+;;                   (if (or run single-step)
+;;                       (progn
+;;                         (setf update-windows t)
+;;                         (execute-instruction
+;;                           (emulated-system-processor emul) 
+;;                           (emulated-system-imem emul)
+;;                           (emulated-system-dmem emul))
+;;                         (let ((p (emulated-system-processor emul)))
+;;                           (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
+;;                             (update-status command-window "stopped subr")
+;;                             (setf run nil)
+;;                             (setf need-refresh t)
+;;                             (setf fcall-break nil)))
+;;                         ))
+;;                   (if mem-was-written 
+;;                       (dump-mem (emulated-system-dmem emul) dump-window))
+;;                   (let ((bp (gethash (processor-state-pc (emulated-system-processor emul)) breakpoints)))
+;;                     (when bp
+;;                       (when run
+;;                         (update-status command-window "stopped bp")
+;;                         (when (equal bp over-bp)
+;;                           (setf over-bp nil)
+;;                           (remhash bp breakpoints))
+;;                         (setf need-refresh t)
+;;                         (setf run nil))))
+;;                   (when (processor-state-break (emulated-system-processor emul))
+;;                     (when run
+;;                       (update-status command-window "stopped break")
+;;                       (setf (processor-state-break (emulated-system-processor emul)) nil)
+;;                       (setf need-refresh t)
+;;                       (setf run nil)))
+;;                   (setf single-step nil)))))))
 (defun run-with-curses ( emul &optional symtab )
   (setq *print-pretty* nil)
-  ;(setf (processor-state-debug 
-  ;        (emulated-system-processor emul)) nil)
+  (with-open-file (log "/tmp/rwc.log" :direction :output
+                                       :if-exists :supersede
+                                       :if-does-not-exist :create)
+    (format log "run-with-curses: starting~%")
+    (force-output log)
+    (let ((*terminal-io* (if (boundp '*console-io*)
+                             *console-io*
+                             *terminal-io*)))
+      (format log "run-with-curses: terminal-io=~a~%" *terminal-io*)
+      (force-output log)
+      (handler-case
+          (charms:with-curses ()
+            (format log "run-with-curses: inside with-curses~%")
+            (force-output log)
+            (charms:disable-echoing)
+            (charms:enable-raw-input)
+            (charms:clear-window (charms:standard-window))
+            (let ((disasm-window (charms:make-window  45 49 36 1))
+                  (output-window (charms:make-window  40 20 01 32))
+                  (cpu-window (charms:make-window     30 30 01 0))
+                  (command-window (charms:make-window 30  5  1 45))
+                  (dump-window (charms:make-window    75 50 87 0))
+                  (breakpoints (make-hash-table))
+                  (output-window-need-refresh nil)
+                  (mem-was-written nil))
+              (format log "run-with-curses: windows created~%")
+              (force-output log)
+              (processor-add-wr-callback 
+                (emulated-system-processor emul)
+                (lambda (addr data)
+                  (when (and (>= addr dump-start-address) (<= addr dump-end-address))
+                    (setf mem-was-written t))
+                  (when (equal (logand #xffffffff addr) #xffffffff)
+                    (setf output-window-need-refresh t)
+                    (write-cb-write-win addr data output-window))
+                  t))
+              (charms:clear-window disasm-window)
+              (charms:clear-window output-window)
+              (charms:clear-window cpu-window)
+              (charms:clear-window command-window)
+              (charms:clear-window dump-window)
+              (draw-window-box cpu-window)
+              (draw-window-box command-window)
+              (draw-window-box dump-window)
+              (dump-mem (emulated-system-dmem emul) dump-window)
+              (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
+              (charms/ll:scrollok (charms::window-pointer output-window) 1)
+              (charms:enable-non-blocking-mode command-window)
+              (charms:refresh-window disasm-window)
+              (charms:refresh-window output-window)
+              (charms:refresh-window cpu-window)
+              (charms:refresh-window command-window)
+              (charms:refresh-window dump-window)
+              (format log "run-with-curses: entering loop~%")
+              (force-output log)
+              (loop named emulate
+                    with single-step := nil and run := nil and update-windows := t
+                    and fcall-break := nil and need-refresh := t
+                    do (progn
+                         (handler-case
+                             (progn
+                               (when update-windows
+                                 (write-processor-state 
+                                   cpu-window
+                                   (emulated-system-processor emul)
+                                   (emulated-system-imem emul))
+                                 (write-disasm 
+                                   disasm-window
+                                   (emulated-system-processor emul)
+                                   (emulated-system-imem emul)
+                                   symtab)
+                                 (when need-refresh
+                                   (setf need-refresh nil)
+                                   (charms:refresh-window disasm-window)
+                                   (charms:refresh-window dump-window)
+                                   (charms:refresh-window cpu-window))
+                                 (when output-window-need-refresh
+                                   (charms:refresh-window output-window)
+                                   (setf output-window-need-refresh nil))
+                                 (setf update-windows nil))
 
-  (let ((*terminal-io* (if (boundp '*console-io*) ; swank will set *console-io*
-                           *console-io*           ; so that ncurses uses correct tty
-                           *terminal-io*)))
-    (charms:with-curses ()
-      (charms:disable-echoing)
-      (charms:enable-raw-input) ; :interpret-control-characters t)
-      (charms:clear-window (charms:standard-window))
-      (let ((disasm-window (charms:make-window  45 49 36 1))
-            (output-window (charms:make-window  40 20 01 32))
-            (cpu-window (charms:make-window     30 30 01 0))
-            (command-window (charms:make-window 30  5  1 45))
-            (dump-window (charms:make-window    75 50 87 0))
-            (breakpoints (make-hash-table))
-            (output-window-need-refresh nil)
-            (mem-was-written nil))
-        (processor-add-wr-callback 
-          (emulated-system-processor emul)
-          (lambda (addr data)
-            (when (and (>= addr dump-start-address) (<= addr dump-end-address))
-              (setf mem-was-written t))
-            (when (equal (logand #xffffffff addr) #xffffffff)
-              (setf output-window-need-refresh t)
-              (write-cb-write-win addr data output-window))
-            t))
-        (charms:clear-window disasm-window)
-        (charms:clear-window output-window)
-        (charms:clear-window cpu-window)
-        (charms:clear-window command-window)
-        (charms:clear-window dump-window)
-        (draw-window-box cpu-window)
-        (draw-window-box command-window)
-        (draw-window-box dump-window)
-        (dump-mem (emulated-system-dmem emul) dump-window)
-        (charms/ll:scrollok (charms::window-pointer disasm-window) 1)
-        (charms/ll:scrollok (charms::window-pointer output-window) 1)
-        (charms:enable-non-blocking-mode command-window)
-        (charms:refresh-window disasm-window)
-        (charms:refresh-window output-window)
-        (charms:refresh-window cpu-window)
-        (charms:refresh-window command-window)
-        (charms:refresh-window dump-window)
-        (loop named emulate
-              with single-step := nil and run := nil and update-windows := t
-              and fcall-break := nil and need-refresh := t
-              do (progn
-                   (when update-windows
-                     (write-processor-state 
-                       cpu-window
-                       (emulated-system-processor emul)
-                       (emulated-system-imem emul))
-                     (write-disasm 
-                       disasm-window
-                       (emulated-system-processor emul)
-                       (emulated-system-imem emul)
-                       symtab)
-                     (when need-refresh
-                       (setf need-refresh nil)
-                       (charms:refresh-window disasm-window)
-                       ;(charms:refresh-window (charms:standard-window))
-                       ;(charms:refresh-window command-window)
-                       (charms:refresh-window dump-window)
-                       (charms:refresh-window cpu-window))
-                     (when output-window-need-refresh
-                       (charms:refresh-window output-window)
-                       (setf output-window-need-refresh nil))
-                     (setf update-windows nil))
+                               (case (charms:get-char command-window :ignore-error t)
+                                 ((nil) nil)
+                                 ((#\Space) (when (not run)
+                                              (update-status command-window "stepped")
+                                              (setf single-step 1)))
+                                 ((#\r) (progn
+                                          (when run
+                                            (update-status command-window "stopped")
+                                            (setf need-refresh t)
+                                            (setf update-windows t))
+                                          (when (not run)
+                                            (update-status command-window "running"))
+                                          (setf run (not run))))
+                                 ((#\n) (when (not run)
+                                          (update-status command-window "next subroutine")
+                                          (setf run t)
+                                          (setf single-step nil)
+                                          (setf fcall-break t)))
+                                 ((#\o) (when (not run)
+                                          (update-status command-window "over subroutine")
+                                          (let* ((pc (processor-state-pc (emulated-system-processor emul)))
+                                                 (instr-len (disasm-length
+                                                              (coerce (subseq (emulated-system-dmem emul) pc (+ pc 10)) 'list)))
+                                                 (bp (+ pc instr-len)))
+                                            (setf over-bp bp)
+                                            (setf (gethash bp breakpoints) bp))
+                                          (setf run t)
+                                          (setf single-step nil)))
+                                 ((#\R) (progn
+                                          (reset-processor (emulated-system-processor emul))
+                                          (setf update-windows t)))
+                                 ((#\b) (get-breakpoint breakpoints symtab command-window))
+                                 ((#\q #\Q) (progn
+                                              (format log "run-with-curses: quit key pressed~%")
+                                              (force-output log)
+                                              (return-from emulate))))
 
-                   ;(sleep 0.5)
-                   ;(format t "get-char~%")
-                   ;(case (charms:get-char charms:*standard-window* :ignore-error t)
-                   (case (charms:get-char command-window :ignore-error t)
-                     ;(case (charms:get-char disasm-window :ignore-error t)
-                     ;(case (charms:get-char the-tty :ignore-error t)
-                     ;((nil) nil)
-                     ((nil) nil)
-                     ((#\Space) (when (not run)
-                                  (update-status command-window "stepped")
-                                  (setf single-step 1)))
-                     ((#\r) (progn
-                              (when run
-                                (update-status command-window "stopped")
-                                (setf need-refresh t)
-                                (setf update-windows t))
-                              (when (not run)
-                                (update-status command-window "running"))
-                              (setf run (not run))))
-                     ((#\n) (when (not run)
-                              (update-status command-window "next subroutine")
-                              (setf run t)
-                              (setf single-step nil)
-                              (setf fcall-break t)))
-                     ((#\o) (when (not run)
-                              (update-status command-window "over subroutine")
-                              (let* ((pc (processor-state-pc (emulated-system-processor emul)))
-                                     (instr-len (disasm-length
-                                                  (coerce (subseq (emulated-system-dmem emul) pc (+ pc 10)) 'list)))
-                                     (bp (+ pc instr-len)))
-                                (setf over-bp bp)
-                                (setf (gethash bp breakpoints) bp))
-                              (setf run t)
-                              (setf single-step nil)))
-                     ((#\R) (progn
-                              (reset-processor (emulated-system-processor emul))
-                              (setf update-windows t)))
-                     ((#\b) (get-breakpoint breakpoints symtab command-window))
-                     ((#\q #\Q) (return-from emulate)))
-                   ;(sleep 0.1)
-                   (when run (setf need-refresh nil))
-                   (when single-step (setf need-refresh t))
-                   (if (or run single-step)
-                       (progn
-                         (setf update-windows t)
-                         (execute-instruction
-                           (emulated-system-processor emul) 
-                           (emulated-system-imem emul)
-                           (emulated-system-dmem emul))
-                         (let ((p (emulated-system-processor emul)))
-                           (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
-                             (update-status command-window "stopped subr")
-                             (setf run nil)
-                             (setf need-refresh t)
-                             (setf fcall-break nil)))
-                         ))
-                   (if mem-was-written 
-                       (dump-mem (emulated-system-dmem emul) dump-window))
-                   (let ((bp (gethash (processor-state-pc (emulated-system-processor emul)) breakpoints)))
-                     (when bp
-                       (when run
-                         (update-status command-window "stopped bp")
-                         (when (equal bp over-bp)
-                           (setf over-bp nil)
-                           (remhash bp breakpoints))
-                         (setf need-refresh t)
-                         (setf run nil))))
-                   (when (processor-state-break (emulated-system-processor emul))
-                     (when run
-                       (update-status command-window "stopped break")
-                       (setf (processor-state-break (emulated-system-processor emul)) nil)
-                       (setf need-refresh t)
-                       (setf run nil)))
-                   (setf single-step nil)))))))
+                               (when run (setf need-refresh nil))
+                               (when single-step (setf need-refresh t))
+                               (if (or run single-step)
+                                   (progn
+                                     (setf update-windows t)
+                                     (execute-instruction
+                                       (emulated-system-processor emul) 
+                                       (emulated-system-imem emul)
+                                       (emulated-system-dmem emul))
+                                     (let ((p (emulated-system-processor emul)))
+                                       (when (and fcall-break (find (processor-state-last-instr p) '(jsr j-a)))
+                                         (update-status command-window "stopped subr")
+                                         (setf run nil)
+                                         (setf need-refresh t)
+                                         (setf fcall-break nil)))))
+                               (if mem-was-written 
+                                   (dump-mem (emulated-system-dmem emul) dump-window))
+                               (let ((bp (gethash (processor-state-pc (emulated-system-processor emul)) breakpoints)))
+                                 (when bp
+                                   (when run
+                                     (update-status command-window "stopped bp")
+                                     (when (equal bp over-bp)
+                                       (setf over-bp nil)
+                                       (remhash bp breakpoints))
+                                     (setf need-refresh t)
+                                     (setf run nil))))
+                               (when (processor-state-break (emulated-system-processor emul))
+                                 (when run
+                                   (update-status command-window "stopped break")
+                                   (setf (processor-state-break (emulated-system-processor emul)) nil)
+                                   (setf need-refresh t)
+                                   (setf run nil)))
+                               (setf single-step nil))
+                           (error (e)
+                             (format log "run-with-curses: LOOP ERROR: ~a~%" e)
+                             (format log "~a~%" (with-output-to-string (s)
+                                                  (sb-debug:print-backtrace :stream s :count 20)))
+                             (force-output log)
+                             (return-from emulate)))))
+              (format log "run-with-curses: loop exited normally~%")
+              (force-output log)))
+        (error (e)
+          (format log "run-with-curses: WITH-CURSES ERROR: ~a~%" e)
+          (force-output log))))))
 
 
 (defun run-with-curses-io ( emul pty &optional symtab )
@@ -1699,6 +1940,7 @@
   (setf *uart-fd* nil))
 
 (defun run-with-curses-conf (emul socket-path &optional symtab)
+  (format t "run-with-curses-conf: starting, socket-path=~a~%" socket-path)
   (let* ((server (make-server-socket socket-path))
          (dummy  (format t "waiting for conf connection on ~a~%" socket-path))
          (client (accept-connection server))
@@ -1710,11 +1952,19 @@
     (format t "conf connected~%")
     (setf *conf-stream* stream)
     (add-conf emul)
+    (format t "run-with-curses-conf: entering run-with-curses~%")
     (unwind-protect
-        (run-with-curses emul symtab)
+        (progn
+          (run-with-curses emul symtab)
+          (format t "run-with-curses-conf: run-with-curses returned normally~%"))
+      (format t "run-with-curses-conf: cleanup triggered (unwind-protect)~%")
+      (format t "run-with-curses-conf: closing conf stream~%")
       (setf *conf-stream* nil)
+      (format t "run-with-curses-conf: closing client socket~%")
       (sb-bsd-sockets:socket-close client)
-      (sb-bsd-sockets:socket-close server))))
+      (format t "run-with-curses-conf: closing server socket~%")
+      (sb-bsd-sockets:socket-close server)
+      (format t "run-with-curses-conf: cleanup done~%"))))
 
 (defun run-emul-io ( emul pty nr-instr &optional symtab )
   (format t "run-emul-io pty:~a~%" pty)

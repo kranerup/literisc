@@ -49,7 +49,23 @@
     (list :type type :address address :data data
           :we we :re re :id id :status status)))
 
+;;(defun write-msg (stream type address data we re id status)
+;;  (write-byte type stream)
+;;  (write-u32 stream address)
+;;  (write-u32 stream data)
+;;  (write-byte we stream)
+;;  (write-byte re stream)
+;;  (write-byte id stream)
+;;  (write-byte status stream)
+;;  (finish-output stream))
 (defun write-msg (stream type address data we re id status)
+  (let ((bytes (list type
+                     (logand address #xff) (logand (ash address -8) #xff)
+                     (logand (ash address -16) #xff) (logand (ash address -24) #xff)
+                     (logand data #xff) (logand (ash data -8) #xff)
+                     (logand (ash data -16) #xff) (logand (ash data -24) #xff)
+                     we re id status)))
+    (format t "write-msg: ~{~2,'0x ~}~%" bytes))
   (write-byte type stream)
   (write-u32 stream address)
   (write-u32 stream data)
@@ -60,7 +76,9 @@
   (finish-output stream))
 
 (defun send-master-request (stream address data we re)
-  (write-msg stream +msg-master-request+ address data we re 0 0))
+  (format t "send-master-request: addr=~a data=~a we=~a re=~a~%" address data we re)
+  (write-msg stream +msg-master-request+ address data we re 0 0)
+  (format t "send-master-request: done~%"))
 
 ;;(defun main ()
 ;;  (let* ((server (make-server-socket "/tmp/coe_emulator.sock"))

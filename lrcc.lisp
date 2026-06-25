@@ -18,40 +18,42 @@
 (defun print-usage ()
   (format t "Usage: lrcc [options] <source.c>~%~%")
   (format t "Options:~%")
-  (format t "  -o <file>        Write binary output to file (hex format)~%")
-  (format t "  -S               Output assembly code only (pretty printed)~%")
-  (format t "  -r, --run        Run program in emulator (program output to stdout,~%")
-  (format t "                   return value to stderr)~%")
-  (format t "  --ui             Run program in curses emulator UI (interactive debugger)~%")
-  (format t "  -I <dir>         Add directory to preprocessor include search path~%")
-  (format t "  -O               Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
-  (format t "  -Os              Optimize for size (inlining, peephole, library mul/div/mod)~%")
-  (format t "  -fno-peephole    Disable peephole optimization~%")
-  (format t "  -v, --verbose    Verbose output~%")
-  (format t "  -h, --help       Show this help message~%")
+  (format t "  -o <file>            Write binary output to file (hex format)~%")
+  (format t "  -S                   Output assembly code only (pretty printed)~%")
+  (format t "  -r, --run            Run program in emulator (program output to stdout,~%")
+  (format t "                       return value to stderr)~%")
+  (format t "  --ui                 Run program in curses emulator UI (interactive debugger)~%")
+  (format t "  --conf               Enable conf bus connection (default socket)~%")
+  (format t "  --no-conf            Disable conf bus connection (default)~%")
+  (format t "  --conf-socket <path> Specify conf bus socket path~%")
+  (format t "                       (implies --conf, default: /tmp/coe_emulator.sock)~%")
+  (format t "  -I <dir>             Add directory to preprocessor include search path~%")
+  (format t "  -O                   Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
+  (format t "  -Os                  Optimize for size (inlining, peephole, library mul/div/mod)~%")
+  (format t "  -fno-peephole        Disable peephole optimization~%")
+  (format t "  -v, --verbose        Verbose output~%")
+  (format t "  -h, --help           Show this help message~%")
   (format t "~%Source is always preprocessed via clang -E -P before compilation.~%")
   (format t "~%Examples:~%")
-  (format t "  lrcc -S hello.c                    # Print assembly~%")
-  (format t "  lrcc -o hello.hex hello.c          # Compile to hex file~%")
-  (format t "  lrcc -r hello.c                    # Compile and run~%")
-  (format t "  lrcc --ui hello.c                  # Interactive curses debugger~%")
-  (format t "  lrcc -I include -Os -r hello.c     # With stdio.h, optimized for size~%")
-  (format t "  lrcc -O -r hello.c                 # Full optimization for speed~%"))
+  (format t "  lrcc -S hello.c                              # Print assembly~%")
+  (format t "  lrcc -o hello.hex hello.c                    # Compile to hex file~%")
+  (format t "  lrcc -r hello.c                              # Compile and run~%")
+  (format t "  lrcc --ui hello.c                            # Interactive curses debugger~%")
+  (format t "  lrcc --ui --conf hello.c                     # With conf bus (default socket)~%")
+  (format t "  lrcc --ui --conf-socket /tmp/my.sock hello.c # With conf bus (custom socket)~%")
+  (format t "  lrcc -I include -Os -r hello.c               # With stdio.h, optimized for size~%")
+  (format t "  lrcc -O -r hello.c                           # Full optimization for speed~%"))
 
 (defun pretty-print-asm (asm-list)
   "Pretty print assembly code in a readable format"
   (dolist (instr asm-list)
     (cond
-      ;; Comments - print as-is with indentation
       ((and (listp instr) (eq (first instr) :comment))
        (format t "        ; ~a~%" (second instr)))
-      ;; Labels - print without indentation
       ((and (listp instr) (eq (first instr) 'label))
        (format t "~a:~%" (second instr)))
-      ;; COMMENT pseudo-op - print as comment
       ((and (listp instr) (eq (first instr) 'comment))
        (format t "; ~a~%" (second instr)))
-      ;; Regular instructions - indent
       ((listp instr)
        (format t "        ~a~%" (format-instruction instr)))
       (t
@@ -111,6 +113,7 @@
   (let* ((args (cdr sb-ext:*posix-argv*))
          (output-file nil)
          (asm-only nil)
+         (conf-socket nil)
          (run-program nil)
          (run-ui nil)
          (optimize nil)
@@ -139,13 +142,21 @@
                (setf run-program t))
               ((string= arg "--ui")
                (setf run-ui t))
+              ((string= arg "--conf")
+               (setf conf-socket "/tmp/coe_emulator.sock"))
+              ((string= arg "--no-conf")
+               (setf conf-socket nil))
+              ((string= arg "--conf-socket")
+               (if args
+                   (setf conf-socket (pop args))
+                   (progn
+                     (format *error-output* "Error: --conf-socket requires an argument~%")
+                     (sb-ext:exit :code 1))))
               ((string= arg "-O")
-               ;; Optimize for speed: inlining, peephole, inline mul/div/mod
                (setf optimize t)
                (setf peephole t)
                (setf optimize-size nil))
               ((string= arg "-Os")
-               ;; Optimize for size: inlining, peephole, library mul/div/mod
                (setf optimize t)
                (setf peephole t)
                (setf optimize-size t))
@@ -154,14 +165,12 @@
               ((or (string= arg "-v") (string= arg "--verbose"))
                (setf verbose t))
               ((string= arg "-I")
-               ;; -I dir (space-separated)
                (if args
                    (push (pop args) include-dirs)
                    (progn
                      (format *error-output* "Error: -I requires an argument~%")
                      (sb-ext:exit :code 1))))
               ((and (> (length arg) 2) (string= arg "-I" :end1 2))
-               ;; -Idir (no space)
                (push (subseq arg 2) include-dirs))
               ((char= (char arg 0) #\-)
                (format *error-output* "Error: Unknown option ~a~%" arg)
@@ -184,7 +193,7 @@
       (format *error-output* "Error: Source file not found: ~a~%" source-file)
       (sb-ext:exit :code 1))
 
-    ;; Preprocess with cpp (resolves #include, #define, etc.)
+    ;; Preprocess with cpp
     (let ((source (cpp-preprocess source-file (nreverse include-dirs))))
 
       (handler-bind
@@ -193,7 +202,6 @@
                     (sb-debug:print-backtrace :count 30 :stream *error-output*)
                     (sb-ext:exit :code 1))))
         (cond
-          ;; Assembly output only
           (asm-only
            (let ((asm (compile-c source :verbose verbose
                                         :annotate t
@@ -207,7 +215,6 @@
                    (pretty-print-asm asm))
                  (pretty-print-asm asm))))
 
-          ;; Run in emulator
           (run-program
            (when verbose
              (format t "Compiling ~a...~%" source-file))
@@ -219,7 +226,6 @@
              (format *error-output* "~a~%" result)
              (sb-ext:exit :code (logand result 255))))
 
-          ;; Run in curses UI debugger
           (run-ui
            (when verbose
              (format t "Compiling ~a...~%" source-file))
@@ -232,10 +238,13 @@
                   (mcode (assemble (strip-asm-comments asm) verbose symtab))
                   (dmem (lr-emulator:make-dmem #x1000000))
                   (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
-             ;;(lr-emulator:run-with-curses emul symtab)))
-             (lr-emulator:run-with-curses-conf emul "/tmp/coe_emulator.sock" symtab)))
+             (if conf-socket
+                 (progn
+                   (when verbose
+                     (format t "Using conf socket: ~a~%" conf-socket))
+                   (lr-emulator:run-with-curses-conf emul conf-socket symtab))
+                 (lr-emulator:run-with-curses emul symtab))))
 
-          ;; Compile to binary
           (t
            (when verbose
              (format t "Compiling ~a...~%" source-file))
