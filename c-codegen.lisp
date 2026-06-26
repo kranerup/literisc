@@ -1246,6 +1246,11 @@
 
 (defvar *break-label* nil)      ; target for break statements
 (defvar *continue-label* nil)   ; target for continue statements
+(defvar *branch-target* nil)    ; when set, a top-level relational comparison emits
+                                ; a direct conditional branch here instead of
+                                ; materializing a 0/1 boolean in A
+(defvar *branch-invert* nil)    ; when *branch-target* set: nil = branch when the
+                                ; comparison is true, t = branch when it is false
 (defvar *function-end-label* nil) ; label at end of current function
 (defvar *frame-size* 0)         ; size of current stack frame
 (defvar *is-leaf-function* t)   ; true if function makes no calls
@@ -2033,6 +2038,31 @@
     (generate-statement stmt))
   (exit-scope))
 
+(defun relational-condition-p (node)
+  "True when NODE is a 32-bit relational comparison whose flags can drive a
+   conditional branch directly. Excludes 64-bit operands, which take a
+   separate boolean-producing path (generate-binary-op-64)."
+  (and (ast-node-p node)
+       (eq (ast-node-type node) 'binary-op)
+       (member (ast-node-value node) '("==" "!=" "<" ">" "<=" ">=")
+               :test #'string=)
+       (not (is-longlong-type (get-expression-type (first (ast-node-children node)))))
+       (not (is-longlong-type (get-expression-type (second (ast-node-children node)))))))
+
+(defun generate-condition-branch (condition target invert)
+  "Emit code that branches to TARGET based on CONDITION.
+   INVERT nil: branch when CONDITION is true. INVERT t: branch when false.
+   When CONDITION's top-level operator is relational, the comparison branches
+   directly off its flags; otherwise the value is materialized and tested."
+  (if (relational-condition-p condition)
+      (let ((*branch-target* target)
+            (*branch-invert* invert))
+        (generate-expression condition))
+      (progn
+        (generate-expression condition)
+        (emit-test-zero)
+        (emit `(,(if invert 'jz 'jnz) ,target)))))
+
 (defun generate-if (node)
   "Generate code for an if statement"
   (let ((condition (first (ast-node-children node)))
@@ -2041,14 +2071,8 @@
         (else-label (gen-label "ELSE"))
         (end-label (gen-label "ENDIF")))
 
-    ;; Generate condition
-    (generate-expression condition)
-
-    ;; Test condition in A
-    (emit-test-zero)
-    (if else-branch
-        (emit `(jz ,else-label))
-        (emit `(jz ,end-label)))
+    ;; Generate condition, branching past the then-branch when it is false
+    (generate-condition-branch condition (if else-branch else-label end-label) t)
 
     ;; Then branch
     (generate-statement then-branch)
@@ -2075,10 +2099,8 @@
 
     (emit-label loop-label)
 
-    ;; Condition
-    (generate-expression condition)
-    (emit-test-zero)
-    (emit `(jz ,end-label))
+    ;; Condition: exit the loop when it is false
+    (generate-condition-branch condition end-label t)
 
     ;; Body
     (generate-statement body)
@@ -2111,11 +2133,9 @@
 
     (emit-label loop-label)
 
-    ;; Condition
+    ;; Condition: exit the loop when it is false
     (when condition
-      (generate-expression condition)
-      (emit-test-zero)
-      (emit `(jz ,end-label)))
+      (generate-condition-branch condition end-label t))
 
     ;; Body
     (generate-statement body)
@@ -2148,10 +2168,8 @@
     ;; Body
     (generate-statement body)
 
-    ;; Condition
-    (generate-expression condition)
-    (emit-test-zero)
-    (emit `(jnz ,loop-label))
+    ;; Condition: loop back while it is true
+    (generate-condition-branch condition loop-label nil)
 
     (emit-label end-label)))
 
@@ -2886,6 +2904,13 @@
 
 (defun generate-arithmetic-op (op left right)
   "Generate code for arithmetic/bitwise operation"
+  ;; Capture any pending branch context into lexicals and clear the dynamic
+  ;; vars: only a top-level relational comparison (the cases below) may consume
+  ;; it; it must not leak into the recursive evaluation of the operands.
+  (let ((branch-target *branch-target*)
+        (branch-invert *branch-invert*)
+        (*branch-target* nil)
+        (*branch-invert* nil))
   ;; Handle shifts specially - they can optimize for constant counts
   (when (or (string= op "<<") (string= op ">>"))
     (generate-expression left)
@@ -3040,13 +3065,13 @@
 
       ;; Comparison operators
       ((string= op "==")
-       (generate-comparison left-reg 'jz))
+       (generate-comparison left-reg 'jz branch-target branch-invert))
 
       ((string= op "!=")
-       (generate-comparison left-reg 'jnz))
+       (generate-comparison left-reg 'jnz branch-target branch-invert))
 
       ((string= op "<")
-       (generate-comparison left-reg 'jlt))
+       (generate-comparison left-reg 'jlt branch-target branch-invert))
 
       ((string= op ">")
        ;; A > B is B < A, swap operands
@@ -3062,7 +3087,7 @@
          (emit `(A=Rx ,temp-reg2))      ; A = A (new right)
          (free-temp-reg temp-reg2)
          (free-temp-reg temp-reg))
-       (generate-comparison left-reg 'jlt))
+       (generate-comparison left-reg 'jlt branch-target branch-invert))
 
       ((string= op "<=")
        ;; A <= B is !(A > B) is !(B < A), swap and use jge
@@ -3077,41 +3102,54 @@
          (emit `(A=Rx ,temp-reg2))      ; A = A (new right)
          (free-temp-reg temp-reg2)
          (free-temp-reg temp-reg))
-       (generate-comparison left-reg 'jge))
+       (generate-comparison left-reg 'jge branch-target branch-invert))
 
       ((string= op ">=")
-       (generate-comparison left-reg 'jge))
+       (generate-comparison left-reg 'jge branch-target branch-invert))
 
       (t (compiler-warning "Unknown binary operator: ~a" op)))
 
       ;; Only free if it was an allocated temp reg
       (when need-free-left
-        (free-temp-reg left-reg)))))
+        (free-temp-reg left-reg))))))
 
-(defun generate-comparison (left-reg jump-type)
-  "Generate code for comparison, result 0 or 1 in A"
-  (let ((true-label (gen-label "CMPTRUE"))
-        (end-label (gen-label "CMPEND"))
-        (right-reg (alloc-temp-reg)))
+(defun invert-jump (jump-type)
+  "Return the conditional jump that fires exactly when JUMP-TYPE does not."
+  (ecase jump-type
+    (jz 'jnz)
+    (jnz 'jz)
+    (jlt 'jge)
+    (jge 'jlt)))
+
+(defun generate-comparison (left-reg jump-type &optional branch-target branch-invert)
+  "Generate code for comparison.
+   A has right, left-reg has left; the subtraction sets the flags.
+   When BRANCH-TARGET is non-nil, emit a single conditional jump to it
+   (inverted when BRANCH-INVERT is true) instead of materializing a 0/1
+   boolean in A -- used when the comparison feeds directly into a
+   control-flow condition."
+  (let ((right-reg (alloc-temp-reg)))
     ;; Compute left - right (sets flags)
-    ;; A has right, left-reg has left
     (emit `(Rx=A ,right-reg))   ; save right
     (emit `(A=Rx ,left-reg))    ; A = left
     (emit `(A-=Rx ,right-reg))  ; A = left - right, sets flags
     (free-temp-reg right-reg)
 
-    ;; Jump based on condition
-    (emit `(,jump-type ,true-label))
-
-    ;; False path
-    (emit '(A= 0))
-    (emit `(j ,end-label))
-
-    ;; True path
-    (emit-label true-label)
-    (emit '(A= 1))
-
-    (emit-label end-label)))
+    (if branch-target
+        ;; Branch context: jump straight off the comparison flags.
+        (emit `(,(if branch-invert (invert-jump jump-type) jump-type)
+                ,branch-target))
+        ;; Value context: materialize a 0/1 boolean in A.
+        (let ((true-label (gen-label "CMPTRUE"))
+              (end-label (gen-label "CMPEND")))
+          (emit `(,jump-type ,true-label))
+          ;; False path
+          (emit '(A= 0))
+          (emit `(j ,end-label))
+          ;; True path
+          (emit-label true-label)
+          (emit '(A= 1))
+          (emit-label end-label)))))
 
 (defun generate-logical-and (left right)
   "Generate short-circuit && operator"
@@ -3680,11 +3718,31 @@
     ;; is allocated, keeping peak usage to 6 even in deeply nested cases.
     (declare (ignore is-simple))
     (generate-expression array)   ; A = base address (all internal temps freed)
-    (let ((base-reg (alloc-temp-reg)))
+    (let ((base-reg (alloc-temp-reg))
+          (const-index (get-literal-integer index)))
       (emit `(Rx=A ,base-reg))    ; save base
-      (generate-expression index)
-      (emit-multiply-by-constant elem-size)
-      (emit `(A+=Rx ,base-reg))
+      (if const-index
+          ;; Constant index: fold index*elem-size at compile time rather than
+          ;; emitting "A= index; A<<1; A<<1...". The scaling multiply only
+          ;; exists in codegen (never in the AST), so the AST constant
+          ;; propagator never sees it -- fold it here instead.
+          (let ((offset (* const-index elem-size)))
+            (cond
+              ((zerop offset)
+               (emit `(A=Rx ,base-reg)))          ; address is just the base
+              ((and (>= offset -8) (<= offset 7))  ; fits mvi-a immediate
+               (emit `(A= ,offset))
+               (emit `(A+=Rx ,base-reg)))
+              (t                                   ; build offset via a register
+               (let ((off-reg (alloc-temp-reg)))
+                 (emit `(Rx= ,offset ,off-reg))
+                 (emit `(A=Rx ,off-reg))
+                 (free-temp-reg off-reg))
+               (emit `(A+=Rx ,base-reg)))))
+          (progn
+            (generate-expression index)
+            (emit-multiply-by-constant elem-size)
+            (emit `(A+=Rx ,base-reg))))
       (free-temp-reg base-reg))))
 
 ;;; ===========================================================================
