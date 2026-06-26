@@ -1712,10 +1712,24 @@
       (collect node))
     result))
 
+(defun shift-emits-runtime-call (count-node)
+  "True if a << / >> with COUNT-NODE will emit a jsr to the __SHL/__SHR runtime.
+   Only happens under -Os, and only for variable counts or constant counts in
+   [*shift-inline-threshold*, 32). Small/zero/>=32 constants are handled inline."
+  (and (compiler-state-optimize-size *state*)
+       (if (and (ast-node-p count-node)
+                (eq (ast-node-type count-node) 'literal)
+                (integerp (ast-node-value count-node)))
+           (let ((c (ast-node-value count-node)))
+             (and (>= c *shift-inline-threshold*) (< c 32)))
+           ;; Variable count - always a runtime call under -Os
+           t)))
+
 (defun contains-call (node struct-array-vars)
   "Check if AST node or children contain a function call.
    Also detects implicit runtime calls like __MUL/__DIV/__MOD for
-   multiply/divide/modulo operations and struct array access."
+   multiply/divide/modulo operations and struct array access, and
+   __SHL/__SHR for large/variable shifts under -Os."
   (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
         ;; Check for binary ops that call runtime functions (*, /, %)
@@ -1725,6 +1739,12 @@
         ;; Check for compound assignments that use runtime functions (*=, /=, %=)
         (and (eq (ast-node-type node) 'assign)
              (member (ast-node-value node) '("*=" "/=" "%=") :test #'string=))
+        ;; Check for shifts that emit a JSR __SHL/__SHR (large/variable, -Os only)
+        (and (or (and (eq (ast-node-type node) 'binary-op)
+                      (member (ast-node-value node) '("<<" ">>") :test #'string=))
+                 (and (eq (ast-node-type node) 'assign)
+                      (member (ast-node-value node) '("<<=" ">>=") :test #'string=)))
+             (shift-emits-runtime-call (second (ast-node-children node))))
         ;; Check for subscript of a known struct array
         (and (eq (ast-node-type node) 'subscript)
              (subscript-uses-struct-array node struct-array-vars))
@@ -4209,10 +4229,27 @@
 ;;; Max instruction count for const-mul optimization under -O (not -Os)
 (defparameter *const-mul-threshold* 64)
 
+(defun emit-shift-runtime-call (left-reg is-left)
+  "Emit a call to the shared __SHL/__SHR runtime subroutine.
+   The shift count must already be in A; the value to shift is in LEFT-REG.
+   Result is left in A. Used under -Os so multiple large/variable shifts
+   reuse a single subroutine instead of inlining a loop at each site."
+  (if is-left
+      (setf (compiler-state-need-shl-runtime *state*) t)
+      (setf (compiler-state-need-shr-runtime *state*) t))
+  (emit '(Rx=A P1))              ; P1 = count (from A)
+  (emit `(A=Rx ,left-reg))       ; A = value
+  (emit '(Rx=A P0))              ; P0 = value
+  (if is-left
+      (emit '(jsr __SHL))        ; call shift-left runtime
+      (emit '(jsr __SHR)))       ; call shift-right runtime
+  (emit '(A=Rx P0)))             ; result in P0, move to A
+
 (defun generate-shift-left (left-reg right-node)
   "Generate left shift: result = left-reg << right-node.
-   Optimizes constant shift counts: small counts are inline,
-   large counts use loops when optimizing for size."
+   Optimizes constant shift counts: small counts are inline.
+   Large/variable counts call the shared __SHL runtime when optimizing
+   for size, and inline (unrolled / inline loop) otherwise."
   ;; Check if shift count is constant
   (if (and (ast-node-p right-node)
            (eq (ast-node-type right-node) 'literal)
@@ -4231,18 +4268,23 @@
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A<<1))))
-          ;; Large shift - use loop if optimizing for size, inline otherwise
+          ;; Large shift - shared runtime call if optimizing for size, inline otherwise
           ((compiler-state-optimize-size *state*)
-           (generate-shift-left-loop left-reg count))
+           (emit `(A= ,count))             ; A = count
+           (emit-shift-runtime-call left-reg t))
           (t
            ;; Inline for speed
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A<<1))))))
-      ;; Variable shift count - must use loop
+      ;; Variable shift count
       (progn
-        (generate-expression right-node)
-        (generate-shift-left-loop-variable left-reg))))
+        (generate-expression right-node)   ; count in A
+        (if (compiler-state-optimize-size *state*)
+            ;; Shared runtime call avoids a loop copy per shift site
+            (emit-shift-runtime-call left-reg t)
+            ;; Inline loop for speed
+            (generate-shift-left-loop-variable left-reg)))))
 
 (defun generate-shift-left-loop (left-reg count)
   "Generate left shift loop for constant count"
@@ -4302,8 +4344,9 @@
 
 (defun generate-shift-right (left-reg right-node)
   "Generate right shift: result = left-reg >> right-node.
-   Optimizes constant shift counts: small counts are inline,
-   large counts use loops when optimizing for size."
+   Optimizes constant shift counts: small counts are inline.
+   Large/variable counts call the shared __SHR runtime when optimizing
+   for size, and inline (unrolled / inline loop) otherwise."
   ;; Check if shift count is constant
   (if (and (ast-node-p right-node)
            (eq (ast-node-type right-node) 'literal)
@@ -4322,18 +4365,23 @@
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A>>1))))
-          ;; Large shift - use loop if optimizing for size, inline otherwise
+          ;; Large shift - shared runtime call if optimizing for size, inline otherwise
           ((compiler-state-optimize-size *state*)
-           (generate-shift-right-loop left-reg count))
+           (emit `(A= ,count))             ; A = count
+           (emit-shift-runtime-call left-reg nil))
           (t
            ;; Inline for speed
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A>>1))))))
-      ;; Variable shift count - must use loop
+      ;; Variable shift count
       (progn
-        (generate-expression right-node)
-        (generate-shift-right-loop-variable left-reg))))
+        (generate-expression right-node)   ; count in A
+        (if (compiler-state-optimize-size *state*)
+            ;; Shared runtime call avoids a loop copy per shift site
+            (emit-shift-runtime-call left-reg nil)
+            ;; Inline loop for speed
+            (generate-shift-right-loop-variable left-reg)))))
 
 (defun generate-shift-right-loop (left-reg count)
   "Generate right shift loop for constant count"

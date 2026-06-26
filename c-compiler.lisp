@@ -118,6 +118,8 @@
   (need-mul64-runtime nil) ; set to t when __mul64 runtime is needed
   (need-div64-runtime nil) ; set to t when __div64 runtime is needed
   (need-mod64-runtime nil) ; set to t when __mod64 runtime is needed
+  (need-shl-runtime nil) ; set to t when __shl runtime is needed (size-optimized large/variable shift)
+  (need-shr-runtime nil) ; set to t when __shr runtime is needed (size-optimized large/variable shift)
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
   (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
@@ -318,7 +320,13 @@
     (emit-div64-runtime))
   ;; Emit 64-bit modulo runtime if needed
   (when (compiler-state-need-mod64-runtime *state*)
-    (emit-mod64-runtime)))
+    (emit-mod64-runtime))
+  ;; Emit shift-left runtime if needed
+  (when (compiler-state-need-shl-runtime *state*)
+    (emit-shl-runtime))
+  ;; Emit shift-right runtime if needed
+  (when (compiler-state-need-shr-runtime *state*)
+    (emit-shr-runtime)))
 
 (defun emit-indirect-call-runtime ()
   "Emit the __indirect_call runtime helper: jumps to address in R0"
@@ -436,6 +444,79 @@
   (emit '(Rx=A P0))           ; P0 = remainder
   ;; Restore callee-saved registers and return
   (emit '(pop-r R1))
+  (emit '(A=Rx SRP))
+  (emit '(j-A)))
+
+(defun emit-shl-runtime ()
+  "Emit the __shl runtime function: P0 = P0 << P1 (logical left shift).
+   Value in P0, count in P1, result in P0. One bit per iteration."
+  (emit '(:comment "======== runtime: __shl ========"))
+  (emit '(:comment "P0 = P0 << P1 (shift one bit per iteration)"))
+  (emit '(label __SHL))
+  ;; Save callee-saved registers (leaf function, no push-srp needed)
+  (emit '(push-r R2))         ; save R0,R1,R2
+  ;; R0 = count, R1 = value, R2 = temp
+  (emit '(A=Rx P1))           ; A = count
+  (emit '(Rx=A R0))           ; R0 = count
+  (emit '(A=Rx P0))           ; A = value
+  (emit '(label __SHL_LOOP))
+  (emit '(Rx=A R1))           ; R1 = current value
+  ;; Check if count == 0
+  (emit '(A=Rx R0))           ; A = count
+  (emit '(Rx= 0 R2))
+  (emit '(A-=Rx R2))
+  (emit '(jz __SHL_END))
+  ;; count = count - 1
+  (emit '(A=Rx R0))
+  (emit '(Rx= -1 R2))
+  (emit '(A+=Rx R2))
+  (emit '(Rx=A R0))
+  ;; value = value << 1
+  (emit '(A=Rx R1))
+  (emit '(A=A<<1))
+  (emit '(j __SHL_LOOP))
+  (emit '(label __SHL_END))
+  (emit '(A=Rx R1))           ; A = result
+  (emit '(Rx=A P0))           ; P0 = result
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R2))
+  (emit '(A=Rx SRP))
+  (emit '(j-A)))
+
+(defun emit-shr-runtime ()
+  "Emit the __shr runtime function: P0 = P0 >> P1 (logical right shift).
+   Value in P0, count in P1, result in P0. One bit per iteration.
+   Matches the compiler's 32-bit >> semantics, which are logical."
+  (emit '(:comment "======== runtime: __shr ========"))
+  (emit '(:comment "P0 = P0 >> P1 (logical, shift one bit per iteration)"))
+  (emit '(label __SHR))
+  ;; Save callee-saved registers (leaf function, no push-srp needed)
+  (emit '(push-r R2))         ; save R0,R1,R2
+  ;; R0 = count, R1 = value, R2 = temp
+  (emit '(A=Rx P1))           ; A = count
+  (emit '(Rx=A R0))           ; R0 = count
+  (emit '(A=Rx P0))           ; A = value
+  (emit '(label __SHR_LOOP))
+  (emit '(Rx=A R1))           ; R1 = current value
+  ;; Check if count == 0
+  (emit '(A=Rx R0))           ; A = count
+  (emit '(Rx= 0 R2))
+  (emit '(A-=Rx R2))
+  (emit '(jz __SHR_END))
+  ;; count = count - 1
+  (emit '(A=Rx R0))
+  (emit '(Rx= -1 R2))
+  (emit '(A+=Rx R2))
+  (emit '(Rx=A R0))
+  ;; value = value >> 1
+  (emit '(A=Rx R1))
+  (emit '(A=A>>1))
+  (emit '(j __SHR_LOOP))
+  (emit '(label __SHR_END))
+  (emit '(A=Rx R1))           ; A = result
+  (emit '(Rx=A P0))           ; P0 = result
+  ;; Restore callee-saved registers and return
+  (emit '(pop-r R2))
   (emit '(A=Rx SRP))
   (emit '(j-A)))
 
