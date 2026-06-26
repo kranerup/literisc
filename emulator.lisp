@@ -230,7 +230,7 @@
         :lr-opcodes :pty :lr-soc :conf-socket)
   (:export :make-dmem :make-emulator :run-with-curses
            :run-with-curses-io :run-emul :run-emul-io :get-reg
-           :run-with-curses-conf
+           :run-with-curses-conf :run-emul-conf
            :emulated-system-processor
            :processor-add-wr-callback 
            :processor-state-break
@@ -1952,6 +1952,9 @@
     (format t "conf connected~%")
     (setf *conf-stream* stream)
     (add-conf emul)
+    (format t "Press ENTER to start the emulator...~%")
+    (finish-output)
+    (read-line)
     (format t "run-with-curses-conf: entering run-with-curses~%")
     (unwind-protect
         (progn
@@ -1965,6 +1968,32 @@
       (format t "run-with-curses-conf: closing server socket~%")
       (sb-bsd-sockets:socket-close server)
       (format t "run-with-curses-conf: cleanup done~%"))))
+
+(defun run-emul-conf (emul max-instr socket-path &optional (debug t))
+  "Run the emulator (non-curses) with a conf bus connection.
+   Opens a server socket at SOCKET-PATH, waits for a client, wires the
+   conf read/write callbacks, then runs like RUN-EMUL."
+  (format t "run-emul-conf: starting, socket-path=~a~%" socket-path)
+  (let* ((server (make-server-socket socket-path))
+         (dummy  (format t "waiting for conf connection on ~a~%" socket-path))
+         (client (accept-connection server))
+         (stream (sb-bsd-sockets:socket-make-stream
+                   client
+                   :input t :output t
+                   :element-type '(unsigned-byte 8)
+                   :buffering :none)))
+    (declare (ignore dummy))
+    (format t "conf connected~%")
+    (setf *conf-stream* stream)
+    (add-conf emul)
+    (format t "Press ENTER to start the emulator...~%")
+    (finish-output)
+    (read-line)
+    (unwind-protect
+        (run-emul emul max-instr debug)
+      (setf *conf-stream* nil)
+      (sb-bsd-sockets:socket-close client)
+      (sb-bsd-sockets:socket-close server))))
 
 (defun run-emul-io ( emul pty nr-instr &optional symtab )
   (format t "run-emul-io pty:~a~%" pty)

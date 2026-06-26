@@ -38,6 +38,7 @@
   (format t "  lrcc -S hello.c                              # Print assembly~%")
   (format t "  lrcc -o hello.hex hello.c                    # Compile to hex file~%")
   (format t "  lrcc -r hello.c                              # Compile and run~%")
+  (format t "  lrcc -r --conf hello.c                       # Compile and run with conf bus (default socket)~%")
   (format t "  lrcc --ui hello.c                            # Interactive curses debugger~%")
   (format t "  lrcc --ui --conf hello.c                     # With conf bus (default socket)~%")
   (format t "  lrcc --ui --conf-socket /tmp/my.sock hello.c # With conf bus (custom socket)~%")
@@ -218,10 +219,13 @@
           (run-program
            (when verbose
              (format t "Compiling ~a...~%" source-file))
+           (when (and verbose conf-socket)
+             (format t "Using conf socket: ~a~%" conf-socket))
            (let ((result (run-c-program source :verbose verbose
                                                :optimize optimize
                                                :optimize-size optimize-size
                                                :peephole peephole
+                                               :conf-socket conf-socket
                                                :max-cycles 1000000)))
              (format *error-output* "~a~%" result)
              (sb-ext:exit :code (logand result 255))))

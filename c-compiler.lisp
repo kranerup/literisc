@@ -1185,13 +1185,17 @@
   (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil))
-  "Compile, assemble, and run a C program, returning the result"
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil))
+  "Compile, assemble, and run a C program, returning the result.
+   When CONF-SOCKET is a path, opens a conf bus connection on that socket
+   (waits for a client) before running."
   (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole))
-         (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
+         (dmem (lr-emulator:make-dmem (if conf-socket #x1000000 #x10000)))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run the program
-    (lr-emulator:run-emul emul max-cycles verbose)
+    (if conf-socket
+        (lr-emulator:run-emul-conf emul max-cycles conf-socket verbose)
+        (lr-emulator:run-emul emul max-cycles verbose))
     ;; Return value is in P0 (R10)
     (let ((ret-val (aref (lr-emulator::processor-state-r
                            (lr-emulator:emulated-system-processor emul))
