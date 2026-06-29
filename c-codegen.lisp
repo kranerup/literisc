@@ -2489,18 +2489,23 @@
       (otherwise
        (compiler-warning "Unknown expression type: ~a" (ast-node-type node))))))
 
+(defun emit-load-immediate-to-a (value)
+  "Load integer VALUE into A.
+   The A= (mvi-a) instruction only encodes a 4-bit signed immediate (-8..7),
+   so larger values must be routed through a register, whose Rx= immediate
+   field is wide. Any code path that needs a constant in A must use this
+   rather than emitting (A= value) directly, or the assembler will reject
+   out-of-range immediates (e.g. a shift count of 28)."
+  (if (and (>= value -8) (<= value 7))
+      (emit `(A= ,value))
+      (let ((temp (alloc-temp-reg)))
+        (emit `(Rx= ,value ,temp))
+        (emit `(A=Rx ,temp))
+        (free-temp-reg temp))))
+
 (defun generate-literal (node)
   "Generate code for a numeric literal"
-  (let ((value (ast-node-value node)))
-    ;; Load immediate into A
-    ;; For small values, use A= instruction
-    ;; For larger values, use Rx= then A=Rx with an allocated temp
-    (if (and (>= value -8) (<= value 7))
-        (emit `(A= ,value))
-        (let ((temp (alloc-temp-reg)))
-          (emit `(Rx= ,value ,temp))
-          (emit `(A=Rx ,temp))
-          (free-temp-reg temp)))))
+  (emit-load-immediate-to-a (ast-node-value node)))
 
 (defun generate-string-literal (node)
   "Generate code for a string literal (load address)"
@@ -4328,7 +4333,7 @@
              (emit '(A=A<<1))))
           ;; Large shift - shared runtime call if optimizing for size, inline otherwise
           ((compiler-state-optimize-size *state*)
-           (emit `(A= ,count))             ; A = count
+           (emit-load-immediate-to-a count)  ; A = count (may exceed mvi-a range)
            (emit-shift-runtime-call left-reg t))
           (t
            ;; Inline for speed
@@ -4425,7 +4430,7 @@
              (emit '(A=A>>1))))
           ;; Large shift - shared runtime call if optimizing for size, inline otherwise
           ((compiler-state-optimize-size *state*)
-           (emit `(A= ,count))             ; A = count
+           (emit-load-immediate-to-a count)  ; A = count (may exceed mvi-a range)
            (emit-shift-runtime-call left-reg nil))
           (t
            ;; Inline for speed
