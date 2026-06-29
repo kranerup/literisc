@@ -23,8 +23,6 @@ dmem_wr_sz = Signal(modbv(0)[2:])
 halt = Signal(modbv(0)[1:])
 intr = Signal(modbv(0)[1:])
 
-obs_trace = Signal(modbv(0)[69:])
-
 toVerilog.standard = 'systemverilog'
 itop = toVerilog(
         cpu,
@@ -42,11 +40,10 @@ itop = toVerilog(
         dmem_wr_sz,
         halt,
         intr,
-        True,
+        False,
         None,
         None,
         None,
         None,
-        obs_trace,
         False)
     
