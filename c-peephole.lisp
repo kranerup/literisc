@@ -324,12 +324,16 @@
                ;; POP-R r: r overwritten from stack
                ((and (string= opname "POP-R") (eq last-arg r))
                 (return-from A-already-equals-reg-p nil))
-               ;; Any instruction that writes A: name starts with "A=" or "A+"
-               ;; This covers A=RX, A=A<<1, A=-A (start with "A=")
-               ;; and A+=RX (starts with "A+", also modifies A).
-               ((and (>= oplen 2) (char= (char opname 0) #\A)
-                     (or (char= (char opname 1) #\=)
-                         (char= (char opname 1) #\+)))
+               ;; Any instruction that writes A. Every A-register opcode is named
+               ;; starting with "A": A=RX, A=v, A=A<<1, A=-A, A+=RX, A+=RX+C,
+               ;; A-=RX, A&=RX, A|=RX, A^=RX, etc. The earlier clauses already
+               ;; handled the A=RX/RX=A cases that PROVE A==r; reaching here with
+               ;; an "A..." opcode means A is clobbered to some other value, so we
+               ;; must stop. (ADWORD / ALIGN-DWORD also start with "A" but are pure
+               ;; data directives, not A writes — exclude them.)
+               ((and (char= (char opname 0) #\A)
+                     (not (string= opname "ADWORD"))
+                     (not (string= opname "ALIGN-DWORD")))
                 (return-from A-already-equals-reg-p nil))
                ;; POP-A: writes A from stack
                ((string= opname "POP-A")
@@ -639,19 +643,29 @@
 ;;; NOTE: When r1 != r2, we must verify r1 is dead after the pattern. If r1
 ;;; is still live (e.g. it holds a variable read later), dropping (Rx=M[A] r1)
 ;;; would leave r1 with a stale/wrong value.
+;;; NOTE: The original pattern leaves the loaded value in A (via A=Rx r1). The
+;;; bare (Rx=M[A] r2) replacement does NOT touch A — it leaves A holding the
+;;; address that was used for the load. So we may only drop the A load when A is
+;;; dead after the pattern; otherwise we must re-materialize A = mem[A] with an
+;;; explicit (A=Rx r2) so a later read of A (e.g. A=A<<1) sees the right value.
 (push (make-peephole-rule
        :name "load-through-temp-to-target"
        :pattern '((Rx=M[A] ?r1) (A=Rx ?r1) (Rx=A ?r2))
        :replacement (lambda (bindings code-vec end-idx)
                       (let ((reg1 (getf bindings :R1))
                             (reg2 (getf bindings :R2)))
-                        (if (eq reg1 reg2)
-                            ;; Same register - return :no-match to let rule 20 handle it
-                            :no-match
-                            ;; Different registers - only safe if r1 is dead after
-                            (if (not (reg-read-after-p reg1 code-vec end-idx))
-                                (list (list 'Rx=M[A] reg2))
-                                :no-match)))))
+                        (cond
+                          ;; Same register - return :no-match to let rule 20 handle it
+                          ((eq reg1 reg2) :no-match)
+                          ;; r1 still live after the pattern: dropping its load is unsafe
+                          ((reg-read-after-p reg1 code-vec end-idx) :no-match)
+                          ;; A dead after: load straight into r2, A no longer needed
+                          ((A-dead-before-next-write-p code-vec end-idx)
+                           (list (list 'Rx=M[A] reg2)))
+                          ;; A still live: preserve A = mem[A] by reloading from r2
+                          (t
+                           (list (list 'Rx=M[A] reg2)
+                                 (list 'A=Rx reg2)))))))
       *peephole-rules*)
 
 ;;; Rule 22: Dead or redundant A load
