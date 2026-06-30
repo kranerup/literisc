@@ -52,17 +52,6 @@
 (defparameter *local-regs* '(R6 R7 R8 R9))
 (defvar *reg-in-use* nil)
 
-;;; Number of callee-saved registers reserved for register-allocated locals.
-;;; They occupy the TOP *max-local-regs* of R0-R9, i.e. R(10-*max-local-regs*)..R9,
-;;; leaving the rest as the expression-temporary pool.  Default 4 (locals R6-R9,
-;;; temps R0-R5).  Raised in the spill-fallback pass, where the wider local window
-;;; keeps more variables in registers instead of spilling them onto the stack.
-(defvar *max-local-regs* 4)
-
-(defun local-reg-start ()
-  "Lowest physical register index used for register-allocated locals (R6 by default)."
-  (- 10 *max-local-regs*))
-
 (defun init-registers ()
   "Initialize register allocation state"
   (setf *vreg-counter* 0)
@@ -1197,7 +1186,7 @@
       ;; If *local-reg-count* > 0, R6..R(5+local-reg-count) are claimed and
       ;; must be skipped; R(6+local-reg-count)..R9 are available.
       (let* ((combined (append *temp-regs* *local-regs*))  ; R0..R9
-             (local-start (local-reg-start))
+             (local-start 6)
              (local-end   (+ local-start *local-reg-count*)))  ; R(local-end-1) is highest local
         (loop for i from 0 below 10
               ;; Skip indices that belong to :register locals
@@ -1223,7 +1212,7 @@
   "Return list of temp registers currently in use (for physical mode only)"
   (unless *use-virtual-regs*
     (let* ((combined (append *temp-regs* *local-regs*))
-           (local-start (local-reg-start))
+           (local-start 6)
            (local-end   (+ local-start *local-reg-count*)))
       (loop for i from 0 below 10
             when (and (or (< i local-start) (>= i local-end))
@@ -1233,7 +1222,7 @@
 (defun get-local-reg (index)
   "Get register for local variable by index.
    In virtual mode: returns a virtual register (allocated lazily).
-   In physical mode: returns the index-th local register, R(local-reg-start)+index."
+   In physical mode: returns R6-R9."
   (if *use-virtual-regs*
       ;; Virtual register mode: allocate a vreg for this local index
       (let ((existing (gethash index *local-vreg-map*)))
@@ -1243,7 +1232,7 @@
               (setf (gethash index *local-vreg-map*) vreg)
               vreg)))
       ;; Physical register mode
-      (make-physical-reg (+ (local-reg-start) index))))
+      (nth index *local-regs*)))
 
 ;;; ===========================================================================
 ;;; Code Generation Helpers
@@ -1582,7 +1571,7 @@
     (let ((has-stack-params (> *current-param-count* 4)))
       (when has-stack-params
         (let ((estimated-max-reg (if (> *local-reg-count* 0)
-                                      (+ (1- (local-reg-start)) *local-reg-count*)  ; R5 + locals
+                                      (+ 5 *local-reg-count*)  ; R5 + locals
                                       5)))                     ; R5 (all temp regs)
           (setf *pushed-reg-bytes* (* 4 (1+ estimated-max-reg)))))
 
@@ -1635,7 +1624,7 @@
                     (setf max-reg (if has-stack-params
                                       (let ((estimated-max-reg
                                              (if (> *local-reg-count* 0)
-                                                 (+ (1- (local-reg-start)) *local-reg-count*)
+                                                 (+ 5 *local-reg-count*)
                                                  5)))
                                         (max allocated-max-reg estimated-max-reg))
                                       allocated-max-reg)))
@@ -1645,13 +1634,13 @@
               ;; Physical register mode: use old-style tracking
               (let ((actual-max-reg *max-temp-reg-index*)
                     (max-local-reg (if (> *local-reg-count* 0)
-                                       (+ (1- (local-reg-start)) *local-reg-count*)
+                                       (+ 5 *local-reg-count*)
                                        -1)))
                 (setf body-code body-code-raw)
                 (setf max-reg (if has-stack-params
                                   (max actual-max-reg
                                        (if (> *local-reg-count* 0)
-                                           (+ (1- (local-reg-start)) *local-reg-count*)
+                                           (+ 5 *local-reg-count*)
                                            5))
                                   (max actual-max-reg max-local-reg)))))
 
@@ -1659,14 +1648,7 @@
           (when need-regenerate
             (setf (compiler-state-code *state*) nil)
             (init-registers)
-            ;; Physical-mode fallback: widen the local-register window from 4
-            ;; (R6-R9) to 6 (R4-R9).  These high-pressure functions overflowed the
-            ;; vreg allocator, so the extra two callee-saved local slots keep more
-            ;; variables in registers instead of on the stack.  The temp pool
-            ;; shrinks to R0-R3 correspondingly (still 6 temps when fewer than 6
-            ;; locals are promoted, since unclaimed local slots fall back to temps).
-            (let ((*use-virtual-regs* nil)
-                  (*max-local-regs* 6))
+            (let ((*use-virtual-regs* nil))
               ;; Clear local vreg map and counter
               (setf *local-vreg-map* (make-hash-table :test 'eql))
               (setf *vreg-counter* 0)
@@ -1700,12 +1682,12 @@
               ;; Calculate max-reg using old-style tracking
               (let ((actual-max-reg *max-temp-reg-index*)
                     (max-local-reg (if (> *local-reg-count* 0)
-                                       (+ (1- (local-reg-start)) *local-reg-count*)
+                                       (+ 5 *local-reg-count*)
                                        -1)))
                 (setf max-reg (if has-stack-params
                                   (max actual-max-reg
                                        (if (> *local-reg-count* 0)
-                                           (+ (1- (local-reg-start)) *local-reg-count*)
+                                           (+ 5 *local-reg-count*)
                                            5))
                                   (max actual-max-reg max-local-reg))))))
 
@@ -2027,7 +2009,7 @@
   (let ((highest-idx max-temp-idx))
     ;; If local registers (R6-R9) are used, need to save up to the highest one
     (when (> *local-reg-count* 0)
-      (setf highest-idx (max highest-idx (+ (1- (local-reg-start)) *local-reg-count*))))
+      (setf highest-idx (max highest-idx (+ 5 *local-reg-count*))))
     ;; Return register symbol or nil
     (when (>= highest-idx 0)
       (intern (format nil "R~d" highest-idx) :c-compiler))))
@@ -4122,7 +4104,7 @@
         (let* ((name (ast-node-value decl))
                (var-type (or (ast-node-result-type decl) (make-int-type))))
           (unless (lookup-symbol name)  ; don't re-register if already done
-            (if (and (promotable-to-register-p var-type) (< *local-reg-count* *max-local-regs*)
+            (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
                      (not (is-address-taken name)))  ; can't register an addressed var
                 (progn
                   (add-symbol name var-type :register *local-reg-count*)
@@ -4139,7 +4121,7 @@
       (let* ((name (ast-node-value decl))
              (var-type (or (ast-node-result-type decl) (make-int-type))))
         (unless (lookup-symbol name)  ; don't re-register if already done
-          (if (and (promotable-to-register-p var-type) (< *local-reg-count* *max-local-regs*)
+          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
                    (not (is-address-taken name)))  ; can't register an addressed var
               (progn
                 (add-symbol name var-type :register *local-reg-count*)
