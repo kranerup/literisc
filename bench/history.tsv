@@ -1,0 +1,19 @@
+date	commit	mode	bytes	asm_lines	source	subject
+2026-06-29T16:13:53	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-29T16:13:53	88f843f+	Os	3861	3194	bench.c	fixed failing unit tests
+2026-06-29T16:13:53	88f843f+	O	6088	4592	bench.c	fixed failing unit tests
+2026-06-29T16:22:37	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-29T16:22:37	88f843f+	Os	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-29T16:22:37	88f843f+	O	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T08:53:45	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-30T08:53:45	88f843f+	Os	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T08:53:45	88f843f+	O	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T08:57:31	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-30T08:57:31	88f843f+	Os	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T08:57:31	88f843f+	O	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T09:02:06	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-30T09:02:06	88f843f+	Os	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T09:02:06	88f843f+	O	FAIL	FAIL	bench.c	fixed failing unit tests
+2026-06-30T09:24:14	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
+2026-06-30T09:24:14	88f843f+	Os	3861	3194	bench.c	fixed failing unit tests
+2026-06-30T09:24:14	88f843f+	O	6088	4592	bench.c	fixed failing unit tests
