@@ -31,6 +31,12 @@
 ;;; Track local register usage for current function (for compatibility)
 (defvar *local-reg-count* 0)
 
+;;; Alist mapping param ordinal -> local-reg index for parameters that are
+;;; promoted to callee-saved registers in the current (non-leaf) function, so
+;;; they survive nested calls without being homed to the stack.  Empty for leaf
+;;; functions and functions that opt out of promotion (see compute-param-promotions).
+(defvar *promoted-params* nil)
+
 ;;; Track maximum physical register index after allocation (for PUSH/POP)
 (defvar *max-temp-reg-index* -1)
 
@@ -1505,6 +1511,7 @@
          (*frame-size* (or (getf func-data :frame-size) 0))
          (*current-param-count* (or (getf func-data :param-count) 0))
          (*local-reg-count* (or (getf func-data :local-reg-count) 0))
+         (*promoted-params* nil)
          (*user-labels* (make-hash-table :test 'equal))  ; Reset user labels for each function
          (body-ends-with-return (ends-with-return-p body)))
 
@@ -1520,6 +1527,14 @@
                   count 1)))
       (setf *local-reg-count* reg-count-from-table)
       (setf (compiler-state-local-reg-count *state*) reg-count-from-table))
+
+    ;; Decide which parameters to keep in callee-saved registers (promotion)
+    ;; instead of homing them to the stack across nested calls.  Must run before
+    ;; register-parameters (so params get the right storage) and before body gen
+    ;; (so inline/CSE register vars allocate in the slots above the promoted ones).
+    ;; Computed once here and reused by both the normal and spill-fallback passes.
+    (setf *promoted-params* (compute-param-promotions params *local-reg-count*))
+    (incf *local-reg-count* (length *promoted-params*))
 
     ;; Reset local-offset so generate-inline-expr allocates inline vars from the
     ;; correct position (right below the function's own locals).
@@ -1570,6 +1585,10 @@
         ;; before that regeneration so *param-save-offset* stays consistent.
         (unless *is-leaf-function*
           (setf *param-save-offset* *frame-size*))
+
+        ;; Capture promoted params into their callee-saved registers as the
+        ;; first body instructions (before any nested call clobbers P0-P3).
+        (emit-param-promotion-loads)
 
         ;; Generate body (with virtual registers if enabled)
         (if body-ends-with-return
@@ -1638,6 +1657,8 @@
               ;; further down, growing *frame-size* and shifting *param-save-offset*.
               (setf (compiler-state-local-offset *state*)
                     (- (or (getf func-data :frame-size) 0)))
+              ;; Re-capture promoted params (physical-mode get-local-reg -> R6-R9)
+              (emit-param-promotion-loads)
               ;; Regenerate body
               (if body-ends-with-return
                   (generate-body-with-final-return body)
@@ -1892,17 +1913,83 @@
 ;;; New Calling Convention (uses PUSH/POP for efficiency)
 ;;; ---------------------------------------------------------------------------
 
+(defun compute-param-promotions (params-node base-reg-count)
+  "Decide which parameters of a non-leaf function to keep in callee-saved
+   registers (R2-R9 are all preserved across calls by the callee's push-r/pop-r)
+   instead of homing them to the stack.  Returns an alist mapping param ordinal
+   -> local-reg index, assigning the lowest free local-reg slots starting at
+   BASE-REG-COUNT and capped at 4 (R6-R9).
+
+   Conservative opt-outs (keep current stack-homing behavior):
+   - leaf functions (params already stay in P0-P3),
+   - functions with stack parameters (>4 params), whose stack-param offsets are
+     coupled to the param save-area size,
+   - functions containing any 64-bit parameter, which occupies a P-register pair
+     and breaks the param-ordinal == P-register-index assumption used here,
+   - individual params that are not register-promotable or are address-taken."
+  (let ((params (ast-node-children params-node)))
+    (when (or *is-leaf-function*
+              (> (length params) 4)
+              (some (lambda (p)
+                      (let ((ty (ast-node-result-type p)))
+                        (and ty (> (type-size ty) 4))))
+                    params))
+      (return-from compute-param-promotions nil))
+    (let ((promotions nil)
+          (next-reg base-reg-count))
+      (loop for param in params
+            for idx from 0
+            for name = (ast-node-value param)
+            for ty = (ast-node-result-type param)
+            when (and name ty
+                      (< next-reg 4)
+                      (promotable-to-register-p ty)
+                      (not (is-address-taken name)))
+            do (progn
+                 (push (cons idx next-reg) promotions)
+                 (incf next-reg)))
+      (nreverse promotions))))
+
+(defun compute-save-param-space ()
+  "Stack bytes reserved for homing non-promoted parameters P0-P3.
+   Promoted params live in callee-saved registers and need no stack slot.
+   Sized to cover the highest homed param index so that :parameter reads
+   (offset = *param-save-offset* + idx*4) stay valid; 0 when no param is homed,
+   which lets the whole frame shrink away for simple accessors."
+  (if *is-leaf-function*
+      0
+      (let ((homed (loop for i from 0 below (min *current-param-count* 4)
+                         unless (assoc i *promoted-params*)
+                         collect i)))
+        (if homed (* 4 (1+ (reduce #'max homed))) 0))))
+
+(defun emit-param-promotion-loads ()
+  "Emit copies of promoted parameters from their P-register into the
+   callee-saved register backing their :register symbol.  Emitted as the first
+   body instructions (before register allocation) so the copy is allocated like
+   any other and the value is captured before a nested call clobbers the
+   P-register."
+  (dolist (pp *promoted-params*)
+    (emit `(A=Rx ,(nth (car pp) *param-regs*)))
+    (emit `(Rx=A ,(get-local-reg (cdr pp))))))
+
 (defun register-parameters (params-node)
   "Register function parameters in the symbol table for code generation.
    For leaf functions, params stay in P0-P3.
-   For non-leaf functions, params are saved to stack and accessed from there."
+   Promoted params (see *promoted-params*) become :register variables backed by
+   a callee-saved register.  Other non-leaf params are :parameter and are homed
+   to / read from the stack."
   (loop for param in (ast-node-children params-node)
         for idx from 0
         when (ast-node-value param)
-        do (add-symbol (ast-node-value param)
-                       (ast-node-result-type param)
-                       :parameter
-                       idx)))
+        do (let ((promo (assoc idx *promoted-params*)))
+             (if promo
+                 (add-symbol (ast-node-value param)
+                             (ast-node-result-type param)
+                             :register (cdr promo))
+                 (add-symbol (ast-node-value param)
+                             (ast-node-result-type param)
+                             :parameter idx)))))
 
 (defun compute-highest-save-reg (max-temp-idx)
   "Compute the highest register that needs to be saved with PUSH.
@@ -1939,8 +2026,7 @@
       (emit `(push-r ,save-reg)))
 
     ;; 3. Allocate stack frame for locals + param save area (non-leaf only)
-    (let* ((save-param-space (if *is-leaf-function* 0
-                                 (* 4 (min param-count 4))))
+    (let* ((save-param-space (compute-save-param-space))
            (total-frame (+ *frame-size* save-param-space)))
       (setf *param-save-offset* *frame-size*)  ; Params start after locals
       (when (> total-frame 0)
@@ -1950,11 +2036,12 @@
         (emit `(Rx=A SP)))
 
       ;; 4. Save parameters P0-P3 to stack for non-leaf functions
-      ;; (They get clobbered by nested calls)
+      ;; (They get clobbered by nested calls).  Promoted params are skipped:
+      ;; they were captured into a callee-saved register by the body prologue.
       (unless *is-leaf-function*
         (loop for i from 0 below (min param-count 4)
-              for offset = (+ *param-save-offset* (* i 4))
-              do (progn
+              unless (assoc i *promoted-params*)
+              do (let ((offset (+ *param-save-offset* (* i 4))))
                    (emit `(A=Rx SP))
                    (emit `(M[A+n]=Rx ,offset ,(nth i *param-regs*)))))))))
 
@@ -1964,9 +2051,9 @@
                     (intern (format nil "R~d" max-temp-idx) :c-compiler)))
         (param-count *current-param-count*))
 
-    ;; 1. Deallocate stack frame (locals + saved params for non-leaf)
-    (let* ((save-param-space (if *is-leaf-function* 0
-                                 (* 4 (min param-count 4))))
+    ;; 1. Deallocate stack frame (locals + saved params for non-leaf).
+    ;; Must match the prologue's allocation exactly (compute-save-param-space).
+    (let* ((save-param-space (compute-save-param-space))
            (total-frame (+ *frame-size* save-param-space)))
       (when (> total-frame 0)
         (emit `(A=Rx SP))
