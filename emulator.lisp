@@ -1401,22 +1401,26 @@
     emul))
 
 (defun run-emul ( emul max-instr &optional (debug t))
-    (processor-add-wr-callback 
-        (emulated-system-processor emul) 
+    "Execute up to MAX-INSTR instructions. Returns the number of instructions
+     actually executed (= MAX-INSTR if the cap was hit, otherwise the count
+     reached before the program terminated)."
+    (processor-add-wr-callback
+        (emulated-system-processor emul)
           'write-cb-write-char)
     (dotimes (n max-instr)
       (if (processor-state-break (emulated-system-processor emul))
           (progn
             ;(format t "break due to infinite loop pc:~a~%"
             ;        (processor-state-pc (emulated-system-processor emul)))
-            (return-from run-emul nil))
+            (return-from run-emul n))
           (execute-instruction
-            (emulated-system-processor emul) 
+            (emulated-system-processor emul)
             (emulated-system-imem emul)
             (emulated-system-dmem emul))))
     (format t "break at max-instr ~a pc:~a~%"
             max-instr
-            (processor-state-pc (emulated-system-processor emul))))
+            (processor-state-pc (emulated-system-processor emul)))
+    max-instr)
 
 (defvar *instr-row* 1)
 (defvar *pc-row* 3)
