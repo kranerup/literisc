@@ -632,58 +632,97 @@ def genFieldWriteCode(fields,width,backend,uintSize,definedUintSize):
 
 
 # ----------------------------------------------------------- genAddrCode
+#def genAddrCode(name,hasSlice,hasPort,hasSet,address,entries,sizes,definedUintSize):
+#    c = ''
+#    if hasPort or hasSlice or hasSet:
+#        c +="  int hit = 0;\n"
+#    c +="  uint"+str(definedUintSize)+"_t address;\n"
+#
+#    for addr_entry in address:
+#        [addr,sliceId,portId,setId] = addr_entry
+#        prev = False
+#        cmp = ""
+#
+#        if hasPort:
+#            cmp = " port=="+str(portId)
+#            prev = True
+#
+#        if hasSet:
+#            if prev:
+#                cmp = cmp + " && set=="+str(setId)
+#            else:
+#                cmp = " set=="+str(setId)
+#            prev = True
+#
+#        if hasSlice:
+#            if prev:
+#                cmp = cmp + "&& slice=="+str(sliceId)
+#            else:
+#                cmp = " slice=="+str(sliceId)
+#            prev = True
+#
+#        #const_name = addrConstName(name, addr_entry, hasSlice, hasPort, hasSet)
+#        # These regs are created independently and may not have consecutive
+#        # addresses. To be able to access them with an index we need to
+#        # map index to address.
+#        if hasPort or hasSet or hasSlice:
+#            #c += f"  if ({cmp}) {{ address = "+str(addr)+"; hit = 1;}}\n"
+#            c += f"  if ({cmp}) {{ address = {addr}; hit = 1; }}\n"
+#
+#    if not hasSlice and not hasPort and not hasSet:
+#        #const_name = addrConstName(name, address[0], hasSlice, hasPort, hasSet)
+#        c += f"  address = {address[0][0]};\n"
+#
+#        #if isinstance(entries,list):
+#        #    for slice in range(len(entries)):
+#        #        c += f"  PA_ERROR_SLICE_IDX_CHECK( slice, idx, {slice}, {entries[slice]} )\n"
+#        #elif entries > 0:
+#        #    c += f"  PA_ERROR_IDX_CHECK( idx, {entries} )\n"
+#
+#    if isinstance(entries,list) or entries > 0:
+#        c += f"  address += idx*{sizes};\n"
+#
+#        #if hasPort or hasSlice or hasSet:
+#        #    c += "  PA_ERROR_CHECK\n"
+#
+#    return c
 def genAddrCode(name,hasSlice,hasPort,hasSet,address,entries,sizes,definedUintSize):
     c = ''
-    if hasPort or hasSlice or hasSet:
-        c +="  int hit = 0;\n"
-    c +="  uint"+str(definedUintSize)+"_t address;\n"
+    has_branch = hasPort or hasSlice or hasSet
+    has_idx = isinstance(entries, list) or entries > 0
 
-    for addr_entry in address:
-        [addr,sliceId,portId,setId] = addr_entry
-        prev = False
-        cmp = ""
-
-        if hasPort:
-            cmp = " port=="+str(portId)
-            prev = True
-
-        if hasSet:
-            if prev:
-                cmp = cmp + " && set=="+str(setId)
-            else:
-                cmp = " set=="+str(setId)
-            prev = True
-
-        if hasSlice:
-            if prev:
-                cmp = cmp + "&& slice=="+str(sliceId)
-            else:
-                cmp = " slice=="+str(sliceId)
-            prev = True
-
-        #const_name = addrConstName(name, addr_entry, hasSlice, hasPort, hasSet)
-        # These regs are created independently and may not have consecutive
-        # addresses. To be able to access them with an index we need to
-        # map index to address.
-        if hasPort or hasSet or hasSlice:
-            #c += f"  if ({cmp}) {{ address = "+str(addr)+"; hit = 1;}}\n"
+    if has_branch:
+        c += "  int hit = 0;\n"
+        c += "  uint"+str(definedUintSize)+"_t address;\n"
+        for addr_entry in address:
+            [addr, sliceId, portId, setId] = addr_entry
+            prev = False
+            cmp = ""
+            if hasPort:
+                cmp = " port=="+str(portId)
+                prev = True
+            if hasSet:
+                if prev:
+                    cmp = cmp + " && set=="+str(setId)
+                else:
+                    cmp = " set=="+str(setId)
+                prev = True
+            if hasSlice:
+                if prev:
+                    cmp = cmp + "&& slice=="+str(sliceId)
+                else:
+                    cmp = " slice=="+str(sliceId)
+                prev = True
             c += f"  if ({cmp}) {{ address = {addr}; hit = 1; }}\n"
-
-    if not hasSlice and not hasPort and not hasSet:
-        #const_name = addrConstName(name, address[0], hasSlice, hasPort, hasSet)
-        c += f"  address = {address[0][0]};\n"
-
-        #if isinstance(entries,list):
-        #    for slice in range(len(entries)):
-        #        c += f"  PA_ERROR_SLICE_IDX_CHECK( slice, idx, {slice}, {entries[slice]} )\n"
-        #elif entries > 0:
-        #    c += f"  PA_ERROR_IDX_CHECK( idx, {entries} )\n"
-
-    if isinstance(entries,list) or entries > 0:
-        c += f"  address += idx*{sizes};\n"
-
-        #if hasPort or hasSlice or hasSet:
-        #    c += "  PA_ERROR_CHECK\n"
+        if has_idx:
+            c += f"  address += idx*{sizes};\n"
+    else:
+        # No branching: fold declaration + base + index into a single line
+        base = address[0][0]
+        if has_idx:
+            c += f"  uint{definedUintSize}_t address = {base} + idx*{sizes};\n"
+        else:
+            c += f"  uint{definedUintSize}_t address = {base};\n"
 
     return c
 
