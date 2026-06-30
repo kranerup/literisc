@@ -32,4 +32,4 @@ IRQ_ADDRESS       = IO_LOW - 4           # 0xFF98
 
 # CONF bus (AXI slave interface)
 CONF_LOW    = 2**16                      # 0x10000
-CONF_HIGH   = 2**32 - 1                 # 0xFFFFFFFF
+CONF_HIGH   = 2**24 - 1

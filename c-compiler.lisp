@@ -1051,11 +1051,13 @@
       (push (subseq source start) lines))
     (nreverse lines)))
 
-(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t) (peephole nil))
+(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t))
   "Compile C source code to assembly S-expressions.
    :optimize-size t (default) uses runtime library calls for mul/div/mod to reduce code size.
    :optimize-size nil inlines mul/div/mod loops for better performance.
-   :peephole t enables peephole optimization to eliminate redundant instructions."
+   :peephole t enables peephole optimization to eliminate redundant instructions.
+   :eliminate-dead t (default) removes functions not reachable from main;
+   set to nil to keep unused functions in the output."
   (let ((*state* (make-compiler-state))
         (*current-source-line* nil)
         (*current-source-context* nil))
@@ -1084,12 +1086,13 @@
 
 
       ;; Dead function elimination (removes functions not reachable from main)
-      (setf ast (eliminate-dead-functions ast))
+      (when eliminate-dead
+        (setf ast (eliminate-dead-functions ast)))
 
       ;; Apply optimizations
       (when optimize
         ;; Function inlining only when full optimization is enabled
-        (setf ast (inline-functions ast))
+        (setf ast (inline-functions ast :eliminate-dead eliminate-dead))
         (when verbose
           (format t "~%AST (after inlining):~%")
           (print-ast ast)))
@@ -1180,28 +1183,28 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil))
+(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (eliminate-dead t))
   "Compile, assemble, and run a C program, returning the result.
    When CONF-SOCKET is a path, opens a conf bus connection on that socket
    (waits for a client) before running."
-  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole))
+  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead))
          (dmem (lr-emulator:make-dmem (if conf-socket #x1000000 #x10000)))
-         (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
-    ;; Run the program
-    (if conf-socket
-        (lr-emulator:run-emul-conf emul max-cycles conf-socket verbose)
-        (lr-emulator:run-emul emul max-cycles verbose))
+         (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose))
+         ;; Number of instructions actually executed (secondary return value).
+         (instr-count (if conf-socket
+                          (lr-emulator:run-emul-conf emul max-cycles conf-socket verbose)
+                          (lr-emulator:run-emul emul max-cycles verbose))))
     ;; Return value is in P0 (R10)
     (let ((ret-val (aref (lr-emulator::processor-state-r
                            (lr-emulator:emulated-system-processor emul))
                          10)))
       (when verbose (format t "P0 = ~a~%" ret-val))
-      ret-val)))
+      (values ret-val instr-count))))
 
 (defun run-and-verify-registers (source &key (verbose nil) (max-cycles 10000) (optimize-size t) (peephole nil))
   "Compile, assemble, run, and verify register preservation.

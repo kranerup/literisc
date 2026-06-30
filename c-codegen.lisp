@@ -3995,7 +3995,8 @@
         (let* ((name (ast-node-value decl))
                (var-type (or (ast-node-result-type decl) (make-int-type))))
           (unless (lookup-symbol name)  ; don't re-register if already done
-            (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
+            (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
+                     (not (is-address-taken name)))  ; can't register an addressed var
                 (progn
                   (add-symbol name var-type :register *local-reg-count*)
                   (incf *local-reg-count*))
@@ -4011,7 +4012,8 @@
       (let* ((name (ast-node-value decl))
              (var-type (or (ast-node-result-type decl) (make-int-type))))
         (unless (lookup-symbol name)  ; don't re-register if already done
-          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4))
+          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
+                   (not (is-address-taken name)))  ; can't register an addressed var
               (progn
                 (add-symbol name var-type :register *local-reg-count*)
                 (incf *local-reg-count*))

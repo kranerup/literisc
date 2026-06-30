@@ -31,6 +31,9 @@
   (format t "  -O                   Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
   (format t "  -Os                  Optimize for size (inlining, peephole, library mul/div/mod)~%")
   (format t "  -fno-peephole        Disable peephole optimization~%")
+  (format t "  -fkeep-unused-functions~%")
+  (format t "                       Compile functions even if unreachable from main~%")
+  (format t "                       (default: unused functions are eliminated)~%")
   (format t "  -v, --verbose        Verbose output~%")
   (format t "  -h, --help           Show this help message~%")
   (format t "~%Source is always preprocessed via clang -E -P before compilation.~%")
@@ -120,6 +123,7 @@
          (optimize nil)
          (peephole nil)
          (optimize-size t)
+         (eliminate-dead t)
          (verbose nil)
          (include-dirs nil)
          (source-file nil))
@@ -163,6 +167,8 @@
                (setf optimize-size t))
               ((string= arg "-fno-peephole")
                (setf peephole nil))
+              ((string= arg "-fkeep-unused-functions")
+               (setf eliminate-dead nil))
               ((or (string= arg "-v") (string= arg "--verbose"))
                (setf verbose t))
               ((string= arg "-I")
@@ -208,7 +214,8 @@
                                         :annotate t
                                         :optimize optimize
                                         :optimize-size optimize-size
-                                        :peephole peephole)))
+                                        :peephole peephole
+                                        :eliminate-dead eliminate-dead)))
              (if output-file
                  (with-open-file (*standard-output* output-file
                                                     :direction :output
@@ -221,12 +228,15 @@
              (format t "Compiling ~a...~%" source-file))
            (when (and verbose conf-socket)
              (format t "Using conf socket: ~a~%" conf-socket))
-           (let ((result (run-c-program source :verbose verbose
-                                               :optimize optimize
-                                               :optimize-size optimize-size
-                                               :peephole peephole
-                                               :conf-socket conf-socket
-                                               :max-cycles 1000000)))
+           (multiple-value-bind (result instr-count)
+               (run-c-program source :verbose verbose
+                                     :optimize optimize
+                                     :optimize-size optimize-size
+                                     :peephole peephole
+                                     :conf-socket conf-socket
+                                     :eliminate-dead eliminate-dead
+                                     :max-cycles 1000000)
+             (format *error-output* "instructions executed: ~a~%" instr-count)
              (format *error-output* "~a~%" result)
              (sb-ext:exit :code (logand result 255))))
 
@@ -237,7 +247,8 @@
                                          :annotate nil
                                          :optimize optimize
                                          :optimize-size optimize-size
-                                         :peephole peephole))
+                                         :peephole peephole
+                                         :eliminate-dead eliminate-dead))
                   (symtab (make-hash-table :test 'eql))
                   (mcode (assemble (strip-asm-comments asm) verbose symtab))
                   (dmem (lr-emulator:make-dmem #x1000000))
@@ -255,7 +266,8 @@
            (let ((mcode (compile-c-to-asm source :verbose verbose
                                                  :optimize optimize
                                                  :optimize-size optimize-size
-                                                 :peephole peephole)))
+                                                 :peephole peephole
+                                                 :eliminate-dead eliminate-dead)))
              (if output-file
                  (progn
                    (if (string-suffix-p output-file ".bin")

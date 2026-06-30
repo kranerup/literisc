@@ -55,6 +55,8 @@ void printf(char *fmt, int a0, int a1, int a2) {
       spec = *fmt++;
       if (spec == 'd') {
         print_str(itoa(args[argc++], ibuf));
+      } else if (spec == 's') {
+        print_str((char *)args[argc++]);
       } else {
         putchar('%');
         putchar(spec);

@@ -788,6 +788,11 @@
      (let* ((name (ast-node-value node))
             (new-name (rename-variable name suffix)))
        (setf (gethash name renames) new-name)
+       ;; Propagate address-taken status to the renamed variable so the
+       ;; codegen register-promotion check sees it (the original token-level
+       ;; scan only knows the pre-inline source name).
+       (when (is-address-taken name)
+         (setf (gethash new-name (compiler-state-address-taken *state*)) t))
        (make-ast-node :type 'var-decl
                       :value new-name
                       :children (mapcar (lambda (c) (rename-variables-in-node c renames suffix))
@@ -978,8 +983,13 @@
           when (ast-node-value param)
           do (let ((param-name (ast-node-value param)))
                (cond
-                 ;; Constant argument - propagate directly
-                 ((is-constant-node arg)
+                 ;; Constant argument - propagate directly, but ONLY if the
+                 ;; parameter is never assigned to in the body. If it is modified
+                 ;; (e.g. while (n--)), substituting a literal would produce an
+                 ;; invalid lvalue like 16--; fall through to the temp-var case so
+                 ;; the modified parameter becomes a local initialized to the constant.
+                 ((and (is-constant-node arg)
+                       (not (parameter-is-modified-p param-name body)))
                   (setf (gethash param-name const-bindings) (get-constant-value arg)))
                  ;; Simple var-ref argument - rename parameter to argument variable
                  ;; ONLY if the parameter is never assigned to in the function body.
@@ -1099,10 +1109,13 @@
       (walk node))
     called))
 
-(defun inline-functions (ast)
+(defun inline-functions (ast &key (eliminate-dead t))
   "Main entry point for function inlining optimization.
    Transforms the AST by inlining eligible function calls.
-   Also marks fully-inlined functions as dead for elimination."
+   Also marks fully-inlined functions as dead for elimination.
+   When ELIMINATE-DEAD is nil, functions that were never called in the
+   source (originally uncalled) are kept rather than marked dead; functions
+   whose every call site was inlined away are still eliminated."
   (when (null ast)
     (return-from inline-functions nil))
 
@@ -1147,10 +1160,17 @@
 
       ;; After inlining, find which functions are still called
       (let ((remaining-calls (collect-remaining-calls result-ast)))
-        ;; Mark functions with no remaining calls as dead
+        ;; Mark functions with no remaining calls as dead.
+        ;; When eliminate-dead is nil, keep functions that were never called
+        ;; in the source (original call count 0); only drop those whose call
+        ;; sites were all inlined away.
         (maphash (lambda (func-name defined-p)
                    (declare (ignore defined-p))
-                   (unless (gethash func-name remaining-calls)
+                   (unless (or (gethash func-name remaining-calls)
+                               (and (not eliminate-dead)
+                                    (zerop (gethash func-name
+                                                    (or *call-counts* (make-hash-table))
+                                                    0))))
                      (setf (gethash func-name (compiler-state-dead-functions *state*)) t)))
                  defined-functions))
 
