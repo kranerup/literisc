@@ -2974,6 +2974,21 @@
         ;; offset is the register index (0-3), get-local-reg converts to R6-R9
         (get-local-reg (sym-entry-offset sym))))))
 
+(defun call-arg-direct-reg (node)
+  "If NODE is a var-ref to a full-width register-resident local, return its
+   home register so generate-call can read it straight into a parameter
+   register, skipping the temp copy the two-pass argument shuffle would make.
+   Restricted to >=4-byte types: sub-word reads need the sign/zero extension
+   that generate-var-ref applies, which a raw register read would skip."
+  (when (and (ast-node-p node)
+             (eq (ast-node-type node) 'var-ref))
+    (let* ((name (ast-node-value node))
+           (sym (lookup-symbol name)))
+      (when (and sym (eq (sym-entry-storage sym) :register))
+        (let ((var-type (sym-entry-type sym)))
+          (when (or (null var-type) (>= (type-size var-type) 4))
+            (get-local-reg (sym-entry-offset sym))))))))
+
 (defun get-literal-integer (node)
   "Return integer value if node is a literal integer AST node, else nil."
   (when (and (ast-node-p node)
@@ -3716,8 +3731,14 @@
 
     ;; Now evaluate args and pass in registers P0-P3
     ;; 64-bit args take 2 register slots each (low:high)
-    (let ((arg-data nil)  ; list of (is-64-bit temp-low [temp-high])
-          (slot 0))       ; current register slot
+    ;; A register-resident variable can be read straight into Pn in the second
+    ;; pass (its home register is callee-saved and never a param reg), but only
+    ;; when no argument has a side effect that could reassign it between here
+    ;; and the call -- :register locals can't be aliased, so an explicit
+    ;; assignment/++/-- in the arg list is the only thing that can change one.
+    (let ((arg-data nil)  ; list of (is-64-bit temp-low temp-high slot const src-reg)
+          (slot 0)        ; current register slot
+          (args-pure (notany #'has-side-effects args)))
       ;; First pass: evaluate args and save to temp registers
       (loop for arg in args
             while (< slot 4)
@@ -3737,16 +3758,23 @@
                          (push (list t temp-low temp-high slot) arg-data)
                          (incf slot 2)))
                      ;; 32-bit argument
-                     (let ((const (get-literal-integer arg)))
-                       (if const
-                           ;; Constant: no temp and no evaluation needed -- a
-                           ;; constant can't clobber a param register, so it is
-                           ;; loaded straight into Pn in the second pass.
-                           (push (list nil nil nil slot const) arg-data)
-                           (let ((temp (alloc-temp-reg)))
-                             (generate-expression arg)
-                             (emit `(Rx=A ,temp))
-                             (push (list nil temp nil slot nil) arg-data)))
+                     (let ((const (get-literal-integer arg))
+                           (src-reg (and args-pure (call-arg-direct-reg arg))))
+                       (cond
+                         ;; Constant: no temp and no evaluation needed -- a
+                         ;; constant can't clobber a param register, so it is
+                         ;; loaded straight into Pn in the second pass.
+                         (const
+                          (push (list nil nil nil slot const nil) arg-data))
+                         ;; Register-resident variable: read straight into Pn in
+                         ;; the second pass, no temp copy (see args-pure above).
+                         (src-reg
+                          (push (list nil nil nil slot nil src-reg) arg-data))
+                         (t
+                          (let ((temp (alloc-temp-reg)))
+                            (generate-expression arg)
+                            (emit `(Rx=A ,temp))
+                            (push (list nil temp nil slot nil nil) arg-data))))
                        (incf slot)))))
       (setf arg-data (nreverse arg-data))
 
@@ -3756,7 +3784,8 @@
                      (temp-low (second entry))
                      (temp-high (third entry))
                      (slot-num (fourth entry))
-                     (const-val (fifth entry)))
+                     (const-val (fifth entry))
+                     (src-reg (sixth entry)))
                  (cond
                    (is-64
                     ;; 64-bit: move to Pn:P(n+1)
@@ -3769,6 +3798,10 @@
                    (const-val
                     ;; 32-bit constant: load the immediate straight into Pn
                     (emit `(Rx= ,const-val ,(nth slot-num *param-regs*))))
+                   (src-reg
+                    ;; 32-bit register-resident variable: read straight into Pn
+                    (emit `(A=Rx ,src-reg))
+                    (emit `(Rx=A ,(nth slot-num *param-regs*))))
                    (t
                     ;; 32-bit: move to Pn
                     (emit `(A=Rx ,temp-low))
