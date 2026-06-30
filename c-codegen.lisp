@@ -3737,33 +3737,43 @@
                          (push (list t temp-low temp-high slot) arg-data)
                          (incf slot 2)))
                      ;; 32-bit argument
-                     (let ((temp (alloc-temp-reg)))
-                       (generate-expression arg)
-                       (emit `(Rx=A ,temp))
-                       (push (list nil temp nil slot) arg-data)
+                     (let ((const (get-literal-integer arg)))
+                       (if const
+                           ;; Constant: no temp and no evaluation needed -- a
+                           ;; constant can't clobber a param register, so it is
+                           ;; loaded straight into Pn in the second pass.
+                           (push (list nil nil nil slot const) arg-data)
+                           (let ((temp (alloc-temp-reg)))
+                             (generate-expression arg)
+                             (emit `(Rx=A ,temp))
+                             (push (list nil temp nil slot nil) arg-data)))
                        (incf slot)))))
       (setf arg-data (nreverse arg-data))
 
-      ;; Second pass: move from temps to P0-P3
+      ;; Second pass: move from temps (or constants) to P0-P3
       (loop for entry in arg-data
             do (let ((is-64 (first entry))
                      (temp-low (second entry))
                      (temp-high (third entry))
-                     (slot-num (fourth entry)))
-                 (if is-64
-                     ;; 64-bit: move to Pn:P(n+1)
-                     (progn
-                       (emit `(A=Rx ,temp-low))
-                       (emit `(Rx=A ,(nth slot-num *param-regs*)))
-                       (emit `(A=Rx ,temp-high))
-                       (emit `(Rx=A ,(nth (1+ slot-num) *param-regs*)))
-                       (free-temp-reg temp-low)
-                       (free-temp-reg temp-high))
-                     ;; 32-bit: move to Pn
-                     (progn
-                       (emit `(A=Rx ,temp-low))
-                       (emit `(Rx=A ,(nth slot-num *param-regs*)))
-                       (free-temp-reg temp-low)))))
+                     (slot-num (fourth entry))
+                     (const-val (fifth entry)))
+                 (cond
+                   (is-64
+                    ;; 64-bit: move to Pn:P(n+1)
+                    (emit `(A=Rx ,temp-low))
+                    (emit `(Rx=A ,(nth slot-num *param-regs*)))
+                    (emit `(A=Rx ,temp-high))
+                    (emit `(Rx=A ,(nth (1+ slot-num) *param-regs*)))
+                    (free-temp-reg temp-low)
+                    (free-temp-reg temp-high))
+                   (const-val
+                    ;; 32-bit constant: load the immediate straight into Pn
+                    (emit `(Rx= ,const-val ,(nth slot-num *param-regs*))))
+                   (t
+                    ;; 32-bit: move to Pn
+                    (emit `(A=Rx ,temp-low))
+                    (emit `(Rx=A ,(nth slot-num *param-regs*)))
+                    (free-temp-reg temp-low)))))
 
       ;; Call function
       (if func-label
