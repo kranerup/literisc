@@ -1512,6 +1512,7 @@
          (*current-param-count* (or (getf func-data :param-count) 0))
          (*local-reg-count* (or (getf func-data :local-reg-count) 0))
          (*promoted-params* nil)
+         (base-local-reg-count 0)  ; *local-reg-count* before inline-var promotion
          (*user-labels* (make-hash-table :test 'equal))  ; Reset user labels for each function
          (body-ends-with-return (ends-with-return-p body)))
 
@@ -1535,6 +1536,11 @@
     ;; Computed once here and reused by both the normal and spill-fallback passes.
     (setf *promoted-params* (compute-param-promotions params *local-reg-count*))
     (incf *local-reg-count* (length *promoted-params*))
+    ;; Remember the count before any inline-var promotion so the spill-fallback
+    ;; pass can restore it (inline promotion increments *local-reg-count* during
+    ;; body gen; without this reset the fallback pass starts at the first pass's
+    ;; final count and promotes nothing — see generate-inline-expr).
+    (setf base-local-reg-count *local-reg-count*)
 
     ;; Reset local-offset so generate-inline-expr allocates inline vars from the
     ;; correct position (right below the function's own locals).
@@ -1646,6 +1652,12 @@
               ;; Clear local vreg map and counter
               (setf *local-vreg-map* (make-hash-table :test 'eql))
               (setf *vreg-counter* 0)
+              ;; Restore the pre-promotion register count.  The first pass left
+              ;; *local-reg-count* at its final (post inline-var promotion) value;
+              ;; without this reset, generate-inline-expr below would see the
+              ;; budget already full and promote nothing, forcing every inline
+              ;; local (including hot loop counters) onto the stack.
+              (setf *local-reg-count* base-local-reg-count)
               ;; Re-register parameters without virtual registers
               (exit-scope)
               (enter-scope)
