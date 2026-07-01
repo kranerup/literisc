@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 #
 # Run a single C program test and compare lrcc output against clang.
 # Usage: tests/run-program <test.c>
@@ -42,6 +42,7 @@ if [ "$reference" = "$actual" ]; then
     printf 'PASS  %s\n' "$(basename "$t")"
 else
     printf 'FAIL  %s\n' "$(basename "$t")" >&2
+    echo "ref:'$reference' act:'$actual'"
     diff <(printf '%s\n' "$reference") <(printf '%s\n' "$actual") >&2
     exit 1
 fi

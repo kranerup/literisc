@@ -1,1 +1,7 @@
-../../literisc_gemini/c-testsuite/tests/single-exec/00114.c
+int main(void);
+
+int
+main()
+{
+	return 0;
+}
