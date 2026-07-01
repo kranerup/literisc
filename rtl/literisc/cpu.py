@@ -199,7 +199,7 @@ def cpu( clk, clk_en, sync_rstn,
          obs_acc,
          obs_cc,
          obs_op,
-         obs_trace,
+         instr_trace,
          sim_print):
 
 
@@ -215,6 +215,7 @@ def cpu( clk, clk_en, sync_rstn,
     #obs_trace = Signal(modbv(0)[69:])  # valid(1) + pc(16) + len(4) + 6 bytes(48) = 69
 
     instr_len = Signal(modbv(1)[4:])  # max 6 bytes
+    n_instr_len = Signal(modbv(1)[4:])
 
     n_n = Signal(modbv(0)[1:]) 
     n_c = Signal(modbv(0)[1:]) 
@@ -376,7 +377,7 @@ def cpu( clk, clk_en, sync_rstn,
     ili   = flop( n_load_imm,         load_imm,         clk_en, clk, sync_rstn  )
     ii    = flop( n_intr_enabled,     intr_enabled,     clk_en, clk, sync_rstn, reset_value=1        )
     icc   = flop( n_load_cc,          load_cc,          clk_en, clk, sync_rstn, reset_value=1        )
-
+    iil = flop( n_instr_len, instr_len, clk_en, clk, sync_rstn, reset_value=1 )
     
     @always_comb
     def sub_ctrl():
@@ -1499,6 +1500,15 @@ def cpu( clk, clk_en, sync_rstn,
             if wr_reg:
                 print("wr R",reg_dest,"=",reg_wr_op)
 
+    @always_comb
+    def instr_len_ctrl():
+        if next_state == ST_NEXT_INSTR:
+            n_instr_len.next = 1
+        elif inc_pc == 1:
+            n_instr_len.next = instr_len + 1
+        else:
+            n_instr_len.next = instr_len
+
     if enable_obs:
         #@always_comb
         #def obsreg():
@@ -1510,7 +1520,7 @@ def cpu( clk, clk_en, sync_rstn,
         #@always(clk.posedge)
         #def obsff():
         #    if clk_en == 1:
-        #        obs_trace.next = 0
+        #        instr_trace.next = 0
         #        emit = modbv(0)[1:]
         #        if state == ST_NEXT_INSTR:
         #            if not (op == OPC_NEXT and r_field == OPCI_NEXT):
@@ -1519,7 +1529,7 @@ def cpu( clk, clk_en, sync_rstn,
         #        #    emit[:] = 1
 
         #        if emit == 1:
-        #            obs_trace.next = concat(
+        #            instr_trace.next = concat(
         #                modbv(1)[1:],   # valid
         #                pc[16:],        # pc at start of instruction
         #                raw_bytes[5],   # oldest byte = byte 0 of instruction
@@ -1532,12 +1542,9 @@ def cpu( clk, clk_en, sync_rstn,
         @always(clk.posedge)
         def obsff():
             if clk_en == 1:
-                obs_trace.next = 0
-                if inc_pc == 1:
-                    instr_len.next = instr_len + 1
+                instr_trace.next = 0
                 if next_state == ST_NEXT_INSTR and state != ST_RESET:
-                    instr_len.next = 1
-                    obs_trace.next = concat(
+                    instr_trace.next = concat(
                         modbv(1)[1:],    # valid, bit 68
                         instr_pc[16:],   # pc, bits 67:52
                         instr_len[4:],   # len, bits 51:48
@@ -1606,4 +1613,3 @@ def cpu( clk, clk_en, sync_rstn,
                 print("SRP",reg_bank[15])
 
     return instances()
-

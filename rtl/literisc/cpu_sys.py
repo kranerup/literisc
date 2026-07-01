@@ -122,7 +122,8 @@ def cpu_sys(
         clk,
         sync_rstn,
         axi,
-        conf
+        conf,
+        instr_trace,
         ):
 
     cpu_imem_radr = signal(32)
@@ -162,8 +163,6 @@ def cpu_sys(
 
     cpu_sync_rstn = signal()
 
-    obs_trace = Signal(modbv(0)[69:])
-
     icpu = cpu(
             cpu_clk,
             clk_en,
@@ -184,7 +183,7 @@ def cpu_sys(
             None,
             None,
             None,
-            obs_trace,
+            instr_trace,
             False)
 
 

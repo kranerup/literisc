@@ -46,4 +46,3 @@ itop = toVerilog(
         None,
         None,
         False)
-    
