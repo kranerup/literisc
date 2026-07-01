@@ -2040,6 +2040,26 @@ def genFieldCapi(gRegs, backend, definedUintSize):
 
     """)
 
+    # Shared read/modify/write helpers for single-word (<= one hw word) fields.
+    # Factoring the mask/shift out of every accessor and into one call site
+    # keeps the (potentially unrolled/looped) shift+mask code in one place,
+    # which is a big win when optimizing the generated code for binary size.
+    c_code += dedent(f"""\
+    {uint_hw} rd_field({uint_hw} address, {uint_hw} shift, {uint_hw} mask) {{
+      return (readFromDevice(address, 0) >> shift) & mask;
+    }}
+
+    void wr_field({uint_hw} address, {uint_hw} shift, {uint_hw} mask, {uint_hw} value) {{
+      {uint_hw} entry = readFromDevice(address, 0);
+      writeToDevice(address, (entry & ~(mask << shift)) | ((value & mask) << shift), 0);
+    }}
+
+    void wr_field_set({uint_hw} address, {uint_hw} shift, {uint_hw} mask, {uint_hw} value) {{
+      writeToDevice(address, (value & mask) << shift, 0);
+    }}
+
+    """)
+
     for reg in gRegs:
         fields    = gRegs[reg]['Fields']
         width     = gRegs[reg]['Width']
@@ -2202,10 +2222,8 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                     c_code += addr_code
 
                     if w_start == w_end:
-                        c_code += f"  {uint_hw} entry;\n"
-                        c_code += f"  {backend.c_read(addr_expr(w_start), 0, 'entry')}"
-                        shift = f" >> {bit_off}" if bit_off else ""
-                        c_code += f"  *out = ({field_uint})((entry{shift}) & {mask});\n"
+                        # Single hw word: route through the shared rd_field helper.
+                        c_code += f"  *out = ({field_uint})rd_field({addr_expr(w_start)}, {bit_off}, {mask});\n"
                     else:
                         for w in range(w_start, w_end + 1):
                             c_code += f"  {uint_hw} entry{w};\n"
@@ -2235,13 +2253,8 @@ def genFieldCapi(gRegs, backend, definedUintSize):
 
                     if 'r' in reg_type:
                         if w_start == w_end:
-                            c_code += f"  {uint_hw} entry;\n"
-                            c_code += f"  {backend.c_read(addr_expr(w_start), 0, 'entry')}"
-                            if bit_off:
-                                c_code += f"  entry = (entry & ~(({uint_hw}){mask} << {bit_off})) | (({uint_hw})({fname} & {mask}) << {bit_off});\n"
-                            else:
-                                c_code += f"  entry = (entry & ~({uint_hw}){mask}) | (({uint_hw})({fname} & {mask}));\n"
-                            c_code += f"  {backend.c_write(addr_expr(w_start), 0, 'entry')}"
+                            # Single hw word: shared read/modify/write helper.
+                            c_code += f"  wr_field({addr_expr(w_start)}, {bit_off}, {mask}, ({uint_hw}){fname});\n"
                         else:
                             for w in range(w_start, w_end + 1):
                                 c_code += f"  {uint_hw} entry{w};\n"
@@ -2262,6 +2275,9 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                             for w in range(w_start, w_end):
                                 c_code += f"  {backend.c_write(addr_expr(w), 1, f'entry{w}')}"
                             c_code += f"  {backend.c_write(addr_expr(w_end), 0, f'entry{w_end}')}"
+                    elif total_hw_words == 1:
+                        # Write-only single-word register: no read, shared helper.
+                        c_code += f"  wr_field_set({addr_expr(w_start)}, {bit_off}, {mask}, ({uint_hw}){fname});\n"
                     else:
                         for w_idx in range(total_hw_words):
                             c_code += f"  {uint_hw} entry{w_idx} = 0;\n"
