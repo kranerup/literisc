@@ -5,6 +5,8 @@
 (require :asdf)
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
   (pushnew script-directory asdf:*central-registry* :test #'equal))
+(let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+  (when (probe-file ql-setup) (load ql-setup)))
 (handler-case
     (asdf:load-system :literisc :verbose nil)
   (error (e)

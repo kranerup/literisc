@@ -1,5 +1,7 @@
 #!/usr/bin/env -S sbcl --script
 (require :asdf)
+(let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+  (when (probe-file ql-setup) (load ql-setup)))
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
   (pushnew script-directory asdf:*central-registry* :test #'equal))
 ;;;(pushnew #P"/home/kenny/work/lite_risc_c/literisc/" asdf:*central-registry*)
