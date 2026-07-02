@@ -288,6 +288,8 @@ def cpu_tester( clk, programs ):
     obs_acc = Signal(modbv(0)[32:])
     obs_cc = Signal(modbv(0)[8:])
     obs_op = InstrCov()
+    # valid(1) + pc(16) + len(4) + 6 bytes(48) = 69
+    instr_trace = Signal(modbv(0)[69:])
 
     icpu = cpu(
         clk        = clk,
@@ -309,6 +311,7 @@ def cpu_tester( clk, programs ):
         obs_acc    = obs_acc,
         obs_cc     = obs_cc,
         obs_op     = obs_op,
+        instr_trace = instr_trace,
         sim_print  = True
     )
 
@@ -1513,6 +1516,8 @@ def test_45(program,expect,pc,dmem,irq):
 
 def test_46(program,expect,pc,dmem,irq):
     # --- test add produce carry and adc use carry in
+    # adc now lives at the fifth opcode level (moved out of the third level
+    # to make room for lsl/lsr Rx): f8 82 0R
     n_pc = 0
     p, n_pc = load_a_rx( a_val=0xfffffff0, rx=3, rx_val=15, pc=n_pc )
     program.update( p )
@@ -1521,10 +1526,42 @@ def test_46(program,expect,pc,dmem,irq):
     program[ n_pc+1 ] = 0xb3 # A = A + R3 -> A = 0x0000000e, C=1
     expect[ n_pc+3 ] = { 'A': 0x0000000e, 'cc': 0x40 }
     program[ n_pc+2 ] = 0xf8 # c,A = A + R3 + c -> A = 0xe + 0xf + 1
-    program[ n_pc+3 ] = 0x03
-    expect[ n_pc+5 ] = { 'A': 30, 'cc': 0x00 }
-    program[ n_pc+4  ] = 0xff # NOP
+    program[ n_pc+3 ] = 0x82 # -> fourth opcode is OPCI3_NEXT -> fifth level
+    program[ n_pc+4 ] = 0x03 # OPCI4_ADC, Rx=R3
+    expect[ n_pc+6 ] = { 'A': 30, 'cc': 0x00 }
     program[ n_pc+5  ] = 0xff # NOP
+    program[ n_pc+6  ] = 0xff # NOP
+
+def test_47(program,expect,pc,dmem,irq):
+    # --- test new third-level lsl/lsr Rx: iterative shift, 1 cycle per bit,
+    #     shift count taken from the selected register. Encoding: f8 [0|1]R
+    n_pc = 0
+    p, n_pc = load_a_rx( a_val=0x00000001, rx=3, rx_val=4, pc=n_pc )
+    program.update( p )
+
+    program[ n_pc   ] = 0xf8 # lsl R3 -> A = 1 << 4 = 0x10 (4 shift cycles)
+    program[ n_pc+1 ] = 0x03 # op2=OPCI2_LSL, r_field2=R3
+    expect[ n_pc+3 ] = { 'A': 0x00000010 }
+    n_pc = n_pc + 2
+
+    p, n_pc = load_rx( rx=2, rx_val=3, pc=n_pc )
+    program.update( p )
+
+    program[ n_pc   ] = 0xf8 # lsr R2 -> A = 0x10 >> 3 = 0x02 (3 shift cycles)
+    program[ n_pc+1 ] = 0x12 # op2=OPCI2_LSR, r_field2=R2
+    expect[ n_pc+3 ] = { 'A': 0x00000002 }
+    n_pc = n_pc + 2
+
+    p, n_pc = load_rx( rx=4, rx_val=0, pc=n_pc )
+    program.update( p )
+
+    program[ n_pc   ] = 0xf8 # lsl R4 -> shift count 0, A unchanged
+    program[ n_pc+1 ] = 0x04 # op2=OPCI2_LSL, r_field2=R4
+    expect[ n_pc+3 ] = { 'A': 0x00000002 }
+    n_pc = n_pc + 2
+
+    program[ n_pc   ] = 0xff # NOP
+    program[ n_pc+1 ] = 0xff # NOP
 
 
 def tb2():
@@ -1534,7 +1571,7 @@ def tb2():
     progs = []
 
     if run_all:
-        tests = list(range(1,46+1))
+        tests = list(range(1,47+1))
     else:
         tests = [run_test_nr]
 

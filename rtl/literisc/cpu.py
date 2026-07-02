@@ -70,8 +70,8 @@ OPCI_NOP     = 15 # NOP
 # byte 1: [ f f f f  i i i i ], ffff=OPC_NEXT iiii=OPCI_NEXT
 # byte 2: [ o o o o  r r r r ]
 # oooo = OPCI2_*
-OPCI2_ADC        = 0  # c,A = A + Rx + c
-OPCI2_UNUSED1    = 1
+OPCI2_LSL        = 0  # lsl Rx, iterative: c=A, A = A << 1, repeated Rx times (1 cycle/bit)
+OPCI2_LSR        = 1  # lsr Rx, iterative: c=A, A = A >> 1, repeated Rx times (1 cycle/bit)
 OPCI2_LDB_A_OFFS = 2  # Rx = M[A+nn].b
 OPCI2_LDB_A      = 3  # Rx = M[A].b
 OPCI2_LDB_RX     = 4  # A = M[Rx].b
@@ -92,6 +92,13 @@ OPCI2_STW_RX     = 15 # M[Rx].w = A
 # byte 2: [ g g g g  o o o o ], gggg=OPCI2_NEXT, oooo = OPCI3_*
 OPCI3_EI         = 0
 OPCI3_DI         = 1
+OPCI3_NEXT       = 2  # -> additional byte holds a fourth opcode + register field
+
+# op code inner 4
+# byte 1: [ f f f f  i i i i ], ffff=OPC_NEXT iiii=OPCI_NEXT
+# byte 2: [ g g g g  h h h h ], gggg=OPCI2_NEXT, hhhh=OPCI3_NEXT
+# byte 3: [ o o o o  r r r r ], oooo = OPCI4_*
+OPCI4_ADC        = 0  # c,A = A + Rx + c
 
 INTR_START = 6 # reset starts at 0, allows jump past interrupt handler
 
@@ -104,6 +111,8 @@ ST_READ_PART2 = 4
 ST_REG_CNT = 5
 ST_INTERRUPT = 6
 ST_RETI = 7
+ST_SHIFT = 8       # iterative lsl/lsr, one bit shifted per cycle
+ST_READ_PART3 = 9  # fetch third instruction byte (fifth opcode level)
 
 # ALU operations
 ALU_PASS_X = 0
@@ -259,13 +268,17 @@ def cpu( clk, clk_en, sync_rstn,
     ir = Signal(modbv(0)[8:])
     n_ir2 = Signal(modbv(0)[8:])
     ir2 = Signal(modbv(0)[8:])
+    n_ir3 = Signal(modbv(0)[8:])
+    ir3 = Signal(modbv(0)[8:])
     imm = Signal(modbv(0)[32:])
     imm_next = Signal(modbv(0)[32:])
     op = Signal(modbv(0)[4:])
     op2 = Signal(modbv(0)[4:])
+    op3 = Signal(modbv(0)[4:])
     rx = Signal(modbv(0)[32:])
     r_field  = Signal(modbv(0)[4:])
     r_field2  = Signal(modbv(0)[4:])
+    r_field3  = Signal(modbv(0)[4:])
     rx_idx  = Signal(modbv(0)[4:])
     state = Signal(modbv(0)[4:])
     next_state = Signal(modbv(0)[4:])
@@ -276,8 +289,12 @@ def cpu( clk, clk_en, sync_rstn,
     load_ir = Signal(modbv(0)[1:])
     n_load_ir2 = Signal(modbv(0)[1:])
     load_ir2 = Signal(modbv(0)[1:])
+    n_load_ir3 = Signal(modbv(0)[1:])
+    load_ir3 = Signal(modbv(0)[1:])
     n_op2_valid = Signal(modbv(0)[1:])
     op2_valid = Signal(modbv(0)[1:])
+    n_shift_cnt = Signal(modbv(0)[32:])
+    shift_cnt = Signal(modbv(0)[32:])
     inc_pc = Signal(modbv(0)[1:])
     inc_sp = Signal(modbv(0)[1:])
     dec_sp = Signal(modbv(0)[1:])
@@ -329,6 +346,7 @@ def cpu( clk, clk_en, sync_rstn,
     n_sp = Signal(modbv(0)[32:])
     sel_srp = Signal(modbv(0)[1:])
     rx_field2 = Signal(modbv(0)[1:])
+    rx_field3 = Signal(modbv(0)[1:])
     intr_push = Signal(modbv(0)[1:])
     n_load_cc = Signal(modbv(0)[1:])
     load_cc = Signal(modbv(0)[1:])
@@ -363,9 +381,12 @@ def cpu( clk, clk_en, sync_rstn,
     ist   = flop( next_state,         state,            clk_en, clk, sync_rstn, reset_value=ST_RESET )
     iir   = flop( n_ir,               ir,               clk_en, clk, sync_rstn  )
     iir2  = flop( n_ir2,              ir2,              clk_en, clk, sync_rstn  )
+    iir3  = flop( n_ir3,              ir3,              clk_en, clk, sync_rstn  )
     irc   = flop( n_load_ir,          load_ir,          clk_en, clk, sync_rstn  )
     irc2  = flop( n_load_ir2,         load_ir2,         clk_en, clk, sync_rstn  )
+    irc3  = flop( n_load_ir3,         load_ir3,         clk_en, clk, sync_rstn  )
     iop2  = flop( n_op2_valid,        op2_valid,        clk_en, clk, sync_rstn  )
+    ishc  = flop( n_shift_cnt,        shift_cnt,        clk_en, clk, sync_rstn  )
     idf   = flop( n_reg_wr_deferred,  reg_wr_deferred,  clk_en, clk, sync_rstn  )
     ida   = flop( n_acc_wr_deferred,  acc_wr_deferred,  clk_en, clk, sync_rstn  )
     idpc  = flop( n_deferred_load_pc, deferred_load_pc, clk_en, clk, sync_rstn  )
@@ -409,6 +430,7 @@ def cpu( clk, clk_en, sync_rstn,
         n_load_ir.next = 0
         n_load_imm.next = 0
         n_load_ir2.next = 0
+        n_load_ir3.next = 0
         n_op2_valid.next = 0
         next_state.next = ST_NEXT_INSTR
         sel_imem.next = 0
@@ -490,12 +512,12 @@ def cpu( clk, clk_en, sync_rstn,
                     n_load_ir.next = 0
                     inc_pc.next = 0
                     load_reg_cnt.next = 1
-                    next_state.next = ST_REG_CNT 
+                    next_state.next = ST_REG_CNT
                 elif op == OPC_NEXT and r_field == OPCI_PUSH_R:
                     n_load_ir.next = 0
                     inc_pc.next = 0
                     clear_reg_cnt.next = 1
-                    next_state.next = ST_REG_CNT 
+                    next_state.next = ST_REG_CNT
                 elif op == OPC_NEXT and r_field == OPCI_NEXT:
                     if op2 == OPCI2_LDB_A_OFFS or op2 == OPCI2_LDW_A_OFFS :
                         n_load_ir.next = 0
@@ -511,12 +533,48 @@ def cpu( clk, clk_en, sync_rstn,
                         sel_imem.next = PC
                         n_op2_valid.next = 1
                         next_state.next = ST_READ_IMM
+                    elif op2 == OPCI2_LSL or op2 == OPCI2_LSR:
+                        n_load_ir.next = 0
+                        n_load_imm.next = 0
+                        n_op2_valid.next = 1
+                        if rx == 0:
+                            n_load_ir.next = 1
+                            inc_pc.next = 1
+                            sel_imem.next = PC
+                            goto_next_instr[:] = 1
+                        else:
+                            inc_pc.next = 0
+                            next_state.next = ST_SHIFT
+                    elif op2 == OPCI2_NEXT and r_field2 == OPCI3_NEXT:
+                        n_load_ir.next = 0
+                        n_load_ir3.next = 1
+                        inc_pc.next = 1
+                        sel_imem.next = PC
+                        n_op2_valid.next = 1
+                        next_state.next = ST_READ_PART3
                     else:
                         n_load_ir.next = 1
                         n_load_imm.next = 0
                         inc_pc.next = 1
                         sel_imem.next = PC
                         goto_next_instr[:] = 1
+            elif state == ST_SHIFT:
+                n_load_ir.next = 0
+                inc_pc.next = 0
+                n_op2_valid.next = 1
+                if n_shift_cnt == 0:
+                    n_load_ir.next = 1
+                    inc_pc.next = 1
+                    sel_imem.next = PC
+                    goto_next_instr[:] = 1
+                else:
+                    next_state.next = ST_SHIFT
+            elif state == ST_READ_PART3:
+                n_load_ir.next = 1
+                n_load_imm.next = 0
+                inc_pc.next = 1
+                sel_imem.next = PC
+                goto_next_instr[:] = 1
             elif state == ST_READ_PART2:
                 if op == OPC_NEXT and r_field == OPCI_POP_R:
                     n_load_ir.next = 0
@@ -647,6 +705,7 @@ def cpu( clk, clk_en, sync_rstn,
         inc_reg_cnt.next = 0
         sel_reg_cnt.next = 0
         rx_field2.next = 0
+        rx_field3.next = 0
         n_load_cc.next = 0
         load_reti_reg_cnt.next = 0
         n_acc_ld_maskb.next = 0
@@ -1063,17 +1122,31 @@ def cpu( clk, clk_en, sync_rstn,
                     wr_acc.next = 1
                     alu_y_pc.next = 0 # acc
                     reg_wr_alu.next = 1
-                elif op2 == OPCI2_ADC:
-                    alu_oper.next = ALU_ADC
-                    alu_x_imm.next = 0
-                    wr_acc.next = 1
-                    alu_y_pc.next = 0 # acc
-                    reg_wr_alu.next = 1
+                elif op2 == OPCI2_LSL: # lsl Rx, iterative, 1 bit shifted per cycle
+                    if state == ST_SHIFT:
+                        alu_oper.next = ALU_LSL
+                        wr_acc.next = 1
+                        alu_y_pc.next = 0 # acc
+                        reg_wr_alu.next = 1
+                elif op2 == OPCI2_LSR: # lsr Rx, iterative, 1 bit shifted per cycle
+                    if state == ST_SHIFT:
+                        alu_oper.next = ALU_LSR
+                        wr_acc.next = 1
+                        alu_y_pc.next = 0 # acc
+                        reg_wr_alu.next = 1
                 elif op2 == OPCI2_NEXT:
                     if r_field2 == OPCI3_EI: # enable interrupt
                         set_i.next = 1;
                     elif r_field2 == OPCI3_DI: # enable interrupt
                         clr_i.next = 1;
+                    elif r_field2 == OPCI3_NEXT:
+                        if state == ST_READ_PART3 and op3 == OPCI4_ADC:
+                            rx_field3.next = 1
+                            alu_oper.next = ALU_ADC
+                            alu_x_imm.next = 0
+                            wr_acc.next = 1
+                            alu_y_pc.next = 0 # acc
+                            reg_wr_alu.next = 1
 
     if sim_print:
         @always(clk.negedge)
@@ -1172,12 +1245,19 @@ def cpu( clk, clk_en, sync_rstn,
         else:
             n_ir2.next = ir2
 
+        if load_ir3 == 1:
+            n_ir3.next = imem_dout[8:]
+        else:
+            n_ir3.next = ir3
+
     @always_comb
     def rxidx():
         if sel_reg_cnt == 1:
             rx_idx.next = n_reg_cnt
         elif sel_srp == 1:
             rx_idx.next = SRP
+        elif rx_field3 == 1:
+            rx_idx.next = r_field3
         elif op2_valid == 1 and rx_field2 == 1:
             rx_idx.next = r_field2
         else:
@@ -1252,6 +1332,15 @@ def cpu( clk, clk_en, sync_rstn,
             n_reg_cnt.next = reg_cnt + 1
         else:
             n_reg_cnt.next = reg_cnt - 1
+
+    @always_comb
+    def shiftcnt():
+        if state == ST_READ_PART2 and op2_valid == 1 and (op2 == OPCI2_LSL or op2 == OPCI2_LSR):
+            n_shift_cnt.next = rx
+        elif state == ST_SHIFT:
+            n_shift_cnt.next = shift_cnt - 1
+        else:
+            n_shift_cnt.next = shift_cnt
 
 
     @always_comb
@@ -1510,35 +1599,13 @@ def cpu( clk, clk_en, sync_rstn,
             n_instr_len.next = instr_len
 
     if enable_obs:
-        #@always_comb
-        #def obsreg():
-        #    for i in range(16):
-        #        obs_regs[i].next = reg_bank[i]
-        #    obs_acc.next = acc
-        #    obs_cc.next = cc
+        @always_comb
+        def obsreg():
+            for i in range(16):
+                obs_regs[i].next = reg_bank[i]
+            obs_acc.next = acc
+            obs_cc.next = cc
 
-        #@always(clk.posedge)
-        #def obsff():
-        #    if clk_en == 1:
-        #        instr_trace.next = 0
-        #        emit = modbv(0)[1:]
-        #        if state == ST_NEXT_INSTR:
-        #            if not (op == OPC_NEXT and r_field == OPCI_NEXT):
-        #                emit[:] = 1
-        #        #elif state == ST_READ_PART2:
-        #        #    emit[:] = 1
-
-        #        if emit == 1:
-        #            instr_trace.next = concat(
-        #                modbv(1)[1:],   # valid
-        #                pc[16:],        # pc at start of instruction
-        #                raw_bytes[5],   # oldest byte = byte 0 of instruction
-        #                raw_bytes[4],
-        #                raw_bytes[3],
-        #                raw_bytes[2],
-        #                raw_bytes[1],
-        #                raw_bytes[0],   # newest byte
-        #            )
         @always(clk.posedge)
         def obsff():
             if clk_en == 1:
@@ -1586,6 +1653,8 @@ def cpu( clk, clk_en, sync_rstn,
         r_field.next = curr_ir[4:]
         op2.next = n_ir2[8:] >> 4
         r_field2.next = n_ir2[4:]
+        op3.next = n_ir3[8:] >> 4
+        r_field3.next = n_ir3[4:]
 
     if sim_print:
         @always(clk.negedge)

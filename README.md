@@ -241,8 +241,8 @@ field that determines which registers to pop
      third
    | opcode |  instruction operation
    +--------+----------------------------
-   |    0   | adc,               c,A = A + Rx + c
-   |    1   | unused
+   |    0   | lsl Rx,            iterative: c=A, A = A << 1, repeated Rx times (1 cycle/bit)
+   |    1   | lsr Rx,            iterative: c=A, A = A >> 1, repeated Rx times (1 cycle/bit)
    |    2   | Rx = M[A+nn].b
    |    3   | Rx = M[A].b
    |    4   | A = M[Rx].b
@@ -259,6 +259,9 @@ field that determines which registers to pop
    |   15   | M[Rx].w = A
    +--------+----------------------------
 ```
+`lsl Rx`/`lsr Rx` shift A by the count held in Rx. The shift is done one bit
+per clock cycle, so the instruction takes Rx cycles to complete (0 cycles,
+i.e. a no-op on A, when Rx is 0).
 
 ### Fourth level instructions
 ```
@@ -272,8 +275,25 @@ field that determines which registers to pop
    +--------+----------------------------
    |  0     | ei
    |  1     | di
-   |  2-15  | unused
+   |  2     | fifth level opcodes
+   |  3-15  | unused
 
+```
+
+### Fifth level instructions
+```
+            7     4  3     0
+   byte 0 [ 1 1 1 1  1 0 0 0 ]
+   byte 1 [ 1 0 0 0  0 0 1 0 ]  fourth opcode = 2
+   byte 2 [ o o o o  r r r r ]  fifth opcode, register field
+```
+```
+     fifth
+   | opcode |  instruction operation
+   +--------+----------------------------
+   |    0   | adc,               c,A = A + Rx + c
+   |  1-15  | unused
+   +--------+----------------------------
 ```
  
 ### Variable size immediate data
@@ -473,8 +493,8 @@ Instructions can have variable sized immediate data as well.
    [ 15 | 5  ]   [  0 | Rx ]  pop R0..Rn,  for (r=Rn..R0) { r = M[sp].l; sp = sp + 4; }
    [ 15 | 6  ]   -----------  push srp,  sp = sp - 4, M[sp].l = srp
    [ 15 | 7  ]   -----------  pop-a,     a = M[sp].l, sp = sp + 4
-   [ 15 | 8  ]   [  0 | Rx ]  adc,               c,A = A + Rx + c
-   [ 15 | 8  ]   [  1 | Rx ]  unused
+   [ 15 | 8  ]   [  0 | Rx ]  lsl Rx,            iterative: c=A, A = A << 1, repeated Rx times (1 cycle/bit)
+   [ 15 | 8  ]   [  1 | Rx ]  lsr Rx,            iterative: c=A, A = A >> 1, repeated Rx times (1 cycle/bit)
    [ 15 | 8  ]   [  2 | Rx ]  Rx = M[A+nn].b
    [ 15 | 8  ]   [  3 | Rx ]  Rx = M[A].b
    [ 15 | 8  ]   [  4 | Rx ]  A = M[Rx].b
@@ -483,7 +503,9 @@ Instructions can have variable sized immediate data as well.
    [ 15 | 8  ]   [  7 | Rx ]  M[Rx].b = A
    [ 15 | 8  ]   [  8 | 0  ]  ei
    [ 15 | 8  ]   [  8 | 1  ]  di
-   [ 15 | 8  ]   [  8 | 2-15 ]  unused
+   [ 15 | 8  ]   [  8 | 2  ]   [  0 | Rx ]  adc,               c,A = A + Rx + c
+   [ 15 | 8  ]   [  8 | 2  ]   [ 1-15 | Rx ]  unused
+   [ 15 | 8  ]   [  8 | 3-15 ]  unused
    [ 15 | 8  ]   [  9 | Rx ]  A = A xor Rx
    [ 15 | 8  ]   [ 10 | Rx ]  Rx = M[A+nn].w
    [ 15 | 8  ]   [ 11 | Rx ]  Rx = M[A].w
