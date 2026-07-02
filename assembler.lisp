@@ -75,12 +75,16 @@
            :st.w-r->a
            :ld.w-a-rel->r
            :st.w-r->a-rel
-           :not-a   
-           :lsl-a    
+           :not-a
+           :lsl-a
            :A=A<<1
-           :lsr-a    
+           :lsr-a
            :A=A>>1
-           :asr-a    
+           :asr-a
+           :lsl-r
+           :A=A<<Rx
+           :lsr-r
+           :A=A>>Rx
            :pop-a    
            :mask-a-b 
            :mask-a-w 
@@ -240,6 +244,13 @@
   (list (opc OPC_NEXT :field OPCI_NEXT)
         (opc opcode :field (logior reg field))))
 
+;;; fifth level opcodes, reached via third-level OPCI2_NEXT and
+;;; fourth-level OPCI3_NEXT
+(defun opci3 ( opcode &key (reg 0) (field 0) )
+  (list (opc OPC_NEXT :field OPCI_NEXT)
+        (opc OPCI2_NEXT :field OPCI3_NEXT)
+        (opc opcode :field (logior reg field))))
+
 
 ;;; -------------- assembler instructions -----------------
 (defun mvi->r (imm r)
@@ -321,8 +332,18 @@
 
 ;; c,A = A + Rx + c (add with carry)
 (defun adc (r)
-  (opci2 OPCI2_ADC :reg r))
+  (opci3 OPCI4_ADC :reg r))
 (setf (symbol-function 'A+=Rx+c) #'adc)
+
+;; iterative shift: c=A, A = A << 1, repeated Rx times (1 cycle/bit)
+(defun lsl-r (r)
+  (opci2 OPCI2_LSL :reg r))
+(setf (symbol-function 'A=A<<Rx) #'lsl-r)
+
+;; iterative shift: c=A, A = A >> 1, repeated Rx times (1 cycle/bit)
+(defun lsr-r (r)
+  (opci2 OPCI2_LSR :reg r))
+(setf (symbol-function 'A=A>>Rx) #'lsr-r)
 
 ;;; ----- load / store bytes
 (defun ld.b-a->r (r)
@@ -866,6 +887,12 @@
     (check (equal hello-world mcode))))
 ; (run-prog hello-world (string-to-mem "Hello World!") 200 t)
 
+(deftest test-adc-shift-rx-asm ()
+  (check
+    (equal (adc 3) '(#xf8 #x82 #x03))
+    (equal (lsl-r 3) '(#xf8 #x03))
+    (equal (lsr-r 2) '(#xf8 #x12))))
+
 (deftest test-asm ()
   (combine-results
     (test-fw-jump)
@@ -873,5 +900,6 @@
     (test-jsr)
     (test-misc-asm)
     (test-long-jmp)
-    (test-hello-world-asm)))
+    (test-hello-world-asm)
+    (test-adc-shift-rx-asm)))
   

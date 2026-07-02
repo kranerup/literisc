@@ -134,7 +134,11 @@
                   (let* ((byte1 (cadr bytes))
                          (opcode2 (ash byte1 -4))
                          (param2 (logand byte1 15)))
-                      (cond ((equal opcode2 OPCI2_LDB_A_OFFS)
+                      (cond ((equal opcode2 OPCI2_LSL)
+                             (list (format nil "A = A << R~a" param2) 2))
+                            ((equal opcode2 OPCI2_LSR)
+                             (list (format nil "A = A >> R~a" param2) 2))
+                            ((equal opcode2 OPCI2_LDB_A_OFFS)
                              (destructuring-bind (val nr-bytes) (disasm-immediate (cddr bytes) nil )
                                (list (format nil "R~a = M[A+~a].b" param2 val) nr-bytes)))
                             ((equal opcode2 OPCI2_LDB_A)
@@ -150,8 +154,6 @@
                              (list (format nil "M[R~a].b = A" param2) 2))
                             ((equal opcode2 OPCI2_XOR)
                              (list (format nil "A = A ^ R~a" param2) 2))
-                            ((equal opcode2 OPCI2_ADC)
-                             (list (format nil "A = A + R~a + c" param2) 2))
                             ((equal opcode2 OPCI2_LDW_A_OFFS)
                              (destructuring-bind (val nr-bytes) (disasm-immediate (cddr bytes) nil )
                                (list (format nil "R~a = M[A+~a].w" param2 val) nr-bytes)))
@@ -171,7 +173,15 @@
                                     (list (format nil "ei") 2))
                                    ((equal param2 OPCI3_DI)
                                     (list (format nil "di") 2))
-                                   (t 
+                                   ((equal param2 OPCI3_NEXT)
+                                    (let* ((byte2 (caddr bytes))
+                                           (opcode3 (ash byte2 -4))
+                                           (param3 (logand byte2 15)))
+                                      (cond ((equal opcode3 OPCI4_ADC)
+                                             (list (format nil "A = A + R~a + c" param3) 3))
+                                            (t
+                                             (list (format nil "undefined") 3)))))
+                                   (t
                                     (list (format nil "undefined") 2)))))))
                  ((equal param OPCI_RETI)
                   (list (format nil "reti") 1))
@@ -271,8 +281,15 @@
 )
     (check (equal exp-str disasm-res))))
 
+(deftest test-adc-shift-rx-disasm ()
+  (check
+    (equal (disassemble-instr '(#xf8 #x03)) (list "A = A << R3" 2))
+    (equal (disassemble-instr '(#xf8 #x12)) (list "A = A >> R2" 2))
+    (equal (disassemble-instr '(#xf8 #x82 #x03)) (list "A = A + R3 + c" 3))))
+
 (deftest test-disasm ()
   (combine-results
+    (test-adc-shift-rx-disasm)
     (test-mcode)
     (test-len)))
 

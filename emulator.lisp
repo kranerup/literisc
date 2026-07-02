@@ -662,6 +662,18 @@
   (setf (processor-state-a ps)
         (ash (processor-state-a ps) -1)))
 
+;; lsl Rx, iterative: c=A, A = A << 1, repeated Rx times (1 cycle/bit)
+(defun i-lsl-rx (ps rx)
+  (dotimes (i (aref (processor-state-r ps) rx))
+    (i-lsl ps))
+  (if (processor-state-debug ps) (format t "A = A << R~a~%" rx)))
+
+;; lsr Rx, iterative: c=A, A = A >> 1, repeated Rx times (1 cycle/bit)
+(defun i-lsr-rx (ps rx)
+  (dotimes (i (aref (processor-state-r ps) rx))
+    (i-lsr ps))
+  (if (processor-state-debug ps) (format t "A = A >> R~a~%" rx)))
+
 ; A = A >> 1 arithmetic
 (defun i-asr (ps)
   (let* ((a (processor-state-a ps))
@@ -1310,7 +1322,11 @@
                    ((equal param OPCI_NEXT)
                     (destructuring-bind (opcode2 param2)
                       (get-next-opcode p imem)
-                      (cond ((equal opcode2 OPCI2_LDB_A_OFFS)
+                      (cond ((equal opcode2 OPCI2_LSL)
+                             (i-lsl-rx p param2))
+                            ((equal opcode2 OPCI2_LSR)
+                             (i-lsr-rx p param2))
+                            ((equal opcode2 OPCI2_LDB_A_OFFS)
                              (i-ld-b-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 OPCI2_LDB_A)
                              (i-ld-b-a-rx p param2 dmem))
@@ -1324,8 +1340,6 @@
                              (i-st-b-rx-a p param2 dmem))
                             ((equal opcode2 OPCI2_XOR)
                              (i-xor p param2))
-                            ((equal opcode2 OPCI2_ADC)
-                             (i-adc p param2))
                             ((equal opcode2 OPCI2_LDW_A_OFFS )
                              (i-ld-w-a-rx-imm p param2 (get-immediate p imem nil) dmem))
                             ((equal opcode2 OPCI2_LDW_A)
@@ -1338,6 +1352,12 @@
                              (i-st-w-a-rx p param2 dmem))
                             ((equal opcode2 OPCI2_STW_RX)
                              (i-st-w-rx-a p param2 dmem))
+                            ((equal opcode2 OPCI2_NEXT)
+                             (cond ((equal param2 OPCI3_NEXT)
+                                    (destructuring-bind (opcode3 param3)
+                                      (get-next-opcode p imem)
+                                      (cond ((equal opcode3 OPCI4_ADC)
+                                             (i-adc p param3)))))))
                             )))
                    ((equal param OPCI_MASKB)
                     (i-maskb p))
@@ -2256,6 +2276,63 @@
         (i-asr p)
         (check-state p expected)))))
 
+(deftest test-shift-rx ()
+  "Test iterative lsl/lsr Rx instructions"
+  (let* ((p (make-processor))
+         (expected (init-reg-state p)))
+    (check
+      (progn
+        ;--- lsl R3: A = 1 << 4, shift count taken from R3
+        (setf (processor-state-a p) 1)
+        (setf (aref (processor-state-r p) 3) 4)
+        (set-expected-a expected 16)
+        (set-expected-r expected 3 4)
+        (i-lsl-rx p 3)
+        (check-state p expected))
+      (progn
+        ;--- lsr R2: A = 16 >> 3
+        (setf (aref (processor-state-r p) 2) 3)
+        (set-expected-a expected 2)
+        (set-expected-r expected 2 3)
+        (i-lsr-rx p 2)
+        (check-state p expected))
+      (progn
+        ;--- lsl R4 with shift count 0: A unchanged
+        (setf (aref (processor-state-r p) 4) 0)
+        (set-expected-r expected 4 0)
+        (i-lsl-rx p 4)
+        (check-state p expected)))))
+
+(deftest test-decode-shift-rx-adc ()
+  "Test full decode path (execute-instruction) for the new lsl/lsr Rx and
+   relocated adc opcodes"
+  (let* ((p (make-processor))
+         (imem (make-imem 20))
+         (dmem (make-dmem 20))
+         (prog (assemble
+                 '((A=A<<Rx 3)
+                   (A=A>>Rx 2)
+                   (A+=Rx+c 5)))))
+    (set-program imem prog)
+    (check
+      (progn
+        ;--- lsl R3: A = 1 << 4
+        (setf (processor-state-a p) 1)
+        (setf (aref (processor-state-r p) 3) 4)
+        (execute-instruction p imem dmem)
+        (equal (processor-state-a p) 16))
+      (progn
+        ;--- lsr R2: A = 16 >> 3
+        (setf (aref (processor-state-r p) 2) 3)
+        (execute-instruction p imem dmem)
+        (equal (processor-state-a p) 2))
+      (progn
+        ;--- adc R5: c,A = A + R5 + c
+        (setf (aref (processor-state-r p) 5) 40)
+        (setf (processor-state-c p) 1)
+        (execute-instruction p imem dmem)
+        (equal (processor-state-a p) 43)))))
+
 (deftest test-mask-sex ()
   (let* ((p (make-processor))
          (expected (init-reg-state p)))
@@ -3017,6 +3094,8 @@
     (test-adc)
     (test-and-or )
     (test-shifts )
+    (test-shift-rx )
+    (test-decode-shift-rx-adc )
     (test-mask-sex )
     (test-j )
     (test-jz )

@@ -1750,24 +1750,12 @@
       (collect node))
     result))
 
-(defun shift-emits-runtime-call (count-node)
-  "True if a << / >> with COUNT-NODE will emit a jsr to the __SHL/__SHR runtime.
-   Only happens under -Os, and only for variable counts or constant counts in
-   [*shift-inline-threshold*, 32). Small/zero/>=32 constants are handled inline."
-  (and (compiler-state-optimize-size *state*)
-       (if (and (ast-node-p count-node)
-                (eq (ast-node-type count-node) 'literal)
-                (integerp (ast-node-value count-node)))
-           (let ((c (ast-node-value count-node)))
-             (and (>= c *shift-inline-threshold*) (< c 32)))
-           ;; Variable count - always a runtime call under -Os
-           t)))
-
 (defun contains-call (node struct-array-vars)
   "Check if AST node or children contain a function call.
    Also detects implicit runtime calls like __MUL/__DIV/__MOD for
-   multiply/divide/modulo operations and struct array access, and
-   __SHL/__SHR for large/variable shifts under -Os."
+   multiply/divide/modulo operations and struct array access.
+   Shifts never emit a call - they use the iterative A=A<<Rx/A=A>>Rx
+   hardware instruction directly."
   (when (and node (ast-node-p node))
     (or (eq (ast-node-type node) 'call)
         ;; Check for binary ops that call runtime functions (*, /, %)
@@ -1777,12 +1765,6 @@
         ;; Check for compound assignments that use runtime functions (*=, /=, %=)
         (and (eq (ast-node-type node) 'assign)
              (member (ast-node-value node) '("*=" "/=" "%=") :test #'string=))
-        ;; Check for shifts that emit a JSR __SHL/__SHR (large/variable, -Os only)
-        (and (or (and (eq (ast-node-type node) 'binary-op)
-                      (member (ast-node-value node) '("<<" ">>") :test #'string=))
-                 (and (eq (ast-node-type node) 'assign)
-                      (member (ast-node-value node) '("<<=" ">>=") :test #'string=)))
-             (shift-emits-runtime-call (second (ast-node-children node))))
         ;; Check for subscript of a known struct array
         (and (eq (ast-node-type node) 'subscript)
              (subscript-uses-struct-array node struct-array-vars))
@@ -4436,27 +4418,19 @@
 ;;; Max instruction count for const-mul optimization under -O (not -Os)
 (defparameter *const-mul-threshold* 64)
 
-(defun emit-shift-runtime-call (left-reg is-left)
-  "Emit a call to the shared __SHL/__SHR runtime subroutine.
-   The shift count must already be in A; the value to shift is in LEFT-REG.
-   Result is left in A. Used under -Os so multiple large/variable shifts
-   reuse a single subroutine instead of inlining a loop at each site."
+(defun emit-shift-by-reg (left-reg count-reg is-left)
+  "Emit the iterative shift-by-register instruction: A = left-reg << Rx / >> Rx,
+   where Rx = COUNT-REG. Shifts one bit per cycle in hardware but is a single
+   instruction, so no runtime subroutine or inline loop is needed."
+  (emit `(A=Rx ,left-reg))
   (if is-left
-      (setf (compiler-state-need-shl-runtime *state*) t)
-      (setf (compiler-state-need-shr-runtime *state*) t))
-  (emit '(Rx=A P1))              ; P1 = count (from A)
-  (emit `(A=Rx ,left-reg))       ; A = value
-  (emit '(Rx=A P0))              ; P0 = value
-  (if is-left
-      (emit '(jsr __SHL))        ; call shift-left runtime
-      (emit '(jsr __SHR)))       ; call shift-right runtime
-  (emit '(A=Rx P0)))             ; result in P0, move to A
+      (emit `(A=A<<Rx ,count-reg))
+      (emit `(A=A>>Rx ,count-reg))))
 
 (defun generate-shift-left (left-reg right-node)
   "Generate left shift: result = left-reg << right-node.
-   Optimizes constant shift counts: small counts are inline.
-   Large/variable counts call the shared __SHL runtime when optimizing
-   for size, and inline (unrolled / inline loop) otherwise."
+   Small constant counts are inlined as single-bit shifts. Large constant
+   or variable counts use the iterative A=A<<Rx hardware instruction."
   ;; Check if shift count is constant
   (if (and (ast-node-p right-node)
            (eq (ast-node-type right-node) 'literal)
@@ -4475,85 +4449,23 @@
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A<<1))))
-          ;; Large shift - shared runtime call if optimizing for size, inline otherwise
-          ((compiler-state-optimize-size *state*)
-           (emit-load-immediate-to-a count)  ; A = count (may exceed mvi-a range)
-           (emit-shift-runtime-call left-reg t))
+          ;; Large shift - use the iterative shift-by-register instruction
           (t
-           ;; Inline for speed
-           (emit `(A=Rx ,left-reg))
-           (dotimes (i count)
-             (emit '(A=A<<1))))))
+           (let ((count-reg (alloc-temp-reg)))
+             (emit `(Rx= ,count ,count-reg))
+             (emit-shift-by-reg left-reg count-reg t)
+             (free-temp-reg count-reg)))))
       ;; Variable shift count
-      (progn
+      (let ((count-reg (alloc-temp-reg)))
         (generate-expression right-node)   ; count in A
-        (if (compiler-state-optimize-size *state*)
-            ;; Shared runtime call avoids a loop copy per shift site
-            (emit-shift-runtime-call left-reg t)
-            ;; Inline loop for speed
-            (generate-shift-left-loop-variable left-reg)))))
-
-(defun generate-shift-left-loop (left-reg count)
-  "Generate left shift loop for constant count"
-  (let ((loop-label (gen-label "SHLLOOP"))
-        (end-label (gen-label "SHLEND"))
-        (temp-val (alloc-temp-reg))
-        (temp-count (alloc-temp-reg))
-        (temp-const (alloc-temp-reg)))
-    (emit `(Rx= ,count ,temp-count))       ; temp-count = count
-    (emit `(A=Rx ,left-reg))               ; A = value
-    (emit-label loop-label)
-    (emit `(Rx=A ,temp-val))               ; save value
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= 0 ,temp-const))
-    (emit `(A-=Rx ,temp-const))
-    (emit `(jz ,end-label))
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= -1 ,temp-const))
-    (emit `(A+=Rx ,temp-const))
-    (emit `(Rx=A ,temp-count))
-    (emit `(A=Rx ,temp-val))
-    (emit '(A=A<<1))
-    (emit `(j ,loop-label))
-    (emit-label end-label)
-    (emit `(A=Rx ,temp-val))
-    (free-temp-reg temp-const)
-    (free-temp-reg temp-count)
-    (free-temp-reg temp-val)))
-
-(defun generate-shift-left-loop-variable (left-reg)
-  "Generate left shift loop for variable count (count already in A)"
-  (let ((loop-label (gen-label "SHLLOOP"))
-        (end-label (gen-label "SHLEND"))
-        (temp-val (alloc-temp-reg))
-        (temp-count (alloc-temp-reg))
-        (temp-const (alloc-temp-reg)))
-    (emit `(Rx=A ,temp-count))             ; temp-count = count
-    (emit `(A=Rx ,left-reg))               ; A = value
-    (emit-label loop-label)
-    (emit `(Rx=A ,temp-val))               ; save value
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= 0 ,temp-const))
-    (emit `(A-=Rx ,temp-const))
-    (emit `(jz ,end-label))
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= -1 ,temp-const))
-    (emit `(A+=Rx ,temp-const))
-    (emit `(Rx=A ,temp-count))
-    (emit `(A=Rx ,temp-val))
-    (emit '(A=A<<1))
-    (emit `(j ,loop-label))
-    (emit-label end-label)
-    (emit `(A=Rx ,temp-val))
-    (free-temp-reg temp-const)
-    (free-temp-reg temp-count)
-    (free-temp-reg temp-val)))
+        (emit `(Rx=A ,count-reg))
+        (emit-shift-by-reg left-reg count-reg t)
+        (free-temp-reg count-reg))))
 
 (defun generate-shift-right (left-reg right-node)
   "Generate right shift: result = left-reg >> right-node.
-   Optimizes constant shift counts: small counts are inline.
-   Large/variable counts call the shared __SHR runtime when optimizing
-   for size, and inline (unrolled / inline loop) otherwise."
+   Small constant counts are inlined as single-bit shifts. Large constant
+   or variable counts use the iterative A=A>>Rx hardware instruction."
   ;; Check if shift count is constant
   (if (and (ast-node-p right-node)
            (eq (ast-node-type right-node) 'literal)
@@ -4572,79 +4484,18 @@
            (emit `(A=Rx ,left-reg))
            (dotimes (i count)
              (emit '(A=A>>1))))
-          ;; Large shift - shared runtime call if optimizing for size, inline otherwise
-          ((compiler-state-optimize-size *state*)
-           (emit-load-immediate-to-a count)  ; A = count (may exceed mvi-a range)
-           (emit-shift-runtime-call left-reg nil))
+          ;; Large shift - use the iterative shift-by-register instruction
           (t
-           ;; Inline for speed
-           (emit `(A=Rx ,left-reg))
-           (dotimes (i count)
-             (emit '(A=A>>1))))))
+           (let ((count-reg (alloc-temp-reg)))
+             (emit `(Rx= ,count ,count-reg))
+             (emit-shift-by-reg left-reg count-reg nil)
+             (free-temp-reg count-reg)))))
       ;; Variable shift count
-      (progn
+      (let ((count-reg (alloc-temp-reg)))
         (generate-expression right-node)   ; count in A
-        (if (compiler-state-optimize-size *state*)
-            ;; Shared runtime call avoids a loop copy per shift site
-            (emit-shift-runtime-call left-reg nil)
-            ;; Inline loop for speed
-            (generate-shift-right-loop-variable left-reg)))))
-
-(defun generate-shift-right-loop (left-reg count)
-  "Generate right shift loop for constant count"
-  (let ((loop-label (gen-label "SHRLOOP"))
-        (end-label (gen-label "SHREND"))
-        (temp-val (alloc-temp-reg))
-        (temp-count (alloc-temp-reg))
-        (temp-const (alloc-temp-reg)))
-    (emit `(Rx= ,count ,temp-count))       ; temp-count = count
-    (emit `(A=Rx ,left-reg))               ; A = value
-    (emit-label loop-label)
-    (emit `(Rx=A ,temp-val))               ; save value
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= 0 ,temp-const))
-    (emit `(A-=Rx ,temp-const))
-    (emit `(jz ,end-label))
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= -1 ,temp-const))
-    (emit `(A+=Rx ,temp-const))
-    (emit `(Rx=A ,temp-count))
-    (emit `(A=Rx ,temp-val))
-    (emit '(A=A>>1))
-    (emit `(j ,loop-label))
-    (emit-label end-label)
-    (emit `(A=Rx ,temp-val))
-    (free-temp-reg temp-const)
-    (free-temp-reg temp-count)
-    (free-temp-reg temp-val)))
-
-(defun generate-shift-right-loop-variable (left-reg)
-  "Generate right shift loop for variable count (count already in A)"
-  (let ((loop-label (gen-label "SHRLOOP"))
-        (end-label (gen-label "SHREND"))
-        (temp-val (alloc-temp-reg))
-        (temp-count (alloc-temp-reg))
-        (temp-const (alloc-temp-reg)))
-    (emit `(Rx=A ,temp-count))             ; temp-count = count
-    (emit `(A=Rx ,left-reg))               ; A = value
-    (emit-label loop-label)
-    (emit `(Rx=A ,temp-val))               ; save value
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= 0 ,temp-const))
-    (emit `(A-=Rx ,temp-const))
-    (emit `(jz ,end-label))
-    (emit `(A=Rx ,temp-count))
-    (emit `(Rx= -1 ,temp-const))
-    (emit `(A+=Rx ,temp-const))
-    (emit `(Rx=A ,temp-count))
-    (emit `(A=Rx ,temp-val))
-    (emit '(A=A>>1))
-    (emit `(j ,loop-label))
-    (emit-label end-label)
-    (emit `(A=Rx ,temp-val))
-    (free-temp-reg temp-const)
-    (free-temp-reg temp-count)
-    (free-temp-reg temp-val)))
+        (emit `(Rx=A ,count-reg))
+        (emit-shift-by-reg left-reg count-reg nil)
+        (free-temp-reg count-reg))))
 
 ;;; ===========================================================================
 ;;; Global Variable Generation
