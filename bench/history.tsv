@@ -17,3 +17,63 @@ date	commit	mode	bytes	asm_lines	source	subject
 2026-06-30T09:24:14	88f843f+	none	4671	4199	bench.c	fixed failing unit tests
 2026-06-30T09:24:14	88f843f+	Os	3861	3194	bench.c	fixed failing unit tests
 2026-06-30T09:24:14	88f843f+	O	6088	4592	bench.c	fixed failing unit tests
+2026-06-30T10:04:50	4f61f8d	none	5127	4568	bench.c	stuff
+2026-06-30T10:04:50	4f61f8d	Os	4243	3487	bench.c	stuff
+2026-06-30T10:04:50	4f61f8d	O	7105	5223	bench.c	stuff
+2026-06-30T10:17:12	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:17:12	4f61f8d+	Os	FAIL	3461	bench.c	stuff
+2026-06-30T10:17:12	4f61f8d+	O	FAIL	4231	bench.c	stuff
+2026-06-30T10:18:09	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:18:09	4f61f8d+	Os	FAIL	3461	bench.c	stuff
+2026-06-30T10:18:09	4f61f8d+	O	FAIL	4231	bench.c	stuff
+2026-06-30T10:21:29	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:21:29	4f61f8d+	Os	FAIL	3461	bench.c	stuff
+2026-06-30T10:21:29	4f61f8d+	O	FAIL	4231	bench.c	stuff
+2026-06-30T10:23:09	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:23:09	4f61f8d+	Os	4243	3487	bench.c	stuff
+2026-06-30T10:23:09	4f61f8d+	O	7105	5223	bench.c	stuff
+2026-06-30T10:46:07	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:46:07	4f61f8d+	Os	4243	3487	bench.c	stuff
+2026-06-30T10:46:07	4f61f8d+	O	7105	5223	bench.c	stuff
+2026-06-30T10:49:28	cb06d4f+	none	5107	4461	bench.c	make generated c code produce assignment to address on the same line as declaration
+2026-06-30T10:49:28	cb06d4f+	Os	4221	3393	bench.c	make generated c code produce assignment to address on the same line as declaration
+2026-06-30T10:49:28	cb06d4f+	O	8278	6018	bench.c	make generated c code produce assignment to address on the same line as declaration
+2026-06-30T10:51:17	4f61f8d+	none	5107	4461	bench.c	stuff
+2026-06-30T10:51:17	4f61f8d+	Os	4221	3393	bench.c	stuff
+2026-06-30T10:51:17	4f61f8d+	O	8278	6018	bench.c	stuff
+2026-06-30T10:52:15	4f61f8d+	none	5127	4568	bench.c	stuff
+2026-06-30T10:52:15	4f61f8d+	Os	4243	3487	bench.c	stuff
+2026-06-30T10:52:15	4f61f8d+	O	7105	5223	bench.c	stuff
+2026-06-30T11:06:08	a90a9a4+	none	4523	4142	bench.c	Revert "make generated c code produce assignment to address on the same line as declaration"
+2026-06-30T11:06:08	a90a9a4+	Os	3903	3274	bench.c	Revert "make generated c code produce assignment to address on the same line as declaration"
+2026-06-30T11:06:08	a90a9a4+	O	7105	5223	bench.c	Revert "make generated c code produce assignment to address on the same line as declaration"
+2026-06-30T11:11:09	d79e8c9+	none	4523	4142	bench.c	promote call-surviving params to callee-saved registers instead of homing to stack
+2026-06-30T11:11:09	d79e8c9+	Os	3903	3274	bench.c	promote call-surviving params to callee-saved registers instead of homing to stack
+2026-06-30T11:11:09	d79e8c9+	O	7105	5223	bench.c	promote call-surviving params to callee-saved registers instead of homing to stack
+2026-06-30T11:59:02	d307c67+	none	4523	4142	bench.c	reset local-reg-count in spill-fallback pass so it re-promotes locals
+2026-06-30T11:59:02	d307c67+	Os	3888	3267	bench.c	reset local-reg-count in spill-fallback pass so it re-promotes locals
+2026-06-30T11:59:02	d307c67+	O	7095	5217	bench.c	reset local-reg-count in spill-fallback pass so it re-promotes locals
+2026-06-30T13:18:27	0a12a37+	none	4159	3642	bench.c	load constant call arguments directly into param registers
+2026-06-30T13:18:27	0a12a37+	Os	3565	2945	bench.c	load constant call arguments directly into param registers
+2026-06-30T13:18:27	0a12a37+	O	7053	5175	bench.c	load constant call arguments directly into param registers
+2026-06-30T14:37:23	3d30034+	none	4159	3642	bench.c	widen local-register window to R4-R9 in the spill-fallback pass
+2026-06-30T14:37:23	3d30034+	Os	3551	2937	bench.c	widen local-register window to R4-R9 in the spill-fallback pass
+2026-06-30T14:37:23	3d30034+	O	FAIL	FAIL	bench.c	widen local-register window to R4-R9 in the spill-fallback pass
+2026-06-30T16:49:01	d950758+	none	4019	3504	bench.c	read register-resident call arguments straight into param registers
+2026-06-30T16:49:01	d950758+	Os	3526	2902	bench.c	read register-resident call arguments straight into param registers
+2026-06-30T16:49:01	d950758+	O	7053	5175	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:28:16	d950758+	none	4019	3504	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:28:16	d950758+	Os	3526	2902	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:28:16	d950758+	O	7053	5175	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:54:26	d950758+	none	4019	3504	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:54:26	d950758+	Os	3526	2902	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:54:26	d950758+	O	7053	5175	bench.c	read register-resident call arguments straight into param registers
+2026-07-01T09:59:02	6366591+	none	3659	3142	bench.c	added common functions for reading and writing to fields
+2026-07-01T09:59:02	6366591+	Os	3122	2562	bench.c	added common functions for reading and writing to fields
+2026-07-01T09:59:02	6366591+	O	7728	5843	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:08:11	6366591+	none	3659	3142	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:08:11	6366591+	Os	3122	2562	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:08:11	6366591+	O	7728	5843	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:12:50	6366591+	none	3659	3142	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:12:50	6366591+	Os	3122	2562	bench.c	added common functions for reading and writing to fields
+2026-07-01T10:12:50	6366591+	O	7728	5843	bench.c	added common functions for reading and writing to fields

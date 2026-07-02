@@ -1,1 +1,8 @@
-../../literisc_gemini/c-testsuite/tests/single-exec/00107.c
+typedef int myint;
+myint x = (myint)1;
+
+int
+main(void)
+{
+	return x-1;
+}

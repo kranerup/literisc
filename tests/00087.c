@@ -1,1 +1,20 @@
-../../literisc_gemini/c-testsuite/tests/single-exec/00087.c
+struct S
+{
+	int	(*fptr)();
+};
+
+int
+foo()
+{
+	return 0;
+}
+
+int
+main()
+{
+	struct S v;
+	
+	v.fptr = foo;
+	return v.fptr();
+}
+

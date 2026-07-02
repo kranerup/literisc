@@ -1,1 +1,10 @@
-../../literisc_gemini/c-testsuite/tests/single-exec/00052.c
+int
+main()
+{
+	struct T { int x; };
+	{
+		struct T s;
+		s.x = 0;
+		return s.x;
+	}
+}

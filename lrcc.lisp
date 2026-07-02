@@ -8,7 +8,9 @@
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
   (pushnew script-directory asdf:*central-registry* :test #'equal))
 (handler-case
-    (asdf:load-system :literisc :verbose nil)
+    (with-open-file (dev-null "/dev/null" :direction :output :if-exists :supersede)
+      (let ((*standard-output* dev-null))
+        (asdf:load-system :literisc :verbose nil)))
   (error (e)
     (format *error-output* "Error loading compiler: ~a~%" e)
     (sb-ext:exit :code 1)))
