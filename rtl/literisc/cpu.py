@@ -1598,7 +1598,7 @@ def cpu( clk, clk_en, sync_rstn,
         else:
             n_instr_len.next = instr_len
 
-    if enable_obs:
+    if enable_obs and obs_regs is not None:
         @always_comb
         def obsreg():
             for i in range(16):
@@ -1606,6 +1606,7 @@ def cpu( clk, clk_en, sync_rstn,
             obs_acc.next = acc
             obs_cc.next = cc
 
+    if enable_obs:
         @always(clk.posedge)
         def obsff():
             if clk_en == 1:

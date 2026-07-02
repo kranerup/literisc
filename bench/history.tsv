@@ -77,3 +77,6 @@ date	commit	mode	bytes	asm_lines	source	subject
 2026-07-01T10:12:50	6366591+	none	3659	3142	bench.c	added common functions for reading and writing to fields
 2026-07-01T10:12:50	6366591+	Os	3122	2562	bench.c	added common functions for reading and writing to fields
 2026-07-01T10:12:50	6366591+	O	7728	5843	bench.c	added common functions for reading and writing to fields
+2026-07-02T09:27:19	fdcdb67+	none	3659	3142	bench.c	fix dead-function elimination missing functions addressed in initializers
+2026-07-02T09:27:19	fdcdb67+	Os	3122	2562	bench.c	fix dead-function elimination missing functions addressed in initializers
+2026-07-02T09:27:19	fdcdb67+	O	7728	5843	bench.c	fix dead-function elimination missing functions addressed in initializers

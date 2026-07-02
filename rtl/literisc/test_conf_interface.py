@@ -225,7 +225,8 @@ def test_slave_dmem_rw():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -278,7 +279,8 @@ def test_cpu_stores_constant():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -338,7 +340,8 @@ def test_slave_write_cpu_doubles():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -400,7 +403,8 @@ def test_slave_write_cpu_sum():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -459,7 +463,8 @@ def test_master_request():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -527,7 +532,8 @@ def test_wait_ticks():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         cycle_count = Signal(intbv(0)[32:])
 
@@ -617,8 +623,10 @@ def test_dual_cpu():
         conf_a = Conf()
         conf_b = Conf()
 
-        icpu_a = cpu_sys(clk, rstn, axi_a, conf_a)
-        icpu_b = cpu_sys(clk, rstn, axi_b, conf_b)
+        instr_trace_a = Signal(modbv(0)[69:])
+        icpu_a = cpu_sys(clk, rstn, axi_a, conf_a, instr_trace_a)
+        instr_trace_b = Signal(modbv(0)[69:])
+        icpu_b = cpu_sys(clk, rstn, axi_b, conf_b, instr_trace_b)
 
         # --- cross-connect A master -> B slave ----------------------------
         @always_comb
@@ -731,7 +739,8 @@ def test_master_while_slave_request():
         axi = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
 
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(delay(10))
         def clk_gen():
@@ -859,7 +868,8 @@ def test_cpu_reset():
         rstn = signal()
         axi  = Axi4(asize=16, dsize=32, idsize=1)
         conf = Conf()
-        icpu = cpu_sys(clk, rstn, axi, conf)
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
 
         @always(clk.posedge)
         def inc_ticks():
