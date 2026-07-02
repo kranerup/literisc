@@ -1324,9 +1324,26 @@
 
 (defun collect-address-taken-functions (ast defined-functions)
   "Find functions whose address is taken (var-ref in non-call position).
-   These must be kept even if not directly reachable from main."
-  (let ((address-taken (make-hash-table :test 'equal)))
-    (labels ((walk (n call-func-p)
+   These must be kept even if not directly reachable from main.
+
+   Global/static variable initializers store their initializer in the
+   node's `data` slot rather than `children` (see parse-global-declaration),
+   so a plain child-walk never sees a `&func` inside e.g.
+   `struct S s = { &func };`. Simple (non-init-list) initializers go further
+   and get constant-folded at parse time into a raw (:label SYM) value
+   before this pass ever runs, losing the var-ref entirely. Both shapes are
+   handled below via a label->name reverse map."
+  (let ((address-taken (make-hash-table :test 'equal))
+        (label-to-name (make-hash-table :test 'eq)))
+    (maphash (lambda (name _)
+               (declare (ignore _))
+               (setf (gethash (make-c-label name) label-to-name) name))
+             defined-functions)
+    (labels ((mark-folded-label (val)
+               (when (and (consp val) (eq (first val) :label))
+                 (let ((name (gethash (second val) label-to-name)))
+                   (when name (setf (gethash name address-taken) t)))))
+             (walk (n call-func-p)
                (when (and n (ast-node-p n))
                  (cond
                    ((eq (ast-node-type n) 'call)
@@ -1339,6 +1356,10 @@
                          (gethash (ast-node-value n) defined-functions))
                     (setf (gethash (ast-node-value n) address-taken) t))
                    (t
+                    (let ((data (ast-node-data n)))
+                      (if (ast-node-p data)
+                          (walk data nil)
+                          (mark-folded-label data)))
                     (dolist (c (ast-node-children n))
                       (walk c nil)))))))
       (walk ast nil))
@@ -1362,6 +1383,22 @@
             (address-taken (collect-address-taken-functions ast defined-functions))
             (reachable (make-hash-table :test 'equal))
             (worklist nil))
+
+        ;; Static-local initializers are constant-folded at parse time and
+        ;; stashed in compiler-state-data, entirely outside the AST, so a
+        ;; `static T (*fp)() = &func;` reference is invisible to both
+        ;; build-call-graph and collect-address-taken-functions. Scan it
+        ;; directly for folded (:label SYM) values referencing a function.
+        (let ((label-to-name (make-hash-table :test 'eq)))
+          (maphash (lambda (name _)
+                     (declare (ignore _))
+                     (setf (gethash (make-c-label name) label-to-name) name))
+                   defined-functions)
+          (dolist (static-entry (compiler-state-data *state*))
+            (let ((val (second static-entry)))
+              (when (and (consp val) (eq (first val) :label))
+                (let ((name (gethash (second val) label-to-name)))
+                  (when name (setf (gethash name address-taken) t)))))))
 
         ;; Seed the worklist with main and any address-taken functions
         (setf (gethash "main" reachable) t)
