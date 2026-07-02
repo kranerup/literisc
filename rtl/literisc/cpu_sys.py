@@ -18,6 +18,12 @@ import re
 
 #TODO: Fix cpu doing write or read on the same cycle that a request_we or request_re is issued. This leads to next cycle a read/write from cpu and read/write from slave is possible. dmem_port_mux makes the slave read/write take priority, making it so the dmem_wenable or dmem_renable gets ignored. Could maybe be fixed by having a mux that sets cpu_waiting to 1 in @always_comb when conf.slave_request_we or conf.slave_request_re is true.
 
+#__verilog__("
+#initial begin
+#    $readmemh("program.hex", rom_mem);
+#end
+#")
+
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
     assert lowest == 0, f"program must start at 0, not {lowest}"
@@ -65,6 +71,9 @@ def rom(
     n_sel_ram = signal()
     sel_ram = signal()
     rd_ram = signal()
+
+    def load_rom():
+        pass
 
     adr_bits = (depth-1).bit_length()
 
@@ -117,6 +126,13 @@ def rom(
 
 
     return instances()
+
+
+#rom.verilog_code = """\
+#initial begin
+#    $$readmemh(\"program.hex\", rom_mem);
+#end
+#"""
 
 def cpu_sys(
         clk,
@@ -291,12 +307,12 @@ def cpu_sys(
     icache = flop(n_imem_dout_cached, imem_dout_cached, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     tick_sel  = signal(3)   # which bit to watch, 1-5 (0 = disabled)
-    tick_wait_valid = signal()
-    n_tick_wait_valid = signal()
-    prev_tick_bit = signal()
-    tick_bit = signal()
+    #tick_wait_valid = signal()
+    #n_tick_wait_valid = signal()
+    #prev_tick_bit = signal()
+    #tick_bit = signal()
 
-    itw = flop(n_tick_wait_valid, tick_wait_valid, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+    #itw = flop(n_tick_wait_valid, tick_wait_valid, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     # cpu reset
     cpu_rstn = signal()
@@ -309,11 +325,11 @@ def cpu_sys(
     def cpu_reset_mux():
         cpu_sync_rstn.next = sync_rstn & cpu_rstn
 
-    @always_comb
-    def tick_edge_detect():
-        cur.next = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
-        n_tick_wait_valid.next = (cur == 1 and prev_tick_bit == 0)  # rising edge
-        prev_tick_bit.next = cur
+    #@always_comb
+    #def tick_edge_detect():
+    #    cur.next = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
+    #    n_tick_wait_valid.next = (cur == 1 and prev_tick_bit == 0)  # rising edge
+    #    prev_tick_bit.next = cur
 
     @always_comb
     def imem_cache():
@@ -448,7 +464,7 @@ def cpu_sys(
             elif wait_type == IMEM_WAIT:
                 n_cpu_waiting.next = 0
             elif wait_type == TICK_WAIT:
-                if tick_wait_valid == 1:
+                if conf.ticks[int(tick_sel) - 1] == 1:
                     n_cpu_waiting.next = 0
                 else:
                     n_cpu_waiting.next = 1
@@ -687,6 +703,37 @@ def cpu_sys(
         # boot-read-interrupt.lisp, reads INTERRUPT_ADDRESS and then jumps to PC=512
         program = hexdump_to_prog("""\
 00000000: 80 83 FF 1A F8 40 80 84 00 10 FE 00 00 00 00 00  |.....@..........|""")
+
+#        program = hexdump_to_prog("""\
+#00000000: 8F 82 80 00 AF 82 07 A0 7E F4 02 82 84 80 00 1A  |........~.......|
+#00000010: B2 32 12 0A F5 02 1E FE F4 03 1B 02 83 84 80 00  |.2..............|
+#00000020: 1A B3 62 F5 03 1E FE F6 F4 09 1F 80 70 B0 0F 1F  |..b.........p...|
+#00000030: 5A 0C 86 80 E4 57 16 0A AF 4F 1A 00 81 0F 11 D0  |Z....W...O......|
+#00000040: 00 1F 50 08 94 B6 0A AF 40 1A 00 81 8F FF FF FF  |..P.....@.......|
+#00000050: 70 11 D0 00 1F 50 04 87 00 80 04 17 C0 A2 81 16  |p....P..........|
+#00000060: 80 03 17 C0 A5 03 90 A0 01 91 80 00 C0 A5 06 1F  |................|
+#00000070: 20 04 10 A0 01 90 00 1F 50 00 88 00 80 04 18 C0  | .......P.......|
+#00000080: A2 80 55 1F 20 0C 17 F1 F1 01 18 B1 B0 F8 30 10  |..U. .........0.|
+#00000090: 09 1F 20 08 19 01 83 04 18 F1 F1 F1 B3 02 11 F8  |.. .............|
+#000000A0: 02 E0 00 1F 50 08 80 1C 18 F1 F1 F1 01 10 02 11  |....P...........|
+#000000B0: 00 12 01 10 C1 A2 17 1F 20 00 19 01 83 1C 18 F1  |........ .......|
+#000000C0: F1 F1 04 13 C4 02 11 F8 12 E0 00 1F 50 00 18 00  |............P...|
+#000000D0: 81 01 B1 08 10 A0 FF 24 17 B6 00 1F 22 08 12 01  |.......$...."...|
+#000000E0: 10 0A 11 0B AF FE 31 1F 20 00 50 08 17 00 81 01  |......1. .P.....|
+#000000F0: B1 07 10 A0 FE 63 94 B6 00 1F 22 08 12 01 10 0A  |.....c....".....|
+#00000100: 11 0B AF FE 13 1F 80 10 B0 0F F5 09 F7 FE F6 F4  |................|
+#00000110: 09 1F 80 58 B0 0F 86 00 80 10 16 C0 A2 14 16 00  |...X............|
+#00000120: 1F 81 18 B1 01 16 B1 F8 60 16 00 81 01 B1 06 10  |........`.......|
+#00000130: A0 66 1F 81 18 B1 0A AF FD 6D 88 80 E4 57 18 0A  |.f.......m...W..|
+#00000140: AF FD 46 1A 00 1F 50 10 89 00 80 04 19 C0 A2 80  |..F...P.........|
+#00000150: 6C 91 B8 01 19 B1 0A AF FD 2F 1A 00 1F 50 0C 20  |l......../...P. |
+#00000160: 10 10 81 04 F8 11 00 1F 21 0C 11 82 1C F8 02 E0  |........!.......|
+#00000170: 00 1F 50 08 20 0C 50 10 80 00 50 14 1F 20 14 10  |..P. .P...P.. ..|
+#00000180: 81 04 C1 A2 2E 1F 20 08 22 14 12 F1 F1 F1 01 10  |...... .".......|
+#00000190: F8 11 FA 00 1F 81 18 B1 01 19 F1 F1 02 1F 23 14  |..............#.|
+#000001A0: 13 B2 B1 F8 60 1F 20 14 10 81 01 B1 01 1F 51 14  |....`. .......Q.|
+#000001B0: 10 A0 49 19 00 81 01 B1 09 10 A0 FF 0D 8A 00 1F  |..I.............|
+#000001C0: 80 28 B0 0F F5 09 F7 FE 00 00 00 00 00 00 00 00  |.(..............|""")
 
 #        program = hexdump_to_prog("""\
 #00000010: F4 02 82 13 12 02 1A B2 32 12 0A F5 02 1E FE F6  |........2.......|
