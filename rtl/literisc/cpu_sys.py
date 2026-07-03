@@ -9,7 +9,7 @@ from modules.common.Common import copySignal
 from constants import *
 
 from cpu import cpu
-from tb import load_a_rx, load_rx, jump_relative
+#from tb import load_a_rx, load_rx, jump_relative
 from dp_mem import dp_mem
 from cpu_common import flop
 import re
@@ -576,40 +576,41 @@ def cpu_sys(
             depth = DMEM_DEPTH,
             name = 'dmem')
 
-    if False:
-        # --- output counter to GPIO ------------
-        program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
-        # R1 = counter
-        program[ pc   ] = 0x91 # A = 1
-        program[ pc+1 ] = 0xb1 # A = A + R1
-        program[ pc+2 ] = 0x01 # R1 = A
-        program[ pc+3 ] = 0xf8 # M[R0].b = A
-        program[ pc+4 ] = 0x70
-        p, pc = jump_relative( pc+5, 0 )
-        program[ pc ]   = 0xff # nop
-        program[ pc+1 ] = 0xff # nop
-        program.update( p )
-    elif False:
-        # --- counter to GPIO and to serial port --------------
-        program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
-        # R1 = counter
-        program[ pc   ] = 0x91 # A = 1 
-        program[ pc+1 ] = 0xb1 # A = A + R1
-        program[ pc+2 ] = 0x01 # R1 = A
-        program[ pc+3 ] = 0xf8 # M[R0].b = A
-        program[ pc+4 ] = 0x70
-        program[ pc+5 ] = 0x10 # A = R0
-        program[ pc+6 ] = 0xf8 # M[ A + 1 ].b = R1
-        program[ pc+7 ] = 0x51
-        program[ pc+8 ] = 1 # single byte immediate offset
-        program[ pc+9 ] = 0xf8 # R2 = M[ A + 2 ].b
-        program[ pc+10] = 0x22 # -"-
-        program[ pc+11] = 2 # single byte immediate offset
-        p, pc = jump_relative( pc+12, 0 )
-        program[ pc ]   = 0xff # nop
-        program[ pc+1 ] = 0xff # nop
-        program.update( p )
-    else:
+    #if False:
+    #    # --- output counter to GPIO ------------
+    #    program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
+    #    # R1 = counter
+    #    program[ pc   ] = 0x91 # A = 1
+    #    program[ pc+1 ] = 0xb1 # A = A + R1
+    #    program[ pc+2 ] = 0x01 # R1 = A
+    #    program[ pc+3 ] = 0xf8 # M[R0].b = A
+    #    program[ pc+4 ] = 0x70
+    #    p, pc = jump_relative( pc+5, 0 )
+    #    program[ pc ]   = 0xff # nop
+    #    program[ pc+1 ] = 0xff # nop
+    #    program.update( p )
+    #elif False:
+    #    # --- counter to GPIO and to serial port --------------
+    #    program, pc = load_rx( 0, IO_LOW, pc=0 ) # R0=IO
+    #    # R1 = counter
+    #    program[ pc   ] = 0x91 # A = 1 
+    #    program[ pc+1 ] = 0xb1 # A = A + R1
+    #    program[ pc+2 ] = 0x01 # R1 = A
+    #    program[ pc+3 ] = 0xf8 # M[R0].b = A
+    #    program[ pc+4 ] = 0x70
+    #    program[ pc+5 ] = 0x10 # A = R0
+    #    program[ pc+6 ] = 0xf8 # M[ A + 1 ].b = R1
+    #    program[ pc+7 ] = 0x51
+    #    program[ pc+8 ] = 1 # single byte immediate offset
+    #    program[ pc+9 ] = 0xf8 # R2 = M[ A + 2 ].b
+    #    program[ pc+10] = 0x22 # -"-
+    #    program[ pc+11] = 2 # single byte immediate offset
+    #    p, pc = jump_relative( pc+12, 0 )
+    #    program[ pc ]   = 0xff # nop
+    #    program[ pc+1 ] = 0xff # nop
+    #    program.update( p )
+    #else:
+    if True:
         program = hexdump_to_prog("""\
             00000000: 80 83 FF 1C 91 B1 01 F8 70 10 22 02 91 C2 A6 0C
             00000010: 83 80 40 85 0F 15 D1 B3 04 10 54 01 A0 66 00 00""")
