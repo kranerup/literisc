@@ -746,37 +746,48 @@
          (emit-load-64 result)))
 
       (:parameter
-       ;; 64-bit parameters: first uses P0:P1, second uses P2:P3
-       ;; For leaf functions, read directly from registers
-       ;; For non-leaf functions, read from saved stack locations
-       (let ((idx (sym-entry-offset sym)))
-         (cond
-           ;; Leaf function with first two 64-bit params
-           ((and *is-leaf-function* (< idx 2))
-            ;; Param 0 -> P0:P1, Param 1 -> P2:P3
-            (let ((base-reg (* idx 2)))  ; 0 or 2
-              (emit `(A=Rx ,(nth base-reg *param-regs*)))  ; Low word from P0 or P2
-              (emit `(Rx=A ,(reg-pair-low result)))
-              (emit `(A=Rx ,(nth (1+ base-reg) *param-regs*)))  ; High word from P1 or P3
-              (emit `(Rx=A ,(reg-pair-high result)))))
-           ;; Non-leaf function: read from saved stack location
-           ((< idx 2)
-            (let ((base-offset (+ *param-save-offset* (* idx 8)))
-                  (temp (alloc-temp-reg)))
-              ;; Load low word from [SP + base-offset]
+       ;; 64-bit parameters occupy a P-register pair (Pn:Pn+1) when they fit,
+       ;; otherwise an 8-byte stack slot -- see *param-layout*.
+       (let* ((idx (sym-entry-offset sym))
+              (loc (param-location idx)))
+         (ecase (getf loc :kind)
+           (:reg
+            (let ((slot (getf loc :slot)))
+              (cond
+                ;; Leaf function: read directly from registers
+                (*is-leaf-function*
+                 (emit `(A=Rx ,(nth slot *param-regs*)))
+                 (emit `(Rx=A ,(reg-pair-low result)))
+                 (emit `(A=Rx ,(nth (1+ slot) *param-regs*)))
+                 (emit `(Rx=A ,(reg-pair-high result))))
+                ;; Non-leaf function: read from saved stack location
+                (t
+                 (let ((base-offset (+ *param-save-offset* (* slot 4)))
+                       (temp (alloc-temp-reg)))
+                   (emit `(A=Rx SP))
+                   (emit `(Rx=M[A+n] ,base-offset ,temp))
+                   (emit `(A=Rx ,temp))
+                   (emit `(Rx=A ,(reg-pair-low result)))
+                   (emit `(A=Rx SP))
+                   (emit `(Rx=M[A+n] ,(+ base-offset 4) ,temp))
+                   (emit `(A=Rx ,temp))
+                   (emit `(Rx=A ,(reg-pair-high result)))
+                   (free-temp-reg temp))))))
+           (:stack
+            ;; Stack parameter: read from the caller-pushed stack-argument
+            ;; region, past this function's own frame/saved-reg/SRP area.
+            (let* ((save-param-space (if *is-leaf-function* 0
+                                          (* 4 (param-layout-reg-words *param-layout*))))
+                   (offset (+ *frame-size* save-param-space
+                              *pushed-reg-bytes*
+                              (if *is-leaf-function* 0 4)  ; saved SRP
+                              (getf loc :byte-offset)))
+                   (addr-temp (alloc-temp-reg)))
               (emit `(A=Rx SP))
-              (emit `(Rx=M[A+n] ,base-offset ,temp))
-              (emit `(A=Rx ,temp))
-              (emit `(Rx=A ,(reg-pair-low result)))
-              ;; Load high word from [SP + base-offset + 4]
-              (emit `(A=Rx SP))
-              (emit `(Rx=M[A+n] ,(+ base-offset 4) ,temp))
-              (emit `(A=Rx ,temp))
-              (emit `(Rx=A ,(reg-pair-high result)))
-              (free-temp-reg temp)))
-           ;; Stack parameters (3rd+ 64-bit param)
-           (t
-            (compiler-error "64-bit stack parameters not yet supported")))))
+              (emit `(Rx= ,offset ,addr-temp))
+              (emit `(A+=Rx ,addr-temp))
+              (free-temp-reg addr-temp)
+              (emit-load-64 result))))))
 
       (otherwise
        (compiler-error "Cannot load 64-bit value from ~a storage"
@@ -844,6 +855,41 @@
             (emit `(A=Rx ,addr-temp))
             (free-temp-reg addr-temp)
             (emit-store-64 src-pair)))
+
+         (:parameter
+          (let* ((idx (sym-entry-offset sym))
+                 (loc (param-location idx)))
+            (ecase (getf loc :kind)
+              (:reg
+               (let ((slot (getf loc :slot)))
+                 (if *is-leaf-function*
+                     ;; Leaf: parameter register pair stays in Pn:Pn+1
+                     (progn
+                       (emit `(A=Rx ,(reg-pair-low src-pair)))
+                       (emit `(Rx=A ,(nth slot *param-regs*)))
+                       (emit `(A=Rx ,(reg-pair-high src-pair)))
+                       (emit `(Rx=A ,(nth (1+ slot) *param-regs*))))
+                     ;; Non-leaf: parameter is saved on stack; update both words
+                     (let ((base-offset (+ *param-save-offset* (* slot 4)))
+                           (addr-temp (alloc-temp-reg)))
+                       (emit `(A=Rx SP))
+                       (emit `(Rx= ,base-offset ,addr-temp))
+                       (emit `(A+=Rx ,addr-temp))
+                       (free-temp-reg addr-temp)
+                       (emit-store-64 src-pair)))))
+              (:stack
+               (let* ((save-param-space (if *is-leaf-function* 0
+                                            (* 4 (param-layout-reg-words *param-layout*))))
+                      (offset (+ *frame-size* save-param-space
+                                 *pushed-reg-bytes*
+                                 (if *is-leaf-function* 0 4)  ; saved SRP
+                                 (getf loc :byte-offset)))
+                      (addr-temp (alloc-temp-reg)))
+                 (emit `(A=Rx SP))
+                 (emit `(Rx= ,offset ,addr-temp))
+                 (emit `(A+=Rx ,addr-temp))
+                 (free-temp-reg addr-temp)
+                 (emit-store-64 src-pair))))))
 
          (otherwise
           (compiler-error "Cannot store 64-bit value to ~a storage"
@@ -1266,6 +1312,70 @@
 (defvar *skip-final-return-jump* nil) ; when t, generate-return skips the jump
 (defvar *user-labels* nil)      ; hash table: user label name -> generated asm label
 
+;;; ---------------------------------------------------------------------------
+;;; Parameter layout: maps parameter ordinals to physical locations.
+;;;
+;;; A 32-bit parameter needs one P-register (or one 4-byte stack slot); a
+;;; 64-bit parameter needs two, passed as a contiguous register pair (or an
+;;; 8-byte stack slot, low word first). Once a parameter doesn't fit in the
+;;; remaining P-registers, it and every later parameter are passed on the
+;;; stack instead -- this keeps the caller and callee in agreement about the
+;;; boundary without needing a register-hole-filling scheme.
+;;;
+;;; The same classify-param-widths logic is used both for the callee's
+;;; declared parameters (compute-param-layout) and the caller's actual
+;;; argument expressions (compute-arg-layout), so the two sides can never
+;;; disagree about where a value lives.
+;;; ---------------------------------------------------------------------------
+
+(defstruct param-layout
+  alist       ; list of (ordinal . (:kind :reg :slot N)) or (:kind :stack :byte-offset M)
+  reg-words   ; number of P-registers (0..reg-words-1) used by register-resident params
+  stack-bytes) ; total bytes of the stack-parameter region
+
+(defvar *param-layout* nil
+  "param-layout for the function currently being generated.")
+
+(defun classify-param-widths (widths)
+  "Classify a list of parameter widths (1 = 32-bit, 2 = 64-bit) into
+   physical locations, in the original order. Returns a param-layout."
+  (let ((slot 0) (stack-offset 0) (spilled nil) (locs nil))
+    (dolist (w widths)
+      (if (and (not spilled) (<= (+ slot w) 4))
+          (progn
+            (push (list :kind :reg :slot slot) locs)
+            (incf slot w))
+          (progn
+            (setf spilled t)
+            (push (list :kind :stack :byte-offset stack-offset) locs)
+            (incf stack-offset (* w 4)))))
+    (make-param-layout :alist (loop for loc in (nreverse locs)
+                                     for idx from 0
+                                     collect (cons idx loc))
+                        :reg-words slot
+                        :stack-bytes stack-offset)))
+
+(defun param-width (type)
+  "Physical width in P-registers/stack-slots of a parameter/argument type."
+  (if (and type (is-longlong-type type)) 2 1))
+
+(defun compute-param-layout (params-node)
+  "Compute the param-layout for a function's declared parameters."
+  (classify-param-widths
+   (loop for param in (ast-node-children params-node)
+         collect (param-width (ast-node-result-type param)))))
+
+(defun compute-arg-layout (args)
+  "Compute the param-layout for a call's actual argument expressions."
+  (classify-param-widths
+   (loop for arg in args
+         collect (param-width (get-expression-type arg)))))
+
+(defun param-location (idx)
+  "Physical location of parameter ordinal IDX in the current function, per
+   *param-layout*."
+  (cdr (assoc idx (param-layout-alist *param-layout*))))
+
 ;;; ===========================================================================
 ;;; Sized Memory Access Helpers
 ;;; ===========================================================================
@@ -1512,6 +1622,7 @@
          (*current-param-count* (or (getf func-data :param-count) 0))
          (*local-reg-count* (or (getf func-data :local-reg-count) 0))
          (*promoted-params* nil)
+         (*param-layout* nil)  ; set by register-parameters below
          (base-local-reg-count 0)  ; *local-reg-count* before inline-var promotion
          (*user-labels* (make-hash-table :test 'equal))  ; Reset user labels for each function
          (body-ends-with-return (ends-with-return-p body)))
@@ -1565,10 +1676,17 @@
 
     (init-registers)
 
+    ;; Compute the parameter layout now (also set by register-parameters
+    ;; below) so has-stack-params can see it before body generation --
+    ;; a function can have stack parameters with <=4 AST params when an
+    ;; earlier 64-bit parameter doesn't leave enough P-registers for a
+    ;; later one, so raw parameter count alone isn't enough to detect this.
+    (setf *param-layout* (compute-param-layout params))
+
     ;; Pre-compute pushed register bytes for stack param offset calculation
-    ;; Only need conservative estimate when there are stack parameters (>4 params)
-    ;; For <=4 params, we can use actual register usage after body generation
-    (let ((has-stack-params (> *current-param-count* 4)))
+    ;; Only need conservative estimate when there are stack parameters
+    ;; For no stack params, we can use actual register usage after body generation
+    (let ((has-stack-params (> (param-layout-stack-bytes *param-layout*) 0)))
       (when has-stack-params
         (let ((estimated-max-reg (if (> *local-reg-count* 0)
                                       (+ 5 *local-reg-count*)  ; R5 + locals
@@ -1945,14 +2063,18 @@
       (nreverse promotions))))
 
 (defun compute-save-param-space ()
-  "Stack bytes reserved for homing non-promoted parameters P0-P3.
+  "Stack bytes reserved for homing non-promoted register-resident parameters.
    Promoted params live in callee-saved registers and need no stack slot.
-   Sized to cover the highest homed param index so that :parameter reads
-   (offset = *param-save-offset* + idx*4) stay valid; 0 when no param is homed,
-   which lets the whole frame shrink away for simple accessors."
+   Sized in P-register words (a 64-bit parameter occupies two) so that
+   :parameter reads stay valid; 0 when no param is homed, which lets the
+   whole frame shrink away for simple accessors.
+   *promoted-params* keys by AST parameter ordinal, but promotion is only
+   ever computed for all-32-bit parameter lists (see compute-param-promotions),
+   where ordinal and physical register slot coincide -- so the assoc below
+   stays correct even though it's nominally comparing slots to ordinals."
   (if *is-leaf-function*
       0
-      (let ((homed (loop for i from 0 below (min *current-param-count* 4)
+      (let ((homed (loop for i from 0 below (param-layout-reg-words *param-layout*)
                          unless (assoc i *promoted-params*)
                          collect i)))
         (if homed (* 4 (1+ (reduce #'max homed))) 0))))
@@ -1973,6 +2095,7 @@
    Promoted params (see *promoted-params*) become :register variables backed by
    a callee-saved register.  Other non-leaf params are :parameter and are homed
    to / read from the stack."
+  (setf *param-layout* (compute-param-layout params-node))
   (loop for param in (ast-node-children params-node)
         for idx from 0
         when (ast-node-value param)
@@ -2003,8 +2126,7 @@
    - Leaf: PUSH Rn for callee-saved regs (if any used)
    Then allocate stack frame for locals + saved params (non-leaf)."
   (let ((save-reg (when (>= max-temp-idx 0)
-                    (intern (format nil "R~d" max-temp-idx) :c-compiler)))
-        (param-count *current-param-count*))
+                    (intern (format nil "R~d" max-temp-idx) :c-compiler))))
 
     ;; Update pushed-reg-bytes to match what we're actually pushing
     (setf *pushed-reg-bytes* (if (>= max-temp-idx 0)
@@ -2032,8 +2154,10 @@
       ;; 4. Save parameters P0-P3 to stack for non-leaf functions
       ;; (They get clobbered by nested calls).  Promoted params are skipped:
       ;; they were captured into a callee-saved register by the body prologue.
+      ;; Iterates by physical register word, not AST parameter count, so both
+      ;; halves of a 64-bit parameter's register pair get saved.
       (unless *is-leaf-function*
-        (loop for i from 0 below (min param-count 4)
+        (loop for i from 0 below (param-layout-reg-words *param-layout*)
               unless (assoc i *promoted-params*)
               do (let ((offset (+ *param-save-offset* (* i 4))))
                    (emit `(A=Rx SP))
@@ -2606,24 +2730,30 @@
 
     (case (sym-entry-storage sym)
       (:parameter
-       ;; Parameters 0-3 are in P0-P3 (leaf) or saved on stack (non-leaf)
-       (let ((idx (sym-entry-offset sym)))
-         (cond
-           ;; Leaf function: read directly from register
-           ((and *is-leaf-function* (< idx 4))
-            (emit `(A=Rx ,(nth idx *param-regs*))))
-           ;; Non-leaf function with register param: read from saved stack location
-           ((< idx 4)
-            (let ((offset (+ *param-save-offset* (* idx 4)))
-                  (temp (alloc-temp-reg)))
-              (emit `(A=Rx SP))
-              (emit `(Rx=M[A+n] ,offset ,temp))
-              (emit `(A=Rx ,temp))
-              (free-temp-reg temp)))
-           ;; Stack parameter (5th param and beyond)
-           (t
+       ;; Parameters are in P0-P3 (leaf), saved on stack (non-leaf register
+       ;; params), or passed on the stack outright -- see *param-layout*.
+       ;; A parameter's physical slot can differ from its declaration
+       ;; ordinal when an earlier 64-bit parameter consumed two slots.
+       (let* ((idx (sym-entry-offset sym))
+              (loc (param-location idx)))
+         (ecase (getf loc :kind)
+           (:reg
+            (let ((slot (getf loc :slot)))
+              (cond
+                ;; Leaf function: read directly from register
+                (*is-leaf-function*
+                 (emit `(A=Rx ,(nth slot *param-regs*))))
+                ;; Non-leaf function with register param: read from saved stack location
+                (t
+                 (let ((offset (+ *param-save-offset* (* slot 4)))
+                       (temp (alloc-temp-reg)))
+                   (emit `(A=Rx SP))
+                   (emit `(Rx=M[A+n] ,offset ,temp))
+                   (emit `(A=Rx ,temp))
+                   (free-temp-reg temp))))))
+           (:stack
             (let* ((save-param-space (if *is-leaf-function* 0
-                                         (* 4 (min *current-param-count* 4))))
+                                         (* 4 (param-layout-reg-words *param-layout*))))
                    (temp (alloc-temp-reg)))
               ;; Stack layout from callee perspective:
               ;; [stack params]  <- pushed by caller before JSR
@@ -2634,7 +2764,7 @@
               (let ((offset (+ *frame-size* save-param-space
                                *pushed-reg-bytes*
                                (if *is-leaf-function* 0 4)  ; saved SRP
-                               (* (- idx 4) 4))))
+                               (getf loc :byte-offset))))
                 (emit `(A=Rx SP))
                 (emit `(Rx=M[A+n] ,offset ,temp))
                 (emit `(A=Rx ,temp))
@@ -3509,19 +3639,33 @@
               (free-temp-reg addr-reg)
               (free-temp-reg value-reg)))
            (:parameter
-            (let ((idx (sym-entry-offset sym)))
-              (if (< idx 4)
-                  (if *is-leaf-function*
-                      ;; Leaf: parameter stays in P-register
-                      (emit `(Rx=A ,(nth idx *param-regs*)))
-                      ;; Non-leaf: parameter is saved on stack; update the stack slot
-                      (let ((offset (+ *param-save-offset* (* idx 4)))
-                            (value-reg (alloc-temp-reg)))
-                        (emit `(Rx=A ,value-reg))
-                        (emit `(A=Rx SP))
-                        (emit `(M[A+n]=Rx ,offset ,value-reg))
-                        (free-temp-reg value-reg)))
-                  (compiler-error "Cannot store to stack parameter"))))))))
+            (let* ((idx (sym-entry-offset sym))
+                   (loc (param-location idx)))
+              (ecase (getf loc :kind)
+                (:reg
+                 (let ((slot (getf loc :slot)))
+                   (if *is-leaf-function*
+                       ;; Leaf: parameter stays in P-register
+                       (emit `(Rx=A ,(nth slot *param-regs*)))
+                       ;; Non-leaf: parameter is saved on stack; update the stack slot
+                       (let ((offset (+ *param-save-offset* (* slot 4)))
+                             (value-reg (alloc-temp-reg)))
+                         (emit `(Rx=A ,value-reg))
+                         (emit `(A=Rx SP))
+                         (emit `(M[A+n]=Rx ,offset ,value-reg))
+                         (free-temp-reg value-reg)))))
+                (:stack
+                 (let* ((save-param-space (if *is-leaf-function* 0
+                                              (* 4 (param-layout-reg-words *param-layout*))))
+                        (offset (+ *frame-size* save-param-space
+                                   *pushed-reg-bytes*
+                                   (if *is-leaf-function* 0 4)  ; saved SRP
+                                   (getf loc :byte-offset)))
+                        (value-reg (alloc-temp-reg)))
+                   (emit `(Rx=A ,value-reg))
+                   (emit `(A=Rx SP))
+                   (emit `(M[A+n]=Rx ,offset ,value-reg))
+                   (free-temp-reg value-reg))))))))))
     (unary-op
      ;; *ptr = value - need to determine element type from pointer
      (when (string= (ast-node-value node) "*")
@@ -3682,7 +3826,12 @@
                               (sym (lookup-symbol name)))
                          (when (and sym (eq (sym-entry-storage sym) :function))
                            (make-c-label name)))))
-         (arg-count (length args))
+         ;; Classifies each argument as register- or stack-passed, exactly as
+         ;; compute-param-layout classifies the callee's declared parameters
+         ;; (a 64-bit argument that doesn't fit the remaining P-registers, and
+         ;; everything after it, goes on the stack) -- so caller and callee
+         ;; always agree on where an argument lives.
+         (layout (compute-arg-layout args))
          (indirect-temp nil))  ; Temp register for indirect call target
 
     ;; For indirect calls (func-label is nil), evaluate func expression first
@@ -3692,26 +3841,41 @@
       (generate-expression func-expr)
       (emit `(Rx=A ,indirect-temp)))
 
-    ;; Handle stack arguments FIRST (args 5+) before allocating temps for args 0-3
-    ;; This maximizes available temp regs during stack arg evaluation
+    ;; Handle stack arguments FIRST before allocating temps for register
+    ;; arguments. This maximizes available temp regs during stack arg
+    ;; evaluation. Pushed in reverse declaration order so the lowest-ordinal
+    ;; stack argument ends up closest to the final SP, matching the callee's
+    ;; byte-offset-from-region-start reads. A 64-bit stack argument pushes
+    ;; 8 bytes with the low word at the lower address.
     ;; Note: Can't use push-r because it's a multi-register push (R0..Rn)
-    (when (> arg-count 4)
+    (when (> (param-layout-stack-bytes layout) 0)
       (let ((const-temp (alloc-temp-reg)))
-        (emit `(Rx= -4 ,const-temp))
-        (loop for i from (1- arg-count) downto 4
+        (loop for i from (1- (length args)) downto 0
               for arg = (nth i args)
-              do (let ((value-temp (alloc-temp-reg)))
-                   (generate-expression arg)
-                   (emit `(Rx=A ,value-temp))
-                   ;; Decrement SP and store value
-                   (emit '(A=Rx SP))
-                   (emit `(A+=Rx ,const-temp))
-                   (emit '(Rx=A SP))
-                   (emit `(M[A]=Rx ,value-temp))
-                   (free-temp-reg value-temp)))
+              for loc = (cdr (assoc i (param-layout-alist layout)))
+              when (eq (getf loc :kind) :stack)
+              do (if (is-longlong-type (get-expression-type arg))
+                     (let (pair)
+                       (generate-expression-64 arg)
+                       (setf pair *current-64-result*)
+                       (emit `(Rx= -8 ,const-temp))
+                       (emit '(A=Rx SP))
+                       (emit `(A+=Rx ,const-temp))
+                       (emit '(Rx=A SP))
+                       (emit-store-64 pair)
+                       (free-reg-pair pair))
+                     (let ((value-temp (alloc-temp-reg)))
+                       (generate-expression arg)
+                       (emit `(Rx=A ,value-temp))
+                       (emit `(Rx= -4 ,const-temp))
+                       (emit '(A=Rx SP))
+                       (emit `(A+=Rx ,const-temp))
+                       (emit '(Rx=A SP))
+                       (emit `(M[A]=Rx ,value-temp))
+                       (free-temp-reg value-temp))))
         (free-temp-reg const-temp)))
 
-    ;; Now evaluate args and pass in registers P0-P3
+    ;; Now evaluate register-passed args and put them in P0-P3
     ;; 64-bit args take 2 register slots each (low:high)
     ;; A register-resident variable can be read straight into Pn in the second
     ;; pass (its home register is callee-saved and never a param reg), but only
@@ -3719,26 +3883,25 @@
     ;; and the call -- :register locals can't be aliased, so an explicit
     ;; assignment/++/-- in the arg list is the only thing that can change one.
     (let ((arg-data nil)  ; list of (is-64-bit temp-low temp-high slot const src-reg)
-          (slot 0)        ; current register slot
           (args-pure (notany #'has-side-effects args)))
       ;; First pass: evaluate args and save to temp registers
       (loop for arg in args
-            while (< slot 4)
-            do (let ((arg-type (get-expression-type arg)))
-                 (if (is-longlong-type arg-type)
+            for i from 0
+            for loc = (cdr (assoc i (param-layout-alist layout)))
+            when (eq (getf loc :kind) :reg)
+            do (let ((slot (getf loc :slot)))
+                 (if (is-longlong-type (get-expression-type arg))
                      ;; 64-bit argument
-                     (when (<= slot 2)  ; need 2 slots, so must be at slot 0 or 2
-                       (let ((temp-low (alloc-temp-reg))
-                             (temp-high (alloc-temp-reg)))
-                         (generate-expression-64 arg)
-                         (let ((result *current-64-result*))
-                           (emit `(A=Rx ,(reg-pair-low result)))
-                           (emit `(Rx=A ,temp-low))
-                           (emit `(A=Rx ,(reg-pair-high result)))
-                           (emit `(Rx=A ,temp-high))
-                           (free-reg-pair result))
-                         (push (list t temp-low temp-high slot) arg-data)
-                         (incf slot 2)))
+                     (let ((temp-low (alloc-temp-reg))
+                           (temp-high (alloc-temp-reg)))
+                       (generate-expression-64 arg)
+                       (let ((result *current-64-result*))
+                         (emit `(A=Rx ,(reg-pair-low result)))
+                         (emit `(Rx=A ,temp-low))
+                         (emit `(A=Rx ,(reg-pair-high result)))
+                         (emit `(Rx=A ,temp-high))
+                         (free-reg-pair result))
+                       (push (list t temp-low temp-high slot) arg-data))
                      ;; 32-bit argument
                      (let ((const (get-literal-integer arg))
                            (src-reg (and args-pure (call-arg-direct-reg arg))))
@@ -3756,8 +3919,7 @@
                           (let ((temp (alloc-temp-reg)))
                             (generate-expression arg)
                             (emit `(Rx=A ,temp))
-                            (push (list nil temp nil slot nil nil) arg-data))))
-                       (incf slot)))))
+                            (push (list nil temp nil slot nil nil) arg-data))))))))
       (setf arg-data (nreverse arg-data))
 
       ;; Second pass: move from temps (or constants) to P0-P3
@@ -3802,12 +3964,11 @@
             (emit '(jsr |__indirect_call|))))
 
       ;; Clean up stack arguments
-      (when (> arg-count 4)
-        (let ((stack-args (* 4 (- arg-count 4))))
-          (emit `(A=Rx SP))
-          (emit `(Rx= ,stack-args R0))
-          (emit '(A+=Rx R0))
-          (emit '(Rx=A SP))))
+      (when (> (param-layout-stack-bytes layout) 0)
+        (emit `(A=Rx SP))
+        (emit `(Rx= ,(param-layout-stack-bytes layout) R0))
+        (emit '(A+=Rx R0))
+        (emit '(Rx=A SP)))
       (when indirect-temp
         (free-temp-reg indirect-temp))
 

@@ -6904,7 +6904,8 @@ int printf(char *fmt, int a0, int a1, int a2) {
     (test-phase29-cse-infrastructure)
     (test-phase30-stdio)
     (test-phase31-const-mul)
-    (test-phase32-bitfields)))
+    (test-phase32-bitfields)
+    (test-phase33-longlong-params)))
 
 ;;; ===========================================================================
 ;;; Phase 32: Bitfield Tests
@@ -7061,6 +7062,124 @@ int main() { struct S s; s.a = 0xAAAAA; s.b = 0; return s.b; }")))))
     (test-bitfield-mixed-struct)
     (test-bitfield-pointer)
     (test-bitfield-overflow)))
+
+;;; ===========================================================================
+;;; Phase 33 Tests: 64-bit (long long) Function Parameters
+;;; ===========================================================================
+;;; A parameter's physical location (which P-register pair, or which stack
+;;; slot) can differ from its declaration ordinal once a 64-bit parameter is
+;;; involved, since a 64-bit parameter occupies two P-registers/stack words
+;;; instead of one. These tests exercise: mixed 32/64-bit ordering, a 64-bit
+;;; parameter that isn't first still landing in the right register pair, a
+;;; 64-bit parameter surviving a non-leaf function's own P-register spill,
+;;; 64-bit parameters/arguments that overflow P0-P3 onto the stack (both leaf
+;;; and non-leaf), and writing back to a stack-passed parameter.
+
+;;; Note: 64-bit arguments below are routed through a runtime-assigned global
+;;; (not passed as literals) to avoid constant-folding, matching the
+;;; convention used throughout the longlong tests above. This also sidesteps
+;;; a couple of unrelated, pre-existing -O bugs unearthed while writing these
+;;; tests: constant-folding a 64-bit literal argument to an inlined function
+;;; drops its high word, and inlining a call to a long-long-returning function
+;;; produces an internal AST node that the cast codegen can't yet handle. Both
+;;; are inliner/optimizer bugs, not parameter-passing bugs -- out of scope
+;;; here, so the tests are written to avoid tripping them.
+
+(deftest test-longlong-param-mixed-order ()
+  "Test: a 32-bit parameter's physical register slot shifts when a preceding
+   64-bit parameter consumes two slots, and vice versa"
+  (check
+    ;; long long first, int second: b's physical slot is P2, not P1
+    (= 7 (run-and-get-result "
+int f(long long a, int b) { return b; }
+long long g_a;
+int main() { g_a = 0x100000000LL; return f(g_a, 7); }"))
+    ;; int first, long long second: b's physical slot pair is P1:P2, not P2:P3
+    (= 7 (run-and-get-result "
+int g(int a, long long b) { return (int)(b >> 32) + a; }
+long long g_b;
+int main() { g_b = 0x200000000LL; return g(5, g_b); }"))))
+
+(deftest test-longlong-param-register-slot ()
+  "Test: a 64-bit parameter that isn't the first parameter reads from its
+   correct physical P-register pair rather than being rejected or misread"
+  (check
+    (= 1 (run-and-get-result "
+long long h(int a, int b, long long c) { return c; }
+long long g_c;
+int main() { g_c = 0x99LL; return (int)h(1, 2, g_c) == 0x99; }"))))
+
+(deftest test-longlong-param-nonleaf-spill ()
+  "Test: a 64-bit parameter's high word survives a non-leaf function's own
+   call (both halves of its P-register pair must be homed to the stack,
+   not just the low half)"
+  (check
+    (= 1 (run-and-get-result "
+int sink(int x) { return x; }
+int hi32(long long v) {
+  int s = sink((int)v);
+  return (int)(v >> 32) == 0x12345678;
+}
+long long g_v;
+int main() { g_v = 0x1234567800000042LL; return hi32(g_v); }"))))
+
+(deftest test-longlong-param-stack ()
+  "Test: a 64-bit parameter that doesn't fit in the remaining P-registers is
+   passed on the stack -- both the caller pushing it and the callee reading it"
+  (check
+    ;; Leaf callee: mask (64-bit) exactly fills P2:P3, value (64-bit) spills
+    (= 1 (run-and-get-result "
+int wr_field2_test(int address, int shift, long long mask, long long value) {
+    return (int)(value & mask) + address + shift == 69;
+}
+long long g_mask, g_value;
+int main() {
+    g_mask = 0xFFLL; g_value = 0x142LL;
+    return wr_field2_test(1, 2, g_mask, g_value);
+}"))
+    ;; Non-leaf callee: same shape, but the callee also makes a call, so the
+    ;; stack-argument offset must account for the callee's own pushed regs
+    (= 1 (run-and-get-result "
+int sink2(int x) { return x; }
+int value_high_ok(int address, int shift, long long mask, long long value) {
+    int s = sink2(address);
+    return ((value >> 32) & 0xFFFFFFFFLL) == 0x12345678;
+}
+long long g_mask, g_value;
+int main() {
+    g_mask = 0xFFFFFFFFFFFFFFFFLL; g_value = 0x1234567800000042LL;
+    return value_high_ok(1, 2, g_mask, g_value);
+}"))))
+
+(deftest test-stack-param-write ()
+  "Test: writing back to a stack-passed parameter (5th+ int, or a spilled
+   64-bit parameter) is supported rather than a hard compiler error"
+  (check
+    (= 1 (run-and-get-result "
+int overwrite_stack_param(int a, int b, int c, int d, int e) {
+    e = e + 1;
+    return e == 11;
+}
+int main() { return overwrite_stack_param(1,2,3,4,10); }"))
+    (= 1 (run-and-get-result "
+int overwrite_stack_param64(int a, int b, long long c, long long d) {
+    d = d + 1;
+    return d == 11;
+}
+long long g_c, g_d;
+int main() {
+    g_c = 0xFFLL; g_d = 10LL;
+    return overwrite_stack_param64(1,2,g_c,g_d);
+}"))))
+
+(deftest test-phase33-longlong-params ()
+  "Phase 33: 64-bit function parameters"
+  (combine-results
+    (test-longlong-param-mixed-order)
+    (test-longlong-param-register-slot)
+    (test-longlong-param-nonleaf-spill)
+    (test-longlong-param-stack)
+    (test-stack-param-write)))
 
 (defun test-c-compiler-with-output (&optional (output-dir "/tmp/c-compiler-tests"))
   "Run all C compiler tests and save each test's output to a separate file.
