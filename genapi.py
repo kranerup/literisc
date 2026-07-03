@@ -2014,6 +2014,9 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     wordsize = backend.getWordSize()
     uint     = f"uint{definedUintSize}_t"
     uint_hw  = f"uint{wordsize}_t"
+    # Accumulator type wide enough to hold two hw words merged together.
+    # Only valid because a "2-word span" field satisfies bit_off+fsize <= 2*wordsize.
+    double_uint = f"uint{wordsize * 2}_t"
 
     c_code = dedent("""\
     // (C) Packet Architects AB
@@ -2056,6 +2059,58 @@ def genFieldCapi(gRegs, backend, definedUintSize):
 
     void wr_field_set({uint_hw} address, {uint_hw} shift, {uint_hw} mask, {uint_hw} value) {{
       writeToDevice(address, (value & mask) << shift, 0);
+    }}
+
+    """)
+
+    # Shared read/modify/write helpers for fields <= wordsize bits that still
+    # span two hw words (e.g. a 24-bit field straddling a word boundary). These
+    # stay entirely in native uint_hw arithmetic -- no wide accumulator needed --
+    # which matters a lot on targets where wider-than-native ops get emulated
+    # in software and bloat the binary.
+    c_code += dedent(f"""\
+    {uint_hw} rd_field2_32({uint_hw} address, {uint_hw} shift, {uint_hw} mask) {{
+      {uint_hw} lo_bits = {wordsize} - shift;
+      {uint_hw} entry0 = readFromDevice(address, 0);
+      {uint_hw} entry1 = readFromDevice(address + 1, 1);
+      return ((entry0 >> shift) & (mask & ((({uint_hw})1 << lo_bits) - 1)))
+           | ((entry1 & (mask >> lo_bits)) << lo_bits);
+    }}
+
+    void wr_field2_32({uint_hw} address, {uint_hw} shift, {uint_hw} mask, {uint_hw} value) {{
+      {uint_hw} lo_bits = {wordsize} - shift;
+      {uint_hw} lo_mask = mask & ((({uint_hw})1 << lo_bits) - 1);
+      {uint_hw} hi_mask = mask >> lo_bits;
+      {uint_hw} entry0 = readFromDevice(address, 0);
+      {uint_hw} entry1 = readFromDevice(address + 1, 1);
+      entry0 = (entry0 & ~(lo_mask << shift)) | ((value & lo_mask) << shift);
+      entry1 = (entry1 & ~hi_mask) | ((value >> lo_bits) & hi_mask);
+      writeToDevice(address, entry0, 1);
+      writeToDevice(address + 1, entry1, 0);
+    }}
+
+    """)
+
+    # Shared read/modify/write helpers for fields spanning exactly two hw words
+    # that are wider than one hw word (33-64 bits). These merge into a single
+    # double-width accumulator, so the merge/extract/insert/split logic only
+    # needs to exist once instead of being unrolled per-field. Big binary-size
+    # win, since this pattern (mac addresses, wide counters/pointers crossing a
+    # word boundary) recurs across many registers.
+    c_code += dedent(f"""\
+    {double_uint} rd_field2({uint_hw} address, {uint_hw} shift, {double_uint} mask) {{
+      {double_uint} lo = readFromDevice(address, 0);
+      {double_uint} hi = readFromDevice(address + 1, 1);
+      return ((lo | (hi << {wordsize})) >> shift) & mask;
+    }}
+
+    void wr_field2({uint_hw} address, {uint_hw} shift, {double_uint} mask, {double_uint} value) {{
+      {double_uint} lo = readFromDevice(address, 0);
+      {double_uint} hi = readFromDevice(address + 1, 1);
+      {double_uint} combined = lo | (hi << {wordsize});
+      combined = (combined & ~(mask << shift)) | ((value & mask) << shift);
+      writeToDevice(address, ({uint_hw})combined, 1);
+      writeToDevice(address + 1, ({uint_hw})(combined >> {wordsize}), 0);
     }}
 
     """)
@@ -2224,7 +2279,18 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                     if w_start == w_end:
                         # Single hw word: route through the shared rd_field helper.
                         c_code += f"  *out = ({field_uint})rd_field({addr_expr(w_start)}, {bit_off}, {mask});\n"
+                    elif nr_hw_words == 2 and field_uint == "uint64_t":
+                        # Field wider than one hw word (33-64 bits), spans two words:
+                        # needs the wide accumulator helper.
+                        c_code += f"  *out = ({field_uint})rd_field2({addr_expr(w_start)}, {bit_off}, {mask});\n"
+                    elif nr_hw_words == 2:
+                        # Field fits within one hw word's width but straddles a word
+                        # boundary: stay in native-width arithmetic.
+                        c_code += f"  *out = ({field_uint})rd_field2_32({addr_expr(w_start)}, {bit_off}, {mask});\n"
                     else:
+                        # Spans 3+ hw words (only possible for a large, badly-
+                        # misaligned field) — a fixed-width accumulator isn't wide
+                        # enough here, so fall back to explicit per-word assembly.
                         for w in range(w_start, w_end + 1):
                             c_code += f"  {uint_hw} entry{w};\n"
                         c_code += f"  {backend.c_read(addr_expr(w_start), 0, f'entry{w_start}')}"
@@ -2255,7 +2321,15 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                         if w_start == w_end:
                             # Single hw word: shared read/modify/write helper.
                             c_code += f"  wr_field({addr_expr(w_start)}, {bit_off}, {mask}, ({uint_hw}){fname});\n"
+                        elif nr_hw_words == 2 and field_uint == "uint64_t":
+                            # Wider than one hw word, spans two words: wide accumulator helper.
+                            c_code += f"  wr_field2({addr_expr(w_start)}, {bit_off}, {mask}, ({double_uint}){fname});\n"
+                        elif nr_hw_words == 2:
+                            # Fits within one hw word's width, straddles a boundary:
+                            # native-width helper.
+                            c_code += f"  wr_field2_32({addr_expr(w_start)}, {bit_off}, {mask}, ({uint_hw}){fname});\n"
                         else:
+                            # 3+ word fallback — unchanged explicit assembly.
                             for w in range(w_start, w_end + 1):
                                 c_code += f"  {uint_hw} entry{w};\n"
                             c_code += f"  {backend.c_read(addr_expr(w_start), 0, f'entry{w_start}')}"
@@ -2279,6 +2353,8 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                         # Write-only single-word register: no read, shared helper.
                         c_code += f"  wr_field_set({addr_expr(w_start)}, {bit_off}, {mask}, ({uint_hw}){fname});\n"
                     else:
+                        # Write-only multi-word register: no prior read at all, so
+                        # each entry word is built purely from the incoming value.
                         for w_idx in range(total_hw_words):
                             c_code += f"  {uint_hw} entry{w_idx} = 0;\n"
                         if w_start == w_end:
