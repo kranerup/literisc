@@ -261,7 +261,11 @@
    - A=Rx instruction: unconditional A write (doesn't read old A) — A is dead, return T.
    - Label/comment/data directives: skip (cross labels freely; a label's first instruction
      overwrites A on all paths into it when that instruction is A=Rx).
-   - Branches and calls (opname starts with J, or JSR): conservatively return NIL.
+   - JSR: per the ISA (SRP=PC; PC=PC+imm — see emulator.lisp i-jsr), a direct call
+     neither reads nor writes A, and control resumes at the next instruction, so it's
+     transparent to this analysis — skip over it and keep scanning.
+   - Other branches/calls (opname starts with J, e.g. JZ/JNZ/J/JAL/J-A which reads A
+     as an indirect jump target): conservatively return NIL.
    - Any other instruction whose opname contains 'A': A might be read, return NIL.
    - Instructions whose opname has no 'A': skip."
   (loop for i from from-idx below (length code-vec)
@@ -282,9 +286,11 @@
                     (string= opname "ADWORD")
                     (string= opname "ALIGN-DWORD"))
                 nil)
-               ;; Branches, jumps, and calls: stop conservatively
-               ((or (string= opname "JSR")
-                    (and (>= (length opname) 1) (char= (char opname 0) #\J)))
+               ;; JSR: doesn't touch A and doesn't branch away — transparent, keep scanning
+               ((string= opname "JSR")
+                nil)
+               ;; Other branches/jumps: stop conservatively
+               ((and (>= (length opname) 1) (char= (char opname 0) #\J))
                 (return-from A-dead-before-next-write-p nil))
                ;; Any other instruction whose name contains 'A': might read A
                ((find #\A opname)
