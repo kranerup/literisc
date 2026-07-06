@@ -44,6 +44,9 @@ def hexdump_to_prog( dump ):
             prog += [ int(x,16) for x in hexdata.split(" ") ]
     return { idx: val for idx,val in enumerate( prog ) }
 
+def load_rom():
+    __verilog__ = "//TESTING"
+
 def rom(
     odata,
     idata,
@@ -72,8 +75,8 @@ def rom(
     sel_ram = signal()
     rd_ram = signal()
 
-    def load_rom():
-        pass
+
+    load = load_rom()
 
     adr_bits = (depth-1).bit_length()
 
@@ -127,19 +130,15 @@ def rom(
 
     return instances()
 
-
-#rom.verilog_code = """\
-#initial begin
-#    $$readmemh(\"program.hex\", rom_mem);
-#end
-#"""
-
 def cpu_sys(
         clk,
         sync_rstn,
         axi,
         conf,
         instr_trace,
+        imem_depth = 8192,
+        dmem_depth = 32768,
+        boot_code_path = "./lcpu_boot_code.hex",
         ):
 
     cpu_imem_radr = signal(32)
@@ -217,6 +216,7 @@ def cpu_sys(
     TICK_WAIT = 3
     CONF_SLAVE_WAIT = 4
     INTERRUPT_WAIT = 5
+
 
     @always_comb
     def cg():
@@ -914,6 +914,11 @@ def cpu_sys(
 
 
     boot_code = prog_to_tuples( program )
+#    __verilog__ = f"""
+#initial begin
+#    $readmemh("{boot_code_path}")
+#end
+#"""
 
     imem = rom(
         odata        = imem_dout,
@@ -925,7 +930,7 @@ def cpu_sys(
         clk          = cpu_clk,
         clk_en       = rom_clk_en,
         sync_rstn    = sync_rstn,
-        depth        = IMEM_DEPTH,
+        depth        = imem_depth,
         input_flops  = 0,
         output_flops = 0,
         content      = boot_code,
