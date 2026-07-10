@@ -4727,19 +4727,12 @@
          ;; Check if init-value is a label reference (:label SYMBOL)
          (when (and (listp init-value) (eq (car init-value) :label))
            (setf init-value (second init-value)))  ; extract the label symbol
-         ;; For arrays without initializer, emit zeroes for each element
+         ;; For arrays without initializer, reserve zeroed storage in bulk
          (if (type-desc-array-size var-type)
              (let* ((total-elems (total-array-elements (type-desc-array-size var-type)))
                     (elem-type (get-array-element-type var-type))
                     (elem-size (if elem-type (type-size elem-type) 4)))
-               (dotimes (i total-elems)
-                 (case elem-size
-                   (1 (emit `(abyte 0)))
-                   (2 (emit `(aword 0)))
-                   (8 ;; 64-bit: emit two dwords per element
-                    (emit `(adword 0))
-                    (emit `(adword 0)))
-                   (otherwise (emit `(adword 0))))))
+               (emit `(lalloc-bytes ,(* total-elems elem-size))))
              ;; Non-array: emit single value
              (case size
                (1 (emit `(abyte ,init-value)))
