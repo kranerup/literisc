@@ -1365,11 +1365,30 @@
    (loop for param in (ast-node-children params-node)
          collect (param-width (ast-node-result-type param)))))
 
-(defun compute-arg-layout (args)
-  "Compute the param-layout for a call's actual argument expressions."
+(defun lookup-declared-param-types (name)
+  "Declared parameter types for a directly-called function, in order, or NIL
+   if unknown (indirect call through a function pointer, or the callee's
+   signature was never declared/defined in this translation unit)."
+  (and name (gethash name (compiler-state-function-param-types *state*))))
+
+(defun effective-arg-type (arg declared-type)
+  "The type used to classify ARG's register width: the callee's declared
+   parameter type when known, else the argument expression's own type.
+   Using the declared type keeps caller and callee agreeing on register
+   layout even when a narrower expression (e.g. a plain int literal or an
+   int-typed variable) is passed where a 64-bit parameter is declared --
+   generate-expression-64 already knows how to promote a 32-bit value into
+   a 64-bit slot, so all that's needed is telling it to."
+  (or declared-type (get-expression-type arg)))
+
+(defun compute-arg-layout (args &optional declared-types)
+  "Compute the param-layout for a call's actual argument expressions.
+   DECLARED-TYPES, when given, are the callee's declared parameter types --
+   see effective-arg-type."
   (classify-param-widths
    (loop for arg in args
-         collect (param-width (get-expression-type arg)))))
+         for i from 0
+         collect (param-width (effective-arg-type arg (nth i declared-types))))))
 
 (defun param-location (idx)
   "Physical location of parameter ordinal IDX in the current function, per
@@ -3826,12 +3845,18 @@
                               (sym (lookup-symbol name)))
                          (when (and sym (eq (sym-entry-storage sym) :function))
                            (make-c-label name)))))
+         ;; The callee's declared parameter types, when known -- used so a
+         ;; narrower argument (e.g. an int literal/variable passed where a
+         ;; uint64_t/long long parameter is declared) still gets classified
+         ;; and promoted to 64-bit, keeping caller and callee in agreement.
+         (declared-param-types (when (eq (ast-node-type func-expr) 'var-ref)
+                                 (lookup-declared-param-types (ast-node-value func-expr))))
          ;; Classifies each argument as register- or stack-passed, exactly as
          ;; compute-param-layout classifies the callee's declared parameters
          ;; (a 64-bit argument that doesn't fit the remaining P-registers, and
          ;; everything after it, goes on the stack) -- so caller and callee
          ;; always agree on where an argument lives.
-         (layout (compute-arg-layout args))
+         (layout (compute-arg-layout args declared-param-types))
          (indirect-temp nil))  ; Temp register for indirect call target
 
     ;; For indirect calls (func-label is nil), evaluate func expression first
@@ -3854,7 +3879,7 @@
               for arg = (nth i args)
               for loc = (cdr (assoc i (param-layout-alist layout)))
               when (eq (getf loc :kind) :stack)
-              do (if (is-longlong-type (get-expression-type arg))
+              do (if (is-longlong-type (effective-arg-type arg (nth i declared-param-types)))
                      (let (pair)
                        (generate-expression-64 arg)
                        (setf pair *current-64-result*)
@@ -3890,7 +3915,7 @@
             for loc = (cdr (assoc i (param-layout-alist layout)))
             when (eq (getf loc :kind) :reg)
             do (let ((slot (getf loc :slot)))
-                 (if (is-longlong-type (get-expression-type arg))
+                 (if (is-longlong-type (effective-arg-type arg (nth i declared-param-types)))
                      ;; 64-bit argument
                      (let ((temp-low (alloc-temp-reg))
                            (temp-high (alloc-temp-reg)))

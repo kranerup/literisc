@@ -119,6 +119,7 @@
   (need-div64-runtime nil) ; set to t when __div64 runtime is needed
   (need-mod64-runtime nil) ; set to t when __mod64 runtime is needed
   (function-table (make-hash-table :test 'equal)) ; name -> function AST node for inlining
+  (function-param-types (make-hash-table :test 'equal)) ; name -> list of declared param type-descs
   (dead-functions (make-hash-table :test 'equal)) ; functions to not emit (fully inlined)
   (enum-types (make-hash-table :test 'equal))    ; tag-name -> list of (name . value) constants
   (struct-types (make-hash-table :test 'equal))  ; tag-name -> struct-def

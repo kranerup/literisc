@@ -564,7 +564,7 @@
 ;;; ===========================================================================
 
 (defparameter *fixed-width-type-keywords*
-  '("int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t")
+  '("int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t" "int64_t" "uint64_t")
   "C99 fixed-width type names that are lexed as keywords. They may legitimately
    appear as a typedef name (e.g. <stdint.h>'s `typedef unsigned char uint8_t;`),
    in which case we accept the keyword token in the typedef-name position.")
@@ -652,6 +652,10 @@
      (make-int32-type nil))
     ((match-token 'keyword "uint32_t")
      (make-int32-type t))
+    ((match-token 'keyword "int64_t")
+     (make-longlong-type nil))
+    ((match-token 'keyword "uint64_t")
+     (make-longlong-type t))
     ((match-token 'keyword "void")
      (make-void-type))
     ;; Check for typedef names (identifiers in typedef-types hash table)
@@ -842,6 +846,7 @@
                             (member (token-value next)
                                     '("int" "char" "void" "unsigned" "signed" "short" "long"
                                       "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                                      "int64_t" "uint64_t"
                                       "enum" "struct" "union" "volatile")
                                     :test #'string=))
                        ;; Typedef names are identifiers in typedef-types
@@ -1012,6 +1017,7 @@
                 (member (token-value tok)
                         '("int" "char" "void" "unsigned" "signed" "short" "long"
                           "int8_t" "uint8_t" "int16_t" "uint16_t" "int32_t" "uint32_t"
+                          "int64_t" "uint64_t"
                           "enum" "struct" "union" "volatile" "const" "static")
                         :test #'string=))
            ;; Typedef names are identifiers
@@ -1392,6 +1398,13 @@
      1)
     (otherwise 0)))
 
+(defun register-function-param-types (name params)
+  "Record a function's declared parameter types, in order, so call sites can
+   classify argument register width from the callee's prototype rather than
+   from each argument expression's own (possibly narrower) type."
+  (setf (gethash name (compiler-state-function-param-types *state*))
+        (mapcar #'ast-node-result-type params)))
+
 (defun parse-function-prototype-params (name ret-type)
   "Parse just the parameter list of a function prototype (for multi-declarator lines)"
   ;; Register function name in global symbol table
@@ -1421,9 +1434,11 @@
         (unless (match-token 'punctuation ",")
           (return))))
     (expect-token 'punctuation ")")
+    (setf params (nreverse params))
+    (register-function-param-types name params)
     (make-node 'func-prototype
                :value name
-               :children (list (make-node 'params :children (nreverse params)))
+               :children (list (make-node 'params :children params))
                :result-type ret-type)))
 
 (defun parse-function-definition (ret-type name &optional is-inline)
@@ -1486,20 +1501,24 @@
       (exit-scope)
       (setf (compiler-state-current-function *state*) nil)
       ;; Return a prototype node (no code generation needed)
+      (setf params (reverse params))
+      (register-function-param-types name params)
       (return-from parse-function-definition
         (make-node 'func-prototype
                    :value name
-                   :children (list (make-node 'params :children (reverse params)))
+                   :children (list (make-node 'params :children params))
                    :result-type ret-type)))
 
     ;; Check for multiple declarators (e.g., int f(int a), g(int b), x;)
     (when (check-token 'punctuation ",")
       (exit-scope)
       (setf (compiler-state-current-function *state*) nil)
+      (setf params (reverse params))
+      (register-function-param-types name params)
       ;; First prototype is done, continue parsing more declarators
       (let ((decls (list (make-node 'func-prototype
                                     :value name
-                                    :children (list (make-node 'params :children (reverse params)))
+                                    :children (list (make-node 'params :children params))
                                     :result-type ret-type))))
         (loop while (match-token 'punctuation ",")
               do (let ((next-name (token-value (expect-token 'identifier))))
@@ -1525,6 +1544,8 @@
 
       ;; Reset current function to nil (back to global scope)
       (setf (compiler-state-current-function *state*) nil)
+      (setf params (reverse params))
+      (register-function-param-types name params)
 
       ;; Calculate frame size from locals allocated during parsing
       (let* ((frame-size (- (compiler-state-local-offset *state*)))
@@ -1533,7 +1554,7 @@
              ;; Create function node with local register info and inline hint
              (func-node (make-node 'function
                                    :value name
-                                   :children (list (make-node 'params :children (reverse params))
+                                   :children (list (make-node 'params :children params)
                                                    body)
                                    :result-type ret-type
                                    :data (list :frame-size frame-size
@@ -1704,6 +1725,8 @@
     (return-from parse-top-level (parse-typedef-declaration)))
   ;; Check for static keyword (no-op for functions, just consume it)
   (match-token 'keyword "static")
+  ;; Check for extern keyword (declaration, not definition; consume it)
+  (match-token 'keyword "extern")
   ;; Check for inline keyword
   (let ((is-inline (match-token 'keyword "inline")))
     ;; Parse type and name
