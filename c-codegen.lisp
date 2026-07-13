@@ -4959,8 +4959,11 @@
 ;;; ===========================================================================
 
 (defun collect-strings (node)
-  "Collect all string literals in AST"
+  "Collect all string literals in AST, skipping functions eliminated as dead code."
   (when (and node (ast-node-p node))
+    (when (and (eq (ast-node-type node) 'function)
+               (gethash (ast-node-value node) (compiler-state-dead-functions *state*)))
+      (return-from collect-strings))
     (when (eq (ast-node-type node) 'string-literal)
       (let ((str (ast-node-value node)))
         (unless (find str *string-literals* :key #'cdr :test #'string=)
