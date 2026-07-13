@@ -281,9 +281,12 @@
 
 (defun make-c-label (name)
   "Create a label symbol for a C identifier, avoiding Common Lisp reserved names"
-  (let ((upper-name (string-upcase name)))
-    ;; Check if the name conflicts with CL special symbols
-    (if (member upper-name '("GO" "IF" "OR" "AND" "DO" "NIL" "T") :test #'string=)
+  (let* ((upper-name (string-upcase name))
+         (existing (find-symbol upper-name :c-compiler)))
+    ;; If this name resolves to a symbol homed in the COMMON-LISP package
+    ;; (inherited via :use :cl), interning it would hand back that locked
+    ;; symbol itself rather than a fresh one, so disambiguate with a prefix.
+    (if (and existing (eq (symbol-package existing) (find-package :common-lisp)))
         (intern (format nil "_~a" upper-name) :c-compiler)
         (intern upper-name :c-compiler))))
 
