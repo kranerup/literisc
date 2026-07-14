@@ -1111,17 +1111,24 @@
   (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (eliminate-dead t))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (conf-mem-size nil) (eliminate-dead t))
   "Compile, assemble, and run a C program, returning the result.
    When CONF-SOCKET is a path, opens a conf bus connection on that socket
-   (waits for a client) before running."
+   (waits for a client) before running.
+   When CONF-SOCKET is nil and CONF-MEM-SIZE is a positive integer, conf
+   address space accesses are instead backed by a dedicated local array of
+   that many bytes, so callers can exercise conf-mapped fields without a
+   live conf bus peer."
   (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead))
          (dmem (lr-emulator:make-dmem (if conf-socket #x1000000 #x10000)))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose))
          ;; Number of instructions actually executed (secondary return value).
-         (instr-count (if conf-socket
-                          (lr-emulator:run-emul-conf emul max-cycles conf-socket verbose)
-                          (lr-emulator:run-emul emul max-cycles verbose))))
+         (instr-count (progn
+                        (when (and (not conf-socket) conf-mem-size (> conf-mem-size 0))
+                          (lr-emulator:add-local-conf emul (lr-emulator:make-conf-mem conf-mem-size)))
+                        (if conf-socket
+                            (lr-emulator:run-emul-conf emul max-cycles conf-socket verbose)
+                            (lr-emulator:run-emul emul max-cycles verbose)))))
     ;; Return value is in P0 (R10)
     (let ((ret-val (aref (lr-emulator::processor-state-r
                            (lr-emulator:emulated-system-processor emul))
