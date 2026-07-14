@@ -784,7 +784,7 @@ def genPrintStruct(name, fields, definedUintSize, use_bitfields ):
         if bits > definedUintSize:
             nr_bytes = (bits + 7) // 8
             c += f'  for (int i=0; i<{nr_bytes}; i++)\n'
-            c += f'    printf(" {fname:{max_width}s}[%2d] | 0x%02x\\n", i, s->{fname}[i]);\n'
+            c += f'    printf(" {fname:{max_width}s}[%d] | %d\\n", i, s->{fname}[i]);\n'
         else:
             if bits <= 3:
                 hspec = 'd' if use_bitfields else 'ld'
@@ -2031,11 +2031,11 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     #define CONF_LOW 65536
 
     uint32_t readFromDevice(uint32_t address, uint32_t mode) {
-      return *(uint32_t *)((uint8_t *)CONF_LOW + address);
+      return ((uint32_t *)CONF_LOW)[address];
     }
 
     void writeToDevice(uint32_t address, uint32_t data, uint32_t mode) {
-      *(uint32_t *)((uint8_t *)CONF_LOW + address) = data;
+      ((uint32_t *)CONF_LOW)[address] = data;
     }
 
     """)
@@ -2640,7 +2640,7 @@ def genRandomReads(reg,
         if size<=wordsize:
             t = Template("""
           if( ${reg}_tmp.$fieldName != ${reg}_data[i][portId][setId][sliceId].$fieldName ) {
-            printf("ERROR in $reg field $fieldName Got:%lx Expected %lx \\n",
+            printf("ERROR in $reg field $fieldName Got:%d Expected %d \\n",
                    (long unsigned int)${reg}_tmp.$fieldName,
                    (long unsigned int)${reg}_data[i][portId][setId][sliceId].$fieldName);
             error += 1;
@@ -2652,7 +2652,7 @@ def genRandomReads(reg,
         else:
             t = Template("""
           if( ${reg}_tmp.$fieldName[$idx] != ${reg}_data[i][portId][setId][sliceId].$fieldName[$idx] ) {
-            printf("ERROR in $reg part [$idx] field $fieldName Got:%lx Expected %lx \\n",
+            printf("ERROR in $reg part [$idx] field $fieldName Got:%d Expected %d \\n",
                    (long unsigned int)${reg}_tmp.$fieldName[$idx],
                    (long unsigned int)${reg}_data[i][portId][setId][sliceId].$fieldName[$idx]);
             error += 1;
@@ -3233,6 +3233,228 @@ class FlexswitchDB(object):
 
     return py
 
+# ------------------------------------------------------------ createCFieldApplStub
+def createCFieldApplStub():
+    """Minimal preamble for the field-API test program.
+
+    Only <stdio.h> is used -- this targets an embedded environment
+    where the rest of the standard library is not assumed to be
+    available. flexswitch_fields.h is self-contained (it defines its
+    own uint8_t/uint32_t/uint64_t macros and readFromDevice/
+    writeToDevice against CONF_LOW), so nothing else is needed.
+    """
+    return dedent("""\
+    // (C) Packet Architects AB
+    // Minimal test application for the flexswitch field-level API.
+    // Only <stdio.h> is used -- this targets an embedded environment
+    // where the rest of the standard library is not assumed to be
+    // available. This writes real values through readFromDevice /
+    // writeToDevice (CONF_LOW), i.e. it exercises live registers --
+    // don't run it against fields that aren't safe to scribble over.
+    #include <stdio.h>
+    #include "flexswitch_fields.h"
+
+    """)
+
+# ------------------------------------------------------------ genFieldTestPRNG
+def genFieldTestPRNG():
+    """Tiny xorshift32 PRNG so we don't need stdlib's rand()/srand()."""
+    return dedent("""\
+    // Minimal xorshift32 PRNG -- avoids depending on stdlib rand()/srand().
+    static uint32_t rng_state = 0x9e3779b9u;
+
+    static uint32_t next_random(void) {
+      uint32_t x = rng_state;
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      rng_state = x;
+      return x;
+    }
+
+    static uint64_t next_random64(void) {
+      uint64_t hi = next_random();
+      uint64_t lo = next_random();
+      return (hi << 32) | lo;
+    }
+
+    """)
+
+# ------------------------------------------------------------ genFieldRegTest
+def genFieldRegTest(reg, backend, definedUintSize, random_seed):
+    """Generate a single test_<reg>() function that, per set/slice/
+    port/idx combination, does random-fill + write + read + compare
+    for every field of the register, in that order -- unlike the
+    struct API test, which does all set_random_*, then all write_*,
+    then all read_* across every register.
+    """
+    fields    = gRegs[reg]['Fields']
+    is_single = gRegs[reg]['Single']
+    has_port  = gRegs[reg]['hasPort']
+    has_set   = gRegs[reg]['hasSet']
+    has_slice = gRegs[reg]['hasSlice']
+    reg_type  = gRegs[reg]['Type']
+    entries   = gRegs[reg]['Entries']
+
+    if 'r' not in reg_type and 'w' not in reg_type:
+        return ""
+
+    nr_ports = gRegs[reg]['maxPort'] + 1 if has_port else 1
+    nr_sets  = gRegs[reg]['maxSet']  + 1 if has_set  else 1
+    nr_slice = gRegs[reg]['maxSlice'] + 1 if has_slice else 1
+
+    loop_entries = 1 if is_single else entries
+
+    if has_slice:
+        nr_entries = loop_entries if type(loop_entries) == list else [loop_entries] * nr_slice
+    else:
+        nr_entries = [loop_entries]
+
+    if has_slice and has_port:
+        port_min = [0] * nr_slice
+        port_max = [0] * nr_slice
+        for slc in range(nr_slice):
+            portLst = getPorts(reg, slc)
+            port_min[slc] = min(portLst)
+            port_max[slc] = max(portLst)
+    else:
+        port_min = [0] * nr_slice
+        port_max = [nr_ports] * nr_slice
+
+    slice_pfix = "_slice" if has_slice else ""
+
+    call_args = []
+    if has_slice:
+        call_args.append("sliceId")
+    if has_port:
+        call_args.append("portId")
+    if has_set:
+        call_args.append("setId")
+    if not is_single:
+        call_args.append("i")
+    call_prefix = ", ".join(call_args)
+    sep = ", " if call_prefix else ""
+
+    decl_body  = ""
+    write_body = ""
+    read_body  = ""
+    has_bytearray_field = False
+
+    for field in fields:
+        fname = convertToLegal(field['Name'])
+        fsize = calcSize(field['Start bit'], field['End bit'])
+        is_bytearray = fsize > 64
+        field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
+
+        if is_bytearray:
+            has_bytearray_field = True
+            nr_bytes = (fsize + 7) // 8
+            decl_body += f"    uint8_t exp_{fname}[{nr_bytes}];\n"
+            decl_body += f"    uint8_t got_{fname}[{nr_bytes}];\n"
+
+            if 'w' in reg_type:
+                write_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) exp_{fname}[bi] = (uint8_t)next_random();\n"
+                if fsize % 8 != 0:
+                    top_mask = (1 << (fsize % 8)) - 1
+                    write_body += f"    exp_{fname}[{nr_bytes-1}] &= 0x{top_mask:x};\n"
+                write_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}exp_{fname} );\n"
+
+            if 'r' in reg_type:
+                read_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}got_{fname} );\n"
+                if 'w' in reg_type:
+                    read_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) {{\n"
+                    read_body += f"      if (got_{fname}[bi] != exp_{fname}[bi]) {{\n"
+                    read_body += (f"        printf(\"ERROR in {reg} field {fname}[%d] "
+                                   f"Got:%d Expected:%d\\n\", bi, got_{fname}[bi], exp_{fname}[bi]);\n")
+                    read_body += "        error += 1;\n"
+                    read_body += "      } else {\n        correct += 1;\n      }\n"
+                    read_body += "    }\n"
+        else:
+            decl_body += f"    {field_uint} exp_{fname} = 0;\n"
+            decl_body += f"    {field_uint} got_{fname} = 0;\n"
+
+            if fsize == 64:
+                mask = "0xFFFFFFFFFFFFFFFFULL"
+            else:
+                mask = f"0x{(1 << fsize) - 1:X}ULL"
+            randexpr = "next_random64()" if fsize > 32 else "next_random()"
+
+            if 'w' in reg_type:
+                write_body += f"    exp_{fname} = ({field_uint})({randexpr} & {mask});\n"
+                write_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}exp_{fname} );\n"
+
+            if 'r' in reg_type:
+                read_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}&got_{fname} );\n"
+                if 'w' in reg_type:
+                    read_body += f"    if (got_{fname} != exp_{fname}) {{\n"
+                    read_body += (f"      printf(\"ERROR in {reg} field {fname} Got:%d Expected:%d\\n\", "
+                                   f"(unsigned long)got_{fname}, (unsigned long)exp_{fname});\n")
+                    read_body += "      error += 1;\n"
+                    read_body += "    } else {\n      correct += 1;\n    }\n"
+
+    bi_decl = "  int bi;\n" if has_bytearray_field else ""
+
+    # TODO: make each function have the rng_state set it to a unique number
+    func = dedent(f"""
+    void test_{reg}(void) {{
+      rng_state = {random_seed};
+    {bi_decl}  int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
+      int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
+      int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
+      printf("Testing fields for: {reg}\\n");
+      for (int setId=0; setId < {nr_sets}; setId++) {{
+        for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
+          for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
+            for (int i=0; i < entries[sliceId]; i++) {{
+{decl_body}
+{write_body}
+{read_body}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """)
+    return func
+
+# ------------------------------------------------------------ genFieldReadWriteTest
+def genFieldReadWriteTest(gRegs, backend, definedUintSize):
+    """Assemble the full wr_rd_field_test.c source: preamble, PRNG,
+    one test_<reg>() per register (each doing random-fill/write/read/
+    compare together), and a main() that calls them all and reports
+    a pass/fail summary.
+    """
+    c = createCFieldApplStub()
+    c += "int error = 0;\n"
+    c += "int correct = 0;\n\n"
+    c += genFieldTestPRNG()
+
+    body  = ""
+    calls = ""
+    for i, reg in enumerate(gRegs):
+        reg_test = genFieldRegTest(reg, backend, definedUintSize, i + 32145)
+        if reg_test:
+            body  += reg_test
+            calls += f"  test_{reg}();\n"
+
+    c += body
+    c += dedent(f"""
+    int main(void) {{
+    {calls}
+      printf("Correct values:%d\\n", correct);
+      if (error==0) {{
+        printf("Field API test passed.\\n");
+      }} else {{
+        printf("total ERRORS:%d\\n", error);
+        printf("Field API test FAILED!\\n");
+        return 2;
+      }}
+      return 0;
+    }}
+    // EOF
+    """)
+    return c
+
 
 # +---------------------------------------------------+
 # |--------------------- Main ------------------------|
@@ -3430,18 +3652,25 @@ if __name__ == '__main__':
         print("Writing flexswitch.c,h")
         if args.capi:
             (h_code,c_code) = genCapi(gRegs,backend,intSize,use_bitfields=True,field_db={}, hwconf_yml=config)
-            writeFile(outputDirC,"flexswitch.h",h_code,None)
-            writeFile(outputDirC,"flexswitch.c",c_code,None)
+            #writeFile(outputDirC,"flexswitch.h",h_code,None)
+            #writeFile(outputDirC,"flexswitch.c",c_code,None)
+            #print("Writing flexswitch_fields.c,h")
+            #c_fields = genFieldCapi(gRegs,backend,intSize)
+            #writeFile(outputDirC,"flexswitch_fields.h",h_fields,None)
+            #writeFile(outputDirC,"flexswitch_fields.h",c_fields,None)
             print("Writing flexswitch_fields.c,h")
             c_fields = genFieldCapi(gRegs,backend,intSize)
-            #writeFile(outputDirC,"flexswitch_fields.h",h_fields,None)
             writeFile(outputDirC,"flexswitch_fields.h",c_fields,None)
+
+            print("Writing field API test")
+            field_test_code = genFieldReadWriteTest(gRegs, backend, intSize)
+            writeFile(outputDirC,"wr_rd_field_test.c", field_test_code, None)
         if args.pyapi:
             # we can not use bit fields in the C structs when there is a Python API on top.
             field_db = {} # used in FlexswitchDB
             (h_code,c_code) = genCapi(gRegs,backend,intSize,use_bitfields=False,field_db=field_db, hwconf_yml=config)
-            writeFile(outputDirPy,"flexswitch.h",h_code,None)
-            writeFile(outputDirPy,"flexswitch.c",c_code,None)
+            #writeFile(outputDirPy,"flexswitch.h",h_code,None)
+            #writeFile(outputDirPy,"flexswitch.c",c_code,None)
     
     ## ------------ C-API -------------------------------------
     #if args.capi:
