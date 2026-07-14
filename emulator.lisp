@@ -231,8 +231,9 @@
   (:export :make-dmem :make-emulator :run-with-curses
            :run-with-curses-io :run-emul :run-emul-io :get-reg
            :run-with-curses-conf :run-emul-conf
+           :make-conf-mem :add-local-conf
            :emulated-system-processor
-           :processor-add-wr-callback 
+           :processor-add-wr-callback
            :processor-state-break
            :set-break
            :mem-read-word :mem-read-dword :mem-read-byte))
@@ -414,7 +415,47 @@
   (let ((proc (emulated-system-processor emul)))
     (processor-add-wr-callback proc 'conf-write-cb)
     (processor-add-rd-callback proc 'conf-read-cb)))
-  
+
+;;; Local (non-socket) conf bus backing memory.
+;;; Used instead of ADD-CONF when there is no real conf bus peer to talk to
+;;; (e.g. in tests): conf address space reads/writes hit a dedicated array
+;;; instead of a socket, so DMEM itself can stay small.
+(defparameter *local-conf-mem* nil)
+
+(defun make-conf-mem (size)
+  (make-array size
+    :element-type '(unsigned-byte 8)
+    :initial-element 0))
+
+(defun local-conf-write-cb (addr data)
+  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (when *local-conf-mem*
+           (let ((offset (- addr conf-low)))
+             (when (< (+ offset 3) (length *local-conf-mem*))
+               (setf (aref *local-conf-mem* offset)       (logand #xff data))
+               (setf (aref *local-conf-mem* (+ offset 1)) (logand #xff (ash data -8)))
+               (setf (aref *local-conf-mem* (+ offset 2)) (logand #xff (ash data -16)))
+               (setf (aref *local-conf-mem* (+ offset 3)) (logand #xff (ash data -24))))))
+         nil)
+        (t t)))
+
+(defun local-conf-read-cb (addr)
+  (cond ((and (>= addr conf-low) (<= addr conf-hi))
+         (let ((offset (- addr conf-low)))
+           (if (and *local-conf-mem* (< (+ offset 3) (length *local-conf-mem*)))
+               (logior (aref *local-conf-mem* offset)
+                       (ash (aref *local-conf-mem* (+ offset 1)) 8)
+                       (ash (aref *local-conf-mem* (+ offset 2)) 16)
+                       (ash (aref *local-conf-mem* (+ offset 3)) 24))
+               0)))
+        (t nil)))
+
+(defun add-local-conf (emul conf-mem)
+  (setf *local-conf-mem* conf-mem)
+  (let ((proc (emulated-system-processor emul)))
+    (processor-add-wr-callback proc 'local-conf-write-cb)
+    (processor-add-rd-callback proc 'local-conf-read-cb)))
+
 ;;; ==========================================================================
 (defun add-callback (callback-list fn)
   (if fn
