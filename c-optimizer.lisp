@@ -1188,16 +1188,24 @@
       ;; Variable reference - this variable is used
       (var-ref
        (setf (gethash (ast-node-value node) used) t))
-      ;; Assignment - only the RHS counts as a read, LHS is a write
+      ;; Assignment - only the RHS counts as a read for plain "=" (LHS is a
+      ;; pure write). Compound assignment ops (+=, -=, etc.) also read the
+      ;; LHS, so a simple var-ref there must count as a use.
       (assign
        (let ((lhs (first (ast-node-children node)))
              (rhs (second (ast-node-children node))))
-         ;; Don't count simple var-ref on LHS as a use
-         ;; But do collect uses from subscript expressions on LHS
          (when (and (ast-node-p lhs)
-                    (not (eq (ast-node-type lhs) 'var-ref)))
+                    (or (not (eq (ast-node-type lhs) 'var-ref))
+                        (not (string= (ast-node-value node) "="))))
            (collect-used-variables lhs used))
          (collect-used-variables rhs used)))
+      ;; Inline-expr reads its result variable via the :value slot rather than
+      ;; a var-ref child, so the assignment that produces it inside the
+      ;; inlined body must not look like a dead store.
+      (inline-expr
+       (setf (gethash (ast-node-value node) used) t)
+       (dolist (child (ast-node-children node))
+         (collect-used-variables child used)))
       ;; For other nodes, recurse into children
       (otherwise
        (dolist (child (ast-node-children node))
@@ -1216,6 +1224,40 @@
       (otherwise
        (some #'has-side-effects (ast-node-children node))))))
 
+(defun dead-store-statement-p (child used)
+  "Check whether CHILD is an expr-stmt wrapping a plain `=` assignment into a
+   scalar variable that is otherwise dead (unused and not address-taken).
+   Such a statement must not survive once its declaration is DCE'd below,
+   or codegen will hit a var-ref with no declaration.
+   USED is scoped to the current function only, so a write to a global must
+   never be treated as dead here: the read may happen in another function."
+  (and (ast-node-p child)
+       (eq (ast-node-type child) 'expr-stmt)
+       (let ((expr (first (ast-node-children child))))
+         (and (ast-node-p expr)
+              (eq (ast-node-type expr) 'assign)
+              (string= (ast-node-value expr) "=")
+              (let* ((lhs (first (ast-node-children expr)))
+                     (sym (and (ast-node-p lhs)
+                               (eq (ast-node-type lhs) 'var-ref)
+                               (lookup-symbol (ast-node-value lhs)))))
+                (and sym
+                     (not (eq (sym-entry-storage sym) :global))
+                     (not (gethash (ast-node-value lhs) used))
+                     (not (is-address-taken (ast-node-value lhs)))))))))
+
+(defun simplify-dead-store (child used)
+  "Replace a dead-store expr-stmt (see DEAD-STORE-STATEMENT-P) with a bare
+   expr-stmt of its RHS (to keep any side effects), or :REMOVE if the RHS
+   has none."
+  (let* ((expr (first (ast-node-children child)))
+         (rhs (second (ast-node-children expr))))
+    (if (has-side-effects rhs)
+        (make-ast-node :type 'expr-stmt
+                       :children (list rhs)
+                       :source-loc (ast-node-source-loc child))
+        :remove)))
+
 (defun eliminate-dead-code (node used)
   "Remove dead variable declarations from the AST.
    USED is a hash table of variable names that are actually read."
@@ -1232,7 +1274,11 @@
     (block
      (let ((live-children
              (loop for child in (ast-node-children node)
+                   for dead-store = (dead-store-statement-p child used)
+                   for replacement = (and dead-store (simplify-dead-store child used))
                    when (cond
+                          ((eq replacement :remove) nil)
+                          (dead-store t)
                           ((not (ast-node-p child)) t)
                           ;; For decl-list child: keep if ANY var-decl inside is needed
                           ((eq (ast-node-type child) 'decl-list)
@@ -1248,7 +1294,10 @@
                                  (ast-node-children child)))
                           ;; All other block children: keep
                           (t t))
-                   collect (eliminate-dead-code child used))))
+                   collect (eliminate-dead-code (if (and replacement (not (eq replacement :remove)))
+                                                     replacement
+                                                     child)
+                                                 used))))
        (make-ast-node :type 'block
                       :value (ast-node-value node)
                       :children live-children
