@@ -974,13 +974,15 @@
       (push (subseq source start) lines))
     (nreverse lines)))
 
-(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t))
+(defun compile-c (source &key (verbose nil) (annotate t) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t) (mem-size nil))
   "Compile C source code to assembly S-expressions.
    :optimize-size t (default) uses runtime library calls for mul/div/mod to reduce code size.
    :optimize-size nil inlines mul/div/mod loops for better performance.
    :peephole t enables peephole optimization to eliminate redundant instructions.
    :eliminate-dead t (default) removes functions not reachable from main;
-   set to nil to keep unused functions in the output."
+   set to nil to keep unused functions in the output.
+   :mem-size, when given, sets the initial stack pointer to the top of that
+   many bytes of memory (default: #x8000, i.e. a 32KB stack)."
   (let ((*state* (make-compiler-state))
         (*current-source-line* nil)
         (*current-source-context* nil))
@@ -1055,7 +1057,9 @@
         (print-ast ast))
 
       ;; Code generation
-      (generate-program ast)
+      (if mem-size
+          (generate-program ast mem-size)
+          (generate-program ast))
 
       ;; Return the generated assembly
       (let ((code (get-generated-code)))
@@ -1106,21 +1110,28 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t))
+(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t) (mem-size nil))
   "Compile C source and assemble to machine code"
-  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead)))
+  (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead :mem-size mem-size)))
     (assemble (strip-asm-comments asm) verbose)))
 
-(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (conf-mem-size nil) (eliminate-dead t))
+(defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (conf-mem-size nil) (eliminate-dead t) (imem-size nil) (dmem-size nil))
   "Compile, assemble, and run a C program, returning the result.
    When CONF-SOCKET is a path, opens a conf bus connection on that socket
    (waits for a client) before running.
    When CONF-SOCKET is nil and CONF-MEM-SIZE is a positive integer, conf
    address space accesses are instead backed by a dedicated local array of
    that many bytes, so callers can exercise conf-mapped fields without a
-   live conf bus peer."
-  (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead))
-         (dmem (lr-emulator:make-dmem (if conf-socket #x1000000 #x10000)))
+   live conf bus peer.
+   IMEM-SIZE/DMEM-SIZE, when either is given, size the (combined, flat)
+   program memory to their sum (defaulting the unspecified one to the RTL's
+   default IMEM/DMEM depth) instead of the usual fixed #x10000/#x1000000,
+   and set the initial stack pointer to the top of that memory."
+  (let* ((mem-size (when (or imem-size dmem-size)
+                     (+ (or imem-size lr-soc:+imem-depth+)
+                        (or dmem-size lr-soc:+dmem-depth+))))
+         (mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead :mem-size mem-size))
+         (dmem (lr-emulator:make-dmem (or mem-size (if conf-socket #x1000000 #x10000))))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose))
          ;; Number of instructions actually executed (secondary return value).
          (instr-count (progn

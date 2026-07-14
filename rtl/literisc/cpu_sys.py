@@ -7,6 +7,7 @@ from modules.common.signal import signal
 from modules.common.Common import copySignal
 
 from constants import *
+from constants import compute_memory_map
 
 from cpu import cpu
 #from tb import load_a_rx, load_rx, jump_relative
@@ -136,10 +137,14 @@ def cpu_sys(
         axi,
         conf,
         instr_trace,
-        imem_depth = 8192,
-        dmem_depth = 32768,
+        imem_depth = IMEM_DEPTH,
+        dmem_depth = DMEM_DEPTH,
         boot_code_path = "./lcpu_boot_code.hex",
         ):
+
+    # Address-map regions derived from imem_depth/dmem_depth (not the fixed
+    # module-level constants, which only reflect the default sizes).
+    mm = compute_memory_map(imem_depth, dmem_depth)
 
     cpu_imem_radr = signal(32)
     n_deferred_cpu_imem_radr = signal(32)
@@ -484,42 +489,42 @@ def cpu_sys(
             n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
                 # --- IO access ---------------
-                #if cpu_dmem_adr >= CONF_LOW and cpu_dmem_adr <= CONF_HIGH:
-                if cpu_dmem_adr >= CONF_LOW:
+                #if cpu_dmem_adr >= mm.CONF_LOW and cpu_dmem_adr <= mm.CONF_HIGH:
+                if cpu_dmem_adr >= mm.CONF_LOW:
                     n_cpu_waiting.next = 1
                     n_wait_type.next = IO_WAIT
                     req_rd.next = dmem_rd
                     req_wr.next = dmem_wr
-                    req_addr.next = cpu_dmem_adr - CONF_LOW
+                    req_addr.next = cpu_dmem_adr - mm.CONF_LOW
                     req_wdata.next = dmem_din
                     n_req_reading.next = dmem_rd
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
-                elif cpu_dmem_adr == IRQ_ADDRESS and dmem_wr == 1:
+                elif cpu_dmem_adr == mm.IRQ_ADDRESS and dmem_wr == 1:
                     #n_cpu_waiting.next = 1
                     do_irq.next = 1
                     #n_req_reading.next = dmem_wr
                     #n_wait_type.next = SIGNAL_WAIT
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
-                elif cpu_dmem_adr == TICK_ADDRESS and dmem_wr == 1:
+                elif cpu_dmem_adr == mm.TICK_ADDRESS and dmem_wr == 1:
                     tick_sel.next = dmem_din[3:]
 
-                elif cpu_dmem_adr == TICK_ADDRESS and dmem_rd == 1:
+                elif cpu_dmem_adr == mm.TICK_ADDRESS and dmem_rd == 1:
                     n_cpu_waiting.next = 1
                     n_wait_type.next = TICK_WAIT
-                elif cpu_dmem_adr == INTERRUPT_ADDRESS and dmem_rd == 1:
+                elif cpu_dmem_adr == mm.INTERRUPT_ADDRESS and dmem_rd == 1:
                     n_cpu_waiting.next = 1
                     n_wait_type.next = INTERRUPT_WAIT
                     dmem_renable.next = 0
                     dmem_wenable.next = 0
                 # --- dmem access -------------
-                elif cpu_dmem_adr >= DMEM_LOW and cpu_dmem_adr <= DMEM_HIGH:
+                elif cpu_dmem_adr >= mm.DMEM_LOW and cpu_dmem_adr <= mm.DMEM_HIGH:
                     n_cpu_waiting.next = 0
                     dmem_renable.next = dmem_rd
                     dmem_wenable.next = dmem_wr
                 # --- imem access -------------
-                elif cpu_dmem_adr >= IMEM_LOW and cpu_dmem_adr <= IMEM_HIGH:
+                elif cpu_dmem_adr >= mm.IMEM_LOW and cpu_dmem_adr <= mm.IMEM_HIGH:
                     if dmem_wr == 0: # writes do not need delay
                         n_cpu_waiting.next = 1
                         n_wait_type.next = IMEM_WAIT
@@ -545,7 +550,7 @@ def cpu_sys(
 
     @always_comb
     def aoffs():
-        dmem_adr.next = cpu_dmem_adr - DMEM_LOW
+        dmem_adr.next = cpu_dmem_adr - mm.DMEM_LOW
 
     if False:
         dmem = memory(
@@ -558,7 +563,7 @@ def cpu_sys(
             wmask   = dmem_final_wmask,
             clk = cpu_clk,
             rstn = rstn,
-            depth = DMEM_DEPTH,
+            depth = dmem_depth,
             input_flops = 0,
             output_flops = 0,
             name = 'dmem')
@@ -573,7 +578,7 @@ def cpu_sys(
             wmask   = dmem_final_wmask,
             clk = cpu_clk,
             clk_en = mem_clk_en,
-            depth = DMEM_DEPTH,
+            depth = dmem_depth,
             name = 'dmem')
 
     #if False:
@@ -1126,12 +1131,12 @@ def cpu_sys(
             if slave_state == SLAVE_IDLE:
                 if conf.slave_request_we:
                     print("address: ", conf.slave_request_address)
-                    if conf.slave_request_address == INTERRUPT_ADDRESS:
+                    if conf.slave_request_address == mm.INTERRUPT_ADDRESS:
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = conf.slave_request_data
-                    elif conf.slave_request_address == CPU_RESET_ADDRESS:
+                    elif conf.slave_request_address == mm.CPU_RESET_ADDRESS:
                         n_cpu_rstn.next = 0
-                    elif conf.slave_request_address <= IMEM_HIGH:
+                    elif conf.slave_request_address <= mm.IMEM_HIGH:
                         conf_slave_imem_wadr.next    = conf.slave_request_address
                         conf_slave_imem_din.next     = conf.slave_request_data
                         conf_slave_imem_wenable.next = 1

@@ -1,35 +1,67 @@
-# Memory map:
-# 0x00000 - 0x1FFF  : IMEM (boot rom + RAM), 8KB
-# 0x02000 - 0x09FFF : DMEM, 32KB
-# 0x0FF98 - 0x0FF9B : Special registers (IRQ, TICK, INTERRUPT, CPU_RESET)
-# 0x0FF9C - 0x0FFFF : PERIPHERAL IO, 100 bytes (UART, GPIO etc)
-# 0x10000 - 0xFFFFFFFFF : CONF bus window
+# Memory map, derived from IMEM_DEPTH/DMEM_DEPTH:
+#   IMEM             : IMEM_LOW .. IMEM_HIGH   (boot rom + RAM), IMEM_DEPTH bytes
+#   DMEM             : DMEM_LOW .. DMEM_HIGH   DMEM_DEPTH bytes
+#   PERIPHERAL IO    : IO_LOW   .. IO_HIGH     (UART, GPIO etc), IO_DEPTH bytes
+#   Special registers: IRQ, TICK, INTERRUPT, CPU_RESET (4 bytes)
+#   CONF bus window  : CONF_LOW .. CONF_HIGH
 
 PERIP_ADDR_BITS    = 16
 PERIP_DATA_BITS    = 32
 CPU_DMEM_DATA_BITS = 32
 
-# IMEM
 IMEM_DEPTH  = 8192
-IMEM_LOW    = 0
-IMEM_HIGH   = IMEM_DEPTH - 1             # 0x1FFF
-
-# DMEM
 DMEM_DEPTH  = 32768
-DMEM_LOW    = IMEM_DEPTH                 # 0x2000
-DMEM_HIGH   = DMEM_LOW + DMEM_DEPTH - 1 # 0x9FFF
-
-# Peripheral IO (UART, GPIO etc) - matches emulator lr-soc
 IO_DEPTH    = 100
-IO_HIGH     = 2**16 - 1                  # 0xFFFF
-IO_LOW      = IO_HIGH - IO_DEPTH + 1     # 0xFF9C
+N_SPECIAL_REGS = 4   # IRQ, TICK, INTERRUPT, CPU_RESET
+CONF_WINDOW_SIZE = 2**24 - 2**16   # size of the CONF bus window (matches prior CONF_HIGH - CONF_LOW)
 
-# Special registers (immediately before peripheral IO)
-CPU_RESET_ADDRESS = IO_LOW - 1           # 0xFF9B
-INTERRUPT_ADDRESS = IO_LOW - 2           # 0xFF9A
-TICK_ADDRESS      = IO_LOW - 3           # 0xFF99
-IRQ_ADDRESS       = IO_LOW - 4           # 0xFF98
+class MemoryMap:
+    def __init__(self, imem_depth, dmem_depth):
+        assert imem_depth > 0 and dmem_depth > 0, "imem_depth and dmem_depth must be positive"
 
-# CONF bus (AXI slave interface)
-CONF_LOW    = 2**16                      # 0x10000
-CONF_HIGH   = 2**24 - 1
+        self.IMEM_DEPTH = imem_depth
+        self.DMEM_DEPTH = dmem_depth
+
+        self.IMEM_LOW  = 0
+        self.IMEM_HIGH = imem_depth - 1
+
+        self.DMEM_LOW  = self.IMEM_HIGH + 1
+        self.DMEM_HIGH = self.DMEM_LOW + dmem_depth - 1
+
+        self.IO_LOW  = self.DMEM_HIGH + 1
+        self.IO_HIGH = self.IO_LOW + IO_DEPTH - 1
+
+        self.CPU_RESET_ADDRESS = self.IO_HIGH + 1
+        self.INTERRUPT_ADDRESS = self.IO_HIGH + 2
+        self.TICK_ADDRESS      = self.IO_HIGH + 3
+        self.IRQ_ADDRESS       = self.IO_HIGH + 4
+
+        # CONF bus window, immediately after peripheral IO
+        self.CONF_LOW  = self.IO_HIGH + 5
+        self.CONF_HIGH = self.CONF_LOW + CONF_WINDOW_SIZE - 1
+
+
+def compute_memory_map(imem_depth=IMEM_DEPTH, dmem_depth=DMEM_DEPTH):
+    return MemoryMap(imem_depth, dmem_depth)
+
+
+# Default map, used by every module-level name below so that
+# `from constants import *` keeps working unchanged for the default sizes.
+_default_map = compute_memory_map()
+
+IMEM_LOW    = _default_map.IMEM_LOW
+IMEM_HIGH   = _default_map.IMEM_HIGH
+
+DMEM_LOW    = _default_map.DMEM_LOW
+DMEM_HIGH   = _default_map.DMEM_HIGH
+
+IRQ_ADDRESS       = _default_map.IRQ_ADDRESS
+TICK_ADDRESS      = _default_map.TICK_ADDRESS
+INTERRUPT_ADDRESS = _default_map.INTERRUPT_ADDRESS
+CPU_RESET_ADDRESS = _default_map.CPU_RESET_ADDRESS
+
+IO_LOW  = _default_map.IO_LOW
+IO_HIGH = _default_map.IO_HIGH
+
+CONF_LOW  = _default_map.CONF_LOW
+CONF_HIGH = _default_map.CONF_HIGH

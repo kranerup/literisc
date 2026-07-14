@@ -31,6 +31,12 @@
   (format t "  --conf-mem-size <n>  When --conf is not on, back the conf address space~%")
   (format t "                       with a dedicated local memory of <n> bytes instead~%")
   (format t "                       of requiring a conf bus peer~%")
+  (format t "  --imem-size <n>      Size (bytes) of program memory reserved for imem~%")
+  (format t "                       (default: ~a, matching the RTL default)~%" lr-soc:+imem-depth+)
+  (format t "  --dmem-size <n>      Size (bytes) of program memory reserved for dmem~%")
+  (format t "                       (default: ~a, matching the RTL default)~%" lr-soc:+dmem-depth+)
+  (format t "                       imem-size and dmem-size together size the emulator's~%")
+  (format t "                       flat memory and the initial stack pointer~%")
   (format t "  -I <dir>             Add directory to preprocessor include search path~%")
   (format t "  -O                   Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
   (format t "  -Os                  Optimize for size (inlining, peephole, library mul/div/mod)~%")
@@ -50,6 +56,7 @@
   (format t "  lrcc --ui --conf hello.c                     # With conf bus (default socket)~%")
   (format t "  lrcc --ui --conf-socket /tmp/my.sock hello.c # With conf bus (custom socket)~%")
   (format t "  lrcc -I include -Os -r hello.c               # With stdio.h, optimized for size~%")
+  (format t "  lrcc -r --imem-size 4096 --dmem-size 8192 hello.c  # Compile and run with a smaller memory map~%")
   (format t "  lrcc -O -r hello.c                           # Full optimization for speed~%"))
 
 (defun pretty-print-asm (asm-list)
@@ -125,6 +132,8 @@
          (asm-only nil)
          (conf-socket nil)
          (conf-mem-size nil)
+         (imem-size nil)
+         (dmem-size nil)
          (run-program nil)
          (run-ui nil)
          (optimize nil)
@@ -174,6 +183,26 @@
                    (progn
                      (format *error-output* "Error: --conf-mem-size requires an argument~%")
                      (sb-ext:exit :code 1))))
+              ((string= arg "--imem-size")
+               (if args
+                   (let ((n (parse-integer (pop args) :junk-allowed t)))
+                     (unless (and n (> n 0))
+                       (format *error-output* "Error: --imem-size requires a positive integer argument~%")
+                       (sb-ext:exit :code 1))
+                     (setf imem-size n))
+                   (progn
+                     (format *error-output* "Error: --imem-size requires an argument~%")
+                     (sb-ext:exit :code 1))))
+              ((string= arg "--dmem-size")
+               (if args
+                   (let ((n (parse-integer (pop args) :junk-allowed t)))
+                     (unless (and n (> n 0))
+                       (format *error-output* "Error: --dmem-size requires a positive integer argument~%")
+                       (sb-ext:exit :code 1))
+                     (setf dmem-size n))
+                   (progn
+                     (format *error-output* "Error: --dmem-size requires an argument~%")
+                     (sb-ext:exit :code 1))))
               ((string= arg "-O")
                (setf optimize t)
                (setf peephole t)
@@ -218,7 +247,10 @@
       (sb-ext:exit :code 1))
 
     ;; Preprocess with cpp
-    (let ((source (cpp-preprocess source-file (nreverse include-dirs))))
+    (let ((source (cpp-preprocess source-file (nreverse include-dirs)))
+          (mem-size (when (or imem-size dmem-size)
+                      (+ (or imem-size lr-soc:+imem-depth+)
+                         (or dmem-size lr-soc:+dmem-depth+)))))
 
       (handler-bind
           ((error (lambda (e)
@@ -232,7 +264,8 @@
                                         :optimize optimize
                                         :optimize-size optimize-size
                                         :peephole peephole
-                                        :eliminate-dead eliminate-dead)))
+                                        :eliminate-dead eliminate-dead
+                                        :mem-size mem-size)))
              (if output-file
                  (with-open-file (*standard-output* output-file
                                                     :direction :output
@@ -252,6 +285,8 @@
                                      :peephole peephole
                                      :conf-socket conf-socket
                                      :conf-mem-size conf-mem-size
+                                     :imem-size imem-size
+                                     :dmem-size dmem-size
                                      :eliminate-dead eliminate-dead
                                      :max-cycles 10000000000)
              (format *error-output* "instructions executed: ~a~%" instr-count)
@@ -266,10 +301,11 @@
                                          :optimize optimize
                                          :optimize-size optimize-size
                                          :peephole peephole
-                                         :eliminate-dead eliminate-dead))
+                                         :eliminate-dead eliminate-dead
+                                         :mem-size mem-size))
                   (symtab (make-hash-table :test 'eql))
                   (mcode (assemble (strip-asm-comments asm) verbose symtab))
-                  (dmem (lr-emulator:make-dmem #x1000000))
+                  (dmem (lr-emulator:make-dmem (or mem-size #x1000000)))
                   (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
              (if conf-socket
                  (progn
@@ -285,7 +321,8 @@
                                                  :optimize optimize
                                                  :optimize-size optimize-size
                                                  :peephole peephole
-                                                 :eliminate-dead eliminate-dead)))
+                                                 :eliminate-dead eliminate-dead
+                                                 :mem-size mem-size)))
              (if output-file
                  (progn
                    (if (string-suffix-p output-file ".bin")

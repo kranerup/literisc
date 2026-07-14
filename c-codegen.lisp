@@ -1543,7 +1543,7 @@
 ;;; Main Code Generation Entry Points
 ;;; ===========================================================================
 
-(defun generate-program (ast)
+(defun generate-program (ast &optional (stack-top #x8000))
   "Generate code for a complete program"
   ;; Reset all codegen state
   (init-registers)
@@ -1565,8 +1565,8 @@
 
   ;; Generate startup code that calls main and then halts
   (emit '(label _START))
-  ;; Initialize stack pointer to a reasonable value
-  (emit '(Rx= #x8000 SP))  ; 32KB stack
+  ;; Initialize stack pointer to the top of available memory
+  (emit `(Rx= ,stack-top SP))
   ;; Call main
   (emit '(jsr MAIN))
   ;; Store return value from main (in P0) for test retrieval
