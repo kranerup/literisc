@@ -3239,13 +3239,34 @@ class FlexswitchDB(object):
 
     return py
 
+# ------------------------------------------------------------ genEdgeIndexLoop
+def genEdgeIndexLoop(body):
+    """Wrap `body` in a loop that only visits the first and last entry
+    of a table (`entries[sliceId]` real rows) instead of every entry:
+    2 visits (i=0, i=entries[sliceId]-1) when the table has more than
+    one entry, otherwise just 1 (i=0). `body` indexes the per-field
+    expected-value storage arrays with `slot` (0 or 1) and any
+    generated field-API calls with the real row index `i`, so both
+    stay in sync with the [2]-sized (or [1]-sized) storage declared in
+    genFieldRandomStruct. This keeps the generated field test's memory
+    footprint and runtime independent of how many rows a table has.
+    """
+    return dedent(f"""\
+            for (int _ti = 0, _nr_idx = (entries[sliceId] > 1 ? 2 : 1); _ti < _nr_idx; _ti++) {{
+              int i = (_ti == 0) ? 0 : entries[sliceId] - 1;
+              int slot = _ti;
+              (void)i;
+        {body}
+            }}""")
+
 # ------------------------------------------------------------ genFieldRandomStruct
 def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
     """Global storage (one array per field, dimensioned by
-    [entries][ports][sets][slices]) plus a set_random_<reg>()
-    function that fills them -- the field-API equivalent of
-    genRandomStruct(), since there's no single struct to hold values
-    in, just per-field arrays.
+    [slot][ports][sets][slices], slot in {0,1} -- see
+    genEdgeIndexLoop) plus a set_random_<reg>() function that fills
+    them -- the field-API equivalent of genRandomStruct(), since
+    there's no single struct to hold values in, just per-field
+    arrays.
     """
     fields    = gRegs[reg]['Fields']
     is_single = gRegs[reg]['Single']
@@ -3263,6 +3284,14 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
         decl_entries = max(loop_entries)
     else:
         decl_entries = loop_entries
+
+    # Only the first and last index of a table are actually exercised
+    # (see genEdgeIndexLoop), so the expected-value storage only ever
+    # needs 2 slots (or 1, for single-entry/non-table registers) no
+    # matter how many real entries the table has -- avoids blowing up
+    # .bss for large tables (e.g. 512-entry tables) in the generated
+    # test.
+    storage_entries = min(decl_entries, 2)
 
     if has_slice:
         nr_entries = loop_entries if type(loop_entries) == list else [loop_entries] * nr_slice
@@ -3289,12 +3318,12 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
         fsize = calcSize(field['Start bit'], field['End bit'])
         is_bytearray = fsize > 64
         field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
-        idx = "[i][portId][setId][sliceId]"
+        idx = "[slot][portId][setId][sliceId]"
 
         if is_bytearray:
             has_bytearray_field = True
             nr_bytes = (fsize + 7) // 8
-            c_global += f"uint8_t {reg}_exp_{fname}[{decl_entries}][{nr_ports}][{nr_sets}][{nr_slice}][{nr_bytes}];\n"
+            c_global += f"uint8_t {reg}_exp_{fname}[{storage_entries}][{nr_ports}][{nr_sets}][{nr_slice}][{nr_bytes}];\n"
             set_random_body += f"    for (bi = 0; bi < {nr_bytes}; bi++)\n"
             set_random_body += f"      {reg}_exp_{fname}{idx}[bi] = (uint8_t)next_random();\n"
             if fsize % 8 != 0:
@@ -3306,7 +3335,7 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
             else:
                 mask = f"0x{(1 << fsize) - 1:X}ULL"
             randexpr = "next_random64()" if fsize > 32 else "next_random()"
-            c_global += f"{field_uint} {reg}_exp_{fname}[{decl_entries}][{nr_ports}][{nr_sets}][{nr_slice}];\n"
+            c_global += f"{field_uint} {reg}_exp_{fname}[{storage_entries}][{nr_ports}][{nr_sets}][{nr_slice}];\n"
             set_random_body += f"    {reg}_exp_{fname}{idx} = ({field_uint})({randexpr} & {mask});\n"
 
     bi_decl = "  int bi;\n" if has_bytearray_field else ""
@@ -3321,9 +3350,7 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
       for (int setId=0; setId < {nr_sets}; setId++) {{
         for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
           for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
-            for (int i=0; i < entries[sliceId]; i++) {{
-{set_random_body}
-            }}
+{genEdgeIndexLoop(set_random_body)}
           }}
         }}
       }}
@@ -3377,7 +3404,7 @@ def genFieldRandomWrites(reg, backend, definedUintSize):
     wr_body = ""
     for field in fields:
         fname = convertToLegal(field['Name'])
-        idx = "[i][portId][setId][sliceId]"
+        idx = "[slot][portId][setId][sliceId]"
         wr_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}{reg}_exp_{fname}{idx} );\n"
 
     func = dedent(f"""
@@ -3389,9 +3416,7 @@ def genFieldRandomWrites(reg, backend, definedUintSize):
       for (int setId=0; setId < {nr_sets}; setId++) {{
         for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
           for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
-            for (int i=0; i < entries[sliceId]; i++) {{
-{wr_body}
-            }}
+{genEdgeIndexLoop(wr_body)}
           }}
         }}
       }}
@@ -3448,11 +3473,11 @@ def genFieldTestPRNG():
 
 # ------------------------------------------------------------ genFieldRandomReads
 def genFieldRandomReads(reg, backend, definedUintSize):
-    """read_<reg>() function -- reads every index/port/set/slice
-    combination back via the field API's rd_ functions and compares
-    against the value set_random_<reg>() generated (which
-    write_<reg>() already wrote, across ALL indices, before this
-    runs). Field-API equivalent of genRandomReads().
+    """read_<reg>() function -- reads the first and last table entry
+    (see genEdgeIndexLoop) for every port/set/slice combination back
+    via the field API's rd_ functions and compares against the value
+    set_random_<reg>() generated (which write_<reg>() already wrote,
+    before this runs). Field-API equivalent of genRandomReads().
     """
     fields    = gRegs[reg]['Fields']
     is_single = gRegs[reg]['Single']
@@ -3500,7 +3525,7 @@ def genFieldRandomReads(reg, backend, definedUintSize):
         fsize = calcSize(field['Start bit'], field['End bit'])
         is_bytearray = fsize > 64
         field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
-        idx = "[i][portId][setId][sliceId]"
+        idx = "[slot][portId][setId][sliceId]"
 
         if is_bytearray:
             has_bytearray_field = True
@@ -3534,10 +3559,7 @@ def genFieldRandomReads(reg, backend, definedUintSize):
       for (int setId=0; setId < {nr_sets}; setId++) {{
         for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
           for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
-            for (int i=0; i < entries[sliceId]; i++) {{
-{decl_body}
-{rd_body}
-            }}
+{genEdgeIndexLoop(decl_body + rd_body)}
           }}
         }}
       }}
