@@ -28,6 +28,9 @@
   (format t "  --no-conf            Disable conf bus connection (default)~%")
   (format t "  --conf-socket <path> Specify conf bus socket path~%")
   (format t "                       (implies --conf, default: /tmp/coe_emulator.sock)~%")
+  (format t "  --conf-mem-size <n>  When --conf is not on, back the conf address space~%")
+  (format t "                       with a dedicated local memory of <n> bytes instead~%")
+  (format t "                       of requiring a conf bus peer~%")
   (format t "  -I <dir>             Add directory to preprocessor include search path~%")
   (format t "  -O                   Optimize for speed (inlining, peephole, inline mul/div/mod)~%")
   (format t "  -Os                  Optimize for size (inlining, peephole, library mul/div/mod)~%")
@@ -70,24 +73,26 @@
 
 (defun write-hex-file (bytes filename)
   "Write bytes to a file in hex dump format"
-  (with-open-file (out filename :direction :output :if-exists :supersede)
-    (loop for i from 0 by 16 below (length bytes) do
-          (format out "~8,'0x: " i)
-          (loop for j from 0 below 16
-                for idx = (+ i j)
-                do (if (< idx (length bytes))
-                       (format out "~2,'0x " (nth idx bytes))
-                       (format out "   ")))
-          (format out " |")
-          (loop for j from 0 below 16
-                for idx = (+ i j)
-                do (if (< idx (length bytes))
-                       (let ((b (nth idx bytes)))
-                         (format out "~c" (if (and (>= b 32) (<= b 126))
-                                              (code-char b)
-                                              #\.)))
-                       (format out " ")))
-          (format out "|~%"))))
+  (let* ((vec (coerce bytes 'vector))
+         (len (length vec)))
+    (with-open-file (out filename :direction :output :if-exists :supersede)
+      (loop for i from 0 by 16 below len do
+            (format out "~8,'0x: " i)
+            (loop for j from 0 below 16
+                  for idx = (+ i j)
+                  do (if (< idx len)
+                         (format out "~2,'0x " (aref vec idx))
+                         (format out "   ")))
+            (format out " |")
+            (loop for j from 0 below 16
+                  for idx = (+ i j)
+                  do (if (< idx len)
+                         (let ((b (aref vec idx)))
+                           (format out "~c" (if (and (>= b 32) (<= b 126))
+                                                (code-char b)
+                                                #\.)))
+                         (format out " ")))
+            (format out "|~%")))))
 
 (defun write-binary-file (bytes filename)
   "Write raw bytes to a binary file"
@@ -119,6 +124,7 @@
          (output-file nil)
          (asm-only nil)
          (conf-socket nil)
+         (conf-mem-size nil)
          (run-program nil)
          (run-ui nil)
          (optimize nil)
@@ -157,6 +163,16 @@
                    (setf conf-socket (pop args))
                    (progn
                      (format *error-output* "Error: --conf-socket requires an argument~%")
+                     (sb-ext:exit :code 1))))
+              ((string= arg "--conf-mem-size")
+               (if args
+                   (let ((n (parse-integer (pop args) :junk-allowed t)))
+                     (unless (and n (> n 0))
+                       (format *error-output* "Error: --conf-mem-size requires a positive integer argument~%")
+                       (sb-ext:exit :code 1))
+                     (setf conf-mem-size n))
+                   (progn
+                     (format *error-output* "Error: --conf-mem-size requires an argument~%")
                      (sb-ext:exit :code 1))))
               ((string= arg "-O")
                (setf optimize t)
@@ -235,8 +251,9 @@
                                      :optimize-size optimize-size
                                      :peephole peephole
                                      :conf-socket conf-socket
+                                     :conf-mem-size conf-mem-size
                                      :eliminate-dead eliminate-dead
-                                     :max-cycles 1000000)
+                                     :max-cycles 10000000000)
              (format *error-output* "instructions executed: ~a~%" instr-count)
              (format *error-output* "~a~%" result)
              (sb-ext:exit :code (logand result 255))))
