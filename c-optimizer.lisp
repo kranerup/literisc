@@ -1230,19 +1230,22 @@
    Such a statement must not survive once its declaration is DCE'd below,
    or codegen will hit a var-ref with no declaration.
    USED is scoped to the current function only, so a write to a global must
-   never be treated as dead here: the read may happen in another function."
+   never be treated as dead here: the read may happen in another function.
+   A LHS whose name has no symbol-table entry is an inline-renamed local
+   (inlining never renames globals, and every real global is registered at
+   parse time), so a missing lookup must not be mistaken for 'unknown, so
+   assume global'."
   (and (ast-node-p child)
        (eq (ast-node-type child) 'expr-stmt)
        (let ((expr (first (ast-node-children child))))
          (and (ast-node-p expr)
               (eq (ast-node-type expr) 'assign)
               (string= (ast-node-value expr) "=")
-              (let* ((lhs (first (ast-node-children expr)))
-                     (sym (and (ast-node-p lhs)
-                               (eq (ast-node-type lhs) 'var-ref)
-                               (lookup-symbol (ast-node-value lhs)))))
-                (and sym
-                     (not (eq (sym-entry-storage sym) :global))
+              (let ((lhs (first (ast-node-children expr))))
+                (and (ast-node-p lhs)
+                     (eq (ast-node-type lhs) 'var-ref)
+                     (let ((sym (lookup-symbol (ast-node-value lhs))))
+                       (not (and sym (eq (sym-entry-storage sym) :global))))
                      (not (gethash (ast-node-value lhs) used))
                      (not (is-address-taken (ast-node-value lhs)))))))))
 
