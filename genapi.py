@@ -3233,6 +3233,166 @@ class FlexswitchDB(object):
 
     return py
 
+# ------------------------------------------------------------ genFieldRandomStruct
+def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
+    """Global storage (one array per field, dimensioned by
+    [entries][ports][sets][slices]) plus a set_random_<reg>()
+    function that fills them -- the field-API equivalent of
+    genRandomStruct(), since there's no single struct to hold values
+    in, just per-field arrays.
+    """
+    fields    = gRegs[reg]['Fields']
+    is_single = gRegs[reg]['Single']
+    has_port  = gRegs[reg]['hasPort']
+    has_set   = gRegs[reg]['hasSet']
+    has_slice = gRegs[reg]['hasSlice']
+    entries   = gRegs[reg]['Entries']
+
+    nr_ports = gRegs[reg]['maxPort'] + 1 if has_port else 1
+    nr_sets  = gRegs[reg]['maxSet']  + 1 if has_set  else 1
+    nr_slice = gRegs[reg]['maxSlice'] + 1 if has_slice else 1
+
+    loop_entries = 1 if is_single else entries
+    if has_slice and type(loop_entries) == list:
+        decl_entries = max(loop_entries)
+    else:
+        decl_entries = loop_entries
+
+    if has_slice:
+        nr_entries = loop_entries if type(loop_entries) == list else [loop_entries] * nr_slice
+    else:
+        nr_entries = [loop_entries]
+
+    if has_slice and has_port:
+        port_min = [0] * nr_slice
+        port_max = [0] * nr_slice
+        for slc in range(nr_slice):
+            portLst = getPorts(reg, slc)
+            port_min[slc] = min(portLst)
+            port_max[slc] = max(portLst)
+    else:
+        port_min = [0] * nr_slice
+        port_max = [nr_ports] * nr_slice
+
+    c_global = ""
+    set_random_body = ""
+    has_bytearray_field = False
+
+    for field in fields:
+        fname = convertToLegal(field['Name'])
+        fsize = calcSize(field['Start bit'], field['End bit'])
+        is_bytearray = fsize > 64
+        field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
+        idx = "[i][portId][setId][sliceId]"
+
+        if is_bytearray:
+            has_bytearray_field = True
+            nr_bytes = (fsize + 7) // 8
+            c_global += f"uint8_t {reg}_exp_{fname}[{decl_entries}][{nr_ports}][{nr_sets}][{nr_slice}][{nr_bytes}];\n"
+            set_random_body += f"    for (bi = 0; bi < {nr_bytes}; bi++)\n"
+            set_random_body += f"      {reg}_exp_{fname}{idx}[bi] = (uint8_t)next_random();\n"
+            if fsize % 8 != 0:
+                top_mask = (1 << (fsize % 8)) - 1
+                set_random_body += f"    {reg}_exp_{fname}{idx}[{nr_bytes-1}] &= 0x{top_mask:x};\n"
+        else:
+            if fsize == 64:
+                mask = "0xFFFFFFFFFFFFFFFFULL"
+            else:
+                mask = f"0x{(1 << fsize) - 1:X}ULL"
+            randexpr = "next_random64()" if fsize > 32 else "next_random()"
+            c_global += f"{field_uint} {reg}_exp_{fname}[{decl_entries}][{nr_ports}][{nr_sets}][{nr_slice}];\n"
+            set_random_body += f"    {reg}_exp_{fname}{idx} = ({field_uint})({randexpr} & {mask});\n"
+
+    bi_decl = "  int bi;\n" if has_bytearray_field else ""
+
+    func = dedent(f"""
+    void set_random_{reg}(void) {{
+      rng_state = {random_seed};
+    {bi_decl}  int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
+      int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
+      int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
+      printf("Creating random field values for: {reg}\\n");
+      for (int setId=0; setId < {nr_sets}; setId++) {{
+        for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
+          for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
+            for (int i=0; i < entries[sliceId]; i++) {{
+{set_random_body}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """)
+    return c_global, func
+
+# ------------------------------------------------------------ genFieldRandomWrites
+def genFieldRandomWrites(reg, backend, definedUintSize):
+    """write_<reg>() function -- writes every index/port/set/slice
+    combination's pre-generated expected value via the field API's
+    wr_ functions. Field-API equivalent of genRandomWrites().
+    """
+    fields    = gRegs[reg]['Fields']
+    is_single = gRegs[reg]['Single']
+    has_port  = gRegs[reg]['hasPort']
+    has_set   = gRegs[reg]['hasSet']
+    has_slice = gRegs[reg]['hasSlice']
+    entries   = gRegs[reg]['Entries']
+
+    nr_ports = gRegs[reg]['maxPort'] + 1 if has_port else 1
+    nr_sets  = gRegs[reg]['maxSet']  + 1 if has_set  else 1
+    nr_slice = gRegs[reg]['maxSlice'] + 1 if has_slice else 1
+
+    loop_entries = 1 if is_single else entries
+    if has_slice:
+        nr_entries = loop_entries if type(loop_entries) == list else [loop_entries] * nr_slice
+    else:
+        nr_entries = [loop_entries]
+
+    if has_slice and has_port:
+        port_min = [0] * nr_slice
+        port_max = [0] * nr_slice
+        for slc in range(nr_slice):
+            portLst = getPorts(reg, slc)
+            port_min[slc] = min(portLst)
+            port_max[slc] = max(portLst)
+    else:
+        port_min = [0] * nr_slice
+        port_max = [nr_ports] * nr_slice
+
+    slice_pfix = "_slice" if has_slice else ""
+    call_args = []
+    if has_slice: call_args.append("sliceId")
+    if has_port: call_args.append("portId")
+    if has_set: call_args.append("setId")
+    if not is_single: call_args.append("i")
+    call_prefix = ", ".join(call_args)
+    sep = ", " if call_prefix else ""
+
+    wr_body = ""
+    for field in fields:
+        fname = convertToLegal(field['Name'])
+        idx = "[i][portId][setId][sliceId]"
+        wr_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}{reg}_exp_{fname}{idx} );\n"
+
+    func = dedent(f"""
+    void write_{reg}(void) {{
+      int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
+      int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
+      int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
+      printf("Writing fields for: {reg}\\n");
+      for (int setId=0; setId < {nr_sets}; setId++) {{
+        for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
+          for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
+            for (int i=0; i < entries[sliceId]; i++) {{
+{wr_body}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """)
+    return func
+
 # ------------------------------------------------------------ createCFieldApplStub
 def createCFieldApplStub():
     """Minimal preamble for the field-API test program.
@@ -3280,31 +3440,26 @@ def genFieldTestPRNG():
 
     """)
 
-# ------------------------------------------------------------ genFieldRegTest
-def genFieldRegTest(reg, backend, definedUintSize, random_seed):
-    """Generate a single test_<reg>() function that, per set/slice/
-    port/idx combination, does random-fill + write + read + compare
-    for every field of the register, in that order -- unlike the
-    struct API test, which does all set_random_*, then all write_*,
-    then all read_* across every register.
+# ------------------------------------------------------------ genFieldRandomReads
+def genFieldRandomReads(reg, backend, definedUintSize):
+    """read_<reg>() function -- reads every index/port/set/slice
+    combination back via the field API's rd_ functions and compares
+    against the value set_random_<reg>() generated (which
+    write_<reg>() already wrote, across ALL indices, before this
+    runs). Field-API equivalent of genRandomReads().
     """
     fields    = gRegs[reg]['Fields']
     is_single = gRegs[reg]['Single']
     has_port  = gRegs[reg]['hasPort']
     has_set   = gRegs[reg]['hasSet']
     has_slice = gRegs[reg]['hasSlice']
-    reg_type  = gRegs[reg]['Type']
     entries   = gRegs[reg]['Entries']
-
-    if 'r' not in reg_type and 'w' not in reg_type:
-        return ""
 
     nr_ports = gRegs[reg]['maxPort'] + 1 if has_port else 1
     nr_sets  = gRegs[reg]['maxSet']  + 1 if has_set  else 1
     nr_slice = gRegs[reg]['maxSlice'] + 1 if has_slice else 1
 
     loop_entries = 1 if is_single else entries
-
     if has_slice:
         nr_entries = loop_entries if type(loop_entries) == list else [loop_entries] * nr_slice
     else:
@@ -3322,22 +3477,16 @@ def genFieldRegTest(reg, backend, definedUintSize, random_seed):
         port_max = [nr_ports] * nr_slice
 
     slice_pfix = "_slice" if has_slice else ""
-
     call_args = []
-    if has_slice:
-        call_args.append("sliceId")
-    if has_port:
-        call_args.append("portId")
-    if has_set:
-        call_args.append("setId")
-    if not is_single:
-        call_args.append("i")
+    if has_slice: call_args.append("sliceId")
+    if has_port: call_args.append("portId")
+    if has_set: call_args.append("setId")
+    if not is_single: call_args.append("i")
     call_prefix = ", ".join(call_args)
     sep = ", " if call_prefix else ""
 
-    decl_body  = ""
-    write_body = ""
-    read_body  = ""
+    decl_body = ""
+    rd_body = ""
     has_bytearray_field = False
 
     for field in fields:
@@ -3345,70 +3494,43 @@ def genFieldRegTest(reg, backend, definedUintSize, random_seed):
         fsize = calcSize(field['Start bit'], field['End bit'])
         is_bytearray = fsize > 64
         field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
+        idx = "[i][portId][setId][sliceId]"
 
         if is_bytearray:
             has_bytearray_field = True
             nr_bytes = (fsize + 7) // 8
-            decl_body += f"    uint8_t exp_{fname}[{nr_bytes}];\n"
             decl_body += f"    uint8_t got_{fname}[{nr_bytes}];\n"
-
-            if 'w' in reg_type:
-                write_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) exp_{fname}[bi] = (uint8_t)next_random();\n"
-                if fsize % 8 != 0:
-                    top_mask = (1 << (fsize % 8)) - 1
-                    write_body += f"    exp_{fname}[{nr_bytes-1}] &= 0x{top_mask:x};\n"
-                write_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}exp_{fname} );\n"
-
-            if 'r' in reg_type:
-                read_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}got_{fname} );\n"
-                if 'w' in reg_type:
-                    read_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) {{\n"
-                    read_body += f"      if (got_{fname}[bi] != exp_{fname}[bi]) {{\n"
-                    read_body += (f"        printf(\"ERROR in {reg} field {fname}[%d] "
-                                   f"Got:%d Expected:%d\\n\", bi, got_{fname}[bi], exp_{fname}[bi]);\n")
-                    read_body += "        error += 1;\n"
-                    read_body += "      } else {\n        correct += 1;\n      }\n"
-                    read_body += "    }\n"
+            rd_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}got_{fname} );\n"
+            rd_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) {{\n"
+            rd_body += f"      if (got_{fname}[bi] != {reg}_exp_{fname}{idx}[bi]) {{\n"
+            rd_body += (f"        printf(\"ERROR in {reg} field {fname}[%d] "
+                         f"Got:%d Expected:%d\\n\", bi, got_{fname}[bi], {reg}_exp_{fname}{idx}[bi]);\n")
+            rd_body += "        error += 1;\n"
+            rd_body += "      } else {\n        correct += 1;\n      }\n"
+            rd_body += "    }\n"
         else:
-            decl_body += f"    {field_uint} exp_{fname} = 0;\n"
             decl_body += f"    {field_uint} got_{fname} = 0;\n"
-
-            if fsize == 64:
-                mask = "0xFFFFFFFFFFFFFFFFULL"
-            else:
-                mask = f"0x{(1 << fsize) - 1:X}ULL"
-            randexpr = "next_random64()" if fsize > 32 else "next_random()"
-
-            if 'w' in reg_type:
-                write_body += f"    exp_{fname} = ({field_uint})({randexpr} & {mask});\n"
-                write_body += f"    wr_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}exp_{fname} );\n"
-
-            if 'r' in reg_type:
-                read_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}&got_{fname} );\n"
-                if 'w' in reg_type:
-                    read_body += f"    if (got_{fname} != exp_{fname}) {{\n"
-                    read_body += (f"      printf(\"ERROR in {reg} field {fname} Got:%d Expected:%d\\n\", "
-                                   f"(unsigned long)got_{fname}, (unsigned long)exp_{fname});\n")
-                    read_body += "      error += 1;\n"
-                    read_body += "    } else {\n      correct += 1;\n    }\n"
+            rd_body += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}&got_{fname} );\n"
+            rd_body += f"    if (got_{fname} != {reg}_exp_{fname}{idx}) {{\n"
+            rd_body += (f"      printf(\"ERROR in {reg} field {fname} Got:%d Expected:%d\\n\", "
+                         f"(unsigned long)got_{fname}, (unsigned long){reg}_exp_{fname}{idx});\n")
+            rd_body += "      error += 1;\n"
+            rd_body += "    } else {\n      correct += 1;\n    }\n"
 
     bi_decl = "  int bi;\n" if has_bytearray_field else ""
 
-    # TODO: make each function have the rng_state set it to a unique number
     func = dedent(f"""
-    void test_{reg}(void) {{
-      rng_state = {random_seed};
+    void read_{reg}(void) {{
     {bi_decl}  int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
       int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
       int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
-      printf("Testing fields for: {reg}\\n");
+      printf("Reading fields for: {reg}\\n");
       for (int setId=0; setId < {nr_sets}; setId++) {{
         for (int sliceId=0; sliceId < {nr_slice}; sliceId++) {{
           for (int portId=port_min[sliceId]; portId < port_max[sliceId]; portId++) {{
             for (int i=0; i < entries[sliceId]; i++) {{
 {decl_body}
-{write_body}
-{read_body}
+{rd_body}
             }}
           }}
         }}
@@ -3419,28 +3541,53 @@ def genFieldRegTest(reg, backend, definedUintSize, random_seed):
 
 # ------------------------------------------------------------ genFieldReadWriteTest
 def genFieldReadWriteTest(gRegs, backend, definedUintSize):
-    """Assemble the full wr_rd_field_test.c source: preamble, PRNG,
-    one test_<reg>() per register (each doing random-fill/write/read/
-    compare together), and a main() that calls them all and reports
-    a pass/fail summary.
+    """Assemble wr_rd_field_test.c: preamble, PRNG, then -- for every
+    register with both read AND write ('rw' in Type, same gate
+    genReadWriteTest() uses) -- global storage arrays plus
+    set_random_<reg>()/write_<reg>()/read_<reg>() functions. main()
+    calls all set_random_* first, then all write_*, then all read_*,
+    exactly mirroring genReadWriteTest()'s three-phase structure.
     """
     c = createCFieldApplStub()
     c += "int error = 0;\n"
     c += "int correct = 0;\n\n"
     c += genFieldTestPRNG()
 
-    body  = ""
-    calls = ""
-    for i, reg in enumerate(gRegs):
-        reg_test = genFieldRegTest(reg, backend, definedUintSize, i + 32145)
-        if reg_test:
-            body  += reg_test
-            calls += f"  test_{reg}();\n"
+    c_global = "//\n// Global storage for expected field values\n//\n\n"
+    c_random = ""
+    c_write  = ""
+    c_read   = ""
+    calls_random = ""
+    calls_write  = ""
+    calls_read   = ""
 
-    c += body
+    for i, reg in enumerate(gRegs):
+        reg_type = gRegs[reg]['Type']
+        if 'rw' not in reg_type:
+            continue
+
+        seed = i + 32145
+        glb, rnd_func = genFieldRandomStruct(reg, backend, definedUintSize, seed)
+        c_global += glb
+        c_random += rnd_func
+        calls_random += f"  set_random_{reg}();\n"
+
+        c_write += genFieldRandomWrites(reg, backend, definedUintSize)
+        calls_write += f"  write_{reg}();\n"
+
+        c_read += genFieldRandomReads(reg, backend, definedUintSize)
+        calls_read += f"  read_{reg}();\n"
+
+    c += c_global
+    c += c_random
+    c += c_write
+    c += c_read
+
     c += dedent(f"""
     int main(void) {{
-    {calls}
+    {calls_random}
+    {calls_write}
+    {calls_read}
       printf("Correct values:%d\\n", correct);
       if (error==0) {{
         printf("Field API test passed.\\n");
@@ -3454,7 +3601,6 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     // EOF
     """)
     return c
-
 
 # +---------------------------------------------------+
 # |--------------------- Main ------------------------|
