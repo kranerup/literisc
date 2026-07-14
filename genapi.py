@@ -40,6 +40,12 @@ dbg=True
 debug=False
 debug_bit_packing=False
 
+# Number of groups the generated field read/write test (wr_rd_field_test.c)
+# is split into. Each group is guarded by its own #define TEST_GROUP_<n> so
+# a subset of register groups can be disabled (commented out) when the full
+# test doesn't fit the target, or to bisect a failure.
+NR_TEST_SUBDIVISIONS = 20
+
 # All registers are transfeered to this structure
 # Needs to be done to know how many slices there are
 # and the addresses for each slice.
@@ -3547,8 +3553,20 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     set_random_<reg>()/write_<reg>()/read_<reg>() functions. main()
     calls all set_random_* first, then all write_*, then all read_*,
     exactly mirroring genReadWriteTest()'s three-phase structure.
+
+    The registers under test are split across NR_TEST_SUBDIVISIONS
+    groups (round-robin, by register index). Each group's code and
+    its calls in main() are wrapped in #ifdef TEST_GROUP_<n> so
+    individual groups can be disabled by commenting out their
+    #define at the top of the generated file.
     """
     c = createCFieldApplStub()
+
+    c += "//\n// Test group defines -- comment out a group to exclude it\n// from this build (e.g. if the full test doesn't fit).\n//\n"
+    for g in range(NR_TEST_SUBDIVISIONS):
+        c += f"#define TEST_GROUP_{g}\n"
+    c += "\n"
+
     c += "int error = 0;\n"
     c += "int correct = 0;\n\n"
     c += genFieldTestPRNG()
@@ -3561,22 +3579,24 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     calls_write  = ""
     calls_read   = ""
 
-    for i, reg in enumerate(gRegs):
-        reg_type = gRegs[reg]['Type']
-        if 'rw' not in reg_type:
-            continue
+    test_regs = [reg for reg in gRegs if 'rw' in gRegs[reg]['Type']]
+
+    for i, reg in enumerate(test_regs):
+        group = i % NR_TEST_SUBDIVISIONS
+        guard_begin = f"#ifdef TEST_GROUP_{group}\n"
+        guard_end   = f"#endif // TEST_GROUP_{group}\n"
 
         seed = i + 32145
         glb, rnd_func = genFieldRandomStruct(reg, backend, definedUintSize, seed)
-        c_global += glb
-        c_random += rnd_func
-        calls_random += f"  set_random_{reg}();\n"
+        c_global += guard_begin + glb + guard_end
+        c_random += guard_begin + rnd_func + guard_end
+        calls_random += guard_begin + f"  set_random_{reg}();\n" + guard_end
 
-        c_write += genFieldRandomWrites(reg, backend, definedUintSize)
-        calls_write += f"  write_{reg}();\n"
+        c_write += guard_begin + genFieldRandomWrites(reg, backend, definedUintSize) + guard_end
+        calls_write += guard_begin + f"  write_{reg}();\n" + guard_end
 
-        c_read += genFieldRandomReads(reg, backend, definedUintSize)
-        calls_read += f"  read_{reg}();\n"
+        c_read += guard_begin + genFieldRandomReads(reg, backend, definedUintSize) + guard_end
+        calls_read += guard_begin + f"  read_{reg}();\n" + guard_end
 
     c += c_global
     c += c_random
