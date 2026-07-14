@@ -804,8 +804,12 @@
 
 (defun generate-subscript-64 (node)
   "Generate code for loading a 64-bit array element"
+  ;; Defer the result reg-pair alloc until after the address is computed --
+  ;; otherwise it sits live (unused) through the whole address computation,
+  ;; needlessly adding to register pressure on deeply nested subscripts
+  ;; (e.g. a[i][j][k][l]) and physical-mode 64-bit call arguments.
+  (generate-subscript-address node)
   (let ((result (alloc-reg-pair)))
-    (generate-subscript-address node)
     (emit-load-64 result)
     (setf *current-64-result* result)))
 
