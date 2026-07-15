@@ -1705,6 +1705,74 @@
                         :source-loc (ast-node-source-loc body)
                         :data (ast-node-data body))))))
 
+(defun collect-inline-suffixes (node suffixes)
+  "Collect the per-call-site suffix (e.g. \"_i42\") of every INLINE-EXPR
+   found in NODE, by inspecting its result-var name (always
+   \"__inline_result\" ++ suffix -- see INLINE-CALL). Used before unrolling a
+   loop body that was already inlined (inlining runs before unrolling in
+   COMPILE-C), so each unrolled copy can be given fresh suffixes -- see
+   REFRESH-INLINE-SUFFIXES-IN-NODE for why that's necessary."
+  (when (ast-node-p node)
+    (when (eq (ast-node-type node) 'inline-expr)
+      (let ((rv (ast-node-value node)))
+        (when (and (stringp rv) (>= (length rv) (length "__inline_result")))
+          (pushnew (subseq rv (length "__inline_result")) suffixes :test #'string=))))
+    (dolist (c (ast-node-children node))
+      (setf suffixes (collect-inline-suffixes c suffixes))))
+  suffixes)
+
+(defun rename-with-suffix-map (name suffix-map)
+  "If NAME (a string) ends with one of SUFFIX-MAP's old suffixes, return NAME
+   with that suffix swapped for the mapped new one; otherwise return NAME."
+  (dolist (pair suffix-map name)
+    (let ((old (car pair)))
+      (when (and (>= (length name) (length old))
+                 (string= name old :start1 (- (length name) (length old))))
+        (return (concatenate 'string (subseq name 0 (- (length name) (length old))) (cdr pair)))))))
+
+(defun refresh-inline-suffixes-in-node (node suffix-map)
+  "Rewrite a freshly COPY-AST'd subtree, replacing every occurrence of an
+   already-inlined call's per-site suffix (in its result-var, local-var, and
+   temp-var names, and its INLINE_RET exit-label symbol) per SUFFIX-MAP
+   (old-suffix . new-suffix). Without this, unrolling a loop body that
+   already contains an INLINE-EXPR (inlining runs before unrolling) would
+   have every unrolled copy share the exact same result-var/local-var names
+   and -- critically -- the exact same INLINE_RET exit label, producing
+   duplicate assembler labels whose positions never converge (see
+   MINIMIZE-LABELS)."
+  (when (null node)
+    (return-from refresh-inline-suffixes-in-node nil))
+  (unless (ast-node-p node)
+    (return-from refresh-inline-suffixes-in-node node))
+  (let ((value (ast-node-value node)))
+    (cond
+      ((stringp value)
+       (setf value (rename-with-suffix-map value suffix-map)))
+      ((and (symbolp value) (not (null value)))
+       (let* ((name (symbol-name value))
+              (new-name (rename-with-suffix-map name suffix-map)))
+         (unless (string= name new-name)
+           (setf value (intern new-name (symbol-package value)))))))
+    (make-ast-node :type (ast-node-type node)
+                   :value value
+                   :children (mapcar (lambda (c) (refresh-inline-suffixes-in-node c suffix-map))
+                                     (ast-node-children node))
+                   :result-type (ast-node-result-type node)
+                   :source-loc (ast-node-source-loc node)
+                   :data (ast-node-data node))))
+
+(defun refresh-copied-inline-calls (copied-body)
+  "If COPIED-BODY (already COPY-AST'd for one unrolled loop iteration)
+   contains any already-inlined calls, give each a fresh suffix so this copy
+   doesn't collide with sibling unrolled copies of the same original body.
+   No-op (returns COPIED-BODY as-is) when there's nothing to rename."
+  (let ((suffixes (collect-inline-suffixes copied-body nil)))
+    (if suffixes
+        (refresh-inline-suffixes-in-node
+         copied-body
+         (mapcar (lambda (s) (cons s (gen-inline-suffix))) suffixes))
+        copied-body)))
+
 (defun unroll-for-loop (node)
   "Attempt to fully unroll a for loop.
    Returns the unrolled block or the original node if not unrollable."
@@ -1761,7 +1829,8 @@
             (let ((unrolled-stmts
                     (loop for i from 0 below iterations
                           for val = (+ start (* i step))
-                          collect (substitute-loop-var (copy-ast body) var-name val))))
+                          collect (refresh-copied-inline-calls
+                                   (substitute-loop-var (copy-ast body) var-name val)))))
               (make-ast-node :type 'block
                              :children unrolled-stmts
                              :source-loc (ast-node-source-loc node)))))))))

@@ -1203,6 +1203,7 @@
            (member (generate-member-64 node))
            (subscript (generate-subscript-64 node))
            (call (generate-call-64 node))
+           (inline-expr (generate-inline-expr-64 node))
            (cast
             ;; Cast to long long
             (let ((src-expr (first (ast-node-children node)))
@@ -4285,6 +4286,71 @@
         (incf total (sum-inline-var-sizes child seen))))
     total))
 
+(defun register-inline-vars (init-decls body)
+  "Register an inline-expr's parameter temps and body locals in the symbol
+   table, allocating storage for each (promoted to R6-R9 when eligible,
+   stack otherwise). Returns the list of names added, for later cleanup via
+   REMOVE-SYMBOL. Shared by GENERATE-INLINE-EXPR and GENERATE-INLINE-EXPR-64
+   so both widths see the same variable layout."
+  (let ((inline-vars nil))
+    (flet ((register (name var-type)
+             (unless (lookup-symbol name)  ; don't re-register if already done
+               (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
+                        (not (is-address-taken name)))  ; can't register an addressed var
+                   (progn
+                     (add-symbol name var-type :register *local-reg-count*)
+                     (incf *local-reg-count*))
+                   (let* ((current-offset (compiler-state-local-offset *state*))
+                          (new-offset (- current-offset (type-size var-type))))
+                     (setf (compiler-state-local-offset *state*) new-offset)
+                     (add-symbol name var-type :local new-offset)))
+               (push name inline-vars))))
+      ;; Parameter temp vars and the result var
+      (dolist (decl (ast-node-children init-decls))
+        (when (eq (ast-node-type decl) 'var-decl)
+          (register (ast-node-value decl) (or (ast-node-result-type decl) (make-int-type)))))
+      ;; Local variables declared in the body (renamed during inlining)
+      (dolist (decl (collect-var-decls body))
+        (register (ast-node-value decl) (or (ast-node-result-type decl) (make-int-type)))))
+
+    ;; Update frame-size to cover any stack-allocated inline vars
+    (let ((needed (- (compiler-state-local-offset *state*))))
+      (when (> needed *frame-size*)
+        (setf *frame-size* needed)))
+
+    inline-vars))
+
+(defun generate-inline-var-inits (init-decls)
+  "Generate initializers for an inline-expr's parameter temp vars, handling
+   both 32-bit and 64-bit destinations."
+  (dolist (decl (ast-node-children init-decls))
+    (when (eq (ast-node-type decl) 'var-decl)
+      (let* ((name (ast-node-value decl))
+             (init (first (ast-node-children decl)))
+             (var-type (or (ast-node-result-type decl) (make-int-type))))
+        (when init
+          (if (is-longlong-type var-type)
+              (progn
+                (generate-expression-64 init)
+                (generate-store-lvalue-64 (make-ast-node :type 'var-ref :value name)
+                                          *current-64-result*)
+                (free-reg-pair *current-64-result*)
+                (setf *current-64-result* nil))
+              (progn
+                ;; Generate initializer
+                (generate-expression init)
+                ;; Mask value to appropriate size before storing
+                (when (< (type-size var-type) 4)
+                  (emit-mask-to-size var-type))
+                ;; Store to local variable (register or stack)
+                (let ((sym (lookup-symbol name)))
+                  (when sym
+                    (case (sym-entry-storage sym)
+                      (:register
+                       (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
+                      (:local
+                       (generate-store-local (sym-entry-offset sym) var-type))))))))))))
+
 (defun generate-inline-expr (node)
   "Generate code for an inlined function expression.
    The inline-expr node contains:
@@ -4297,71 +4363,11 @@
          (init-decls (first (ast-node-children node)))
          (body (second (ast-node-children node)))
          (exit-label-node (third (ast-node-children node)))
-         (inline-vars nil))  ; track variables we add to symbol table
+         (inline-vars (register-inline-vars init-decls body)))
 
     (emit-comment (format nil "-- inline begin: result in ~a --" result-var))
 
-    ;; First, register all inline variables in the symbol table
-    ;; They need to be allocated storage before we can generate code.
-    ;; Promote eligible scalars to registers (R6-R9), fall back to stack.
-    (dolist (decl (ast-node-children init-decls))
-      (when (eq (ast-node-type decl) 'var-decl)
-        (let* ((name (ast-node-value decl))
-               (var-type (or (ast-node-result-type decl) (make-int-type))))
-          (unless (lookup-symbol name)  ; don't re-register if already done
-            (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
-                     (not (is-address-taken name)))  ; can't register an addressed var
-                (progn
-                  (add-symbol name var-type :register *local-reg-count*)
-                  (incf *local-reg-count*))
-                (let* ((current-offset (compiler-state-local-offset *state*))
-                       (new-offset (- current-offset (type-size var-type))))
-                  (setf (compiler-state-local-offset *state*) new-offset)
-                  (add-symbol name var-type :local new-offset)))
-            (push name inline-vars)))))
-
-    ;; Also register any local variables declared in the body
-    ;; (these were renamed during the inline transformation)
-    (dolist (decl (collect-var-decls body))
-      (let* ((name (ast-node-value decl))
-             (var-type (or (ast-node-result-type decl) (make-int-type))))
-        (unless (lookup-symbol name)  ; don't re-register if already done
-          (if (and (promotable-to-register-p var-type) (< *local-reg-count* 4)
-                   (not (is-address-taken name)))  ; can't register an addressed var
-              (progn
-                (add-symbol name var-type :register *local-reg-count*)
-                (incf *local-reg-count*))
-              (let* ((current-offset (compiler-state-local-offset *state*))
-                     (new-offset (- current-offset (type-size var-type))))
-                (setf (compiler-state-local-offset *state*) new-offset)
-                (add-symbol name var-type :local new-offset)))
-          (push name inline-vars))))
-
-    ;; Update frame-size to cover any stack-allocated inline vars
-    (let ((needed (- (compiler-state-local-offset *state*))))
-      (when (> needed *frame-size*)
-        (setf *frame-size* needed)))
-
-    ;; Now generate initializations for the inline variables
-    (dolist (decl (ast-node-children init-decls))
-      (when (eq (ast-node-type decl) 'var-decl)
-        (let ((name (ast-node-value decl))
-              (init (first (ast-node-children decl)))
-              (var-type (or (ast-node-result-type decl) (make-int-type))))
-          (when init
-            ;; Generate initializer
-            (generate-expression init)
-            ;; Mask value to appropriate size before storing
-            (when (and var-type (< (type-size var-type) 4))
-              (emit-mask-to-size var-type))
-            ;; Store to local variable (register or stack)
-            (let ((sym (lookup-symbol name)))
-              (when sym
-                (case (sym-entry-storage sym)
-                  (:register
-                   (emit `(Rx=A ,(get-local-reg (sym-entry-offset sym)))))
-                  (:local
-                   (generate-store-local (sym-entry-offset sym) var-type)))))))))
+    (generate-inline-var-inits init-decls)
 
     ;; Generate the transformed body
     (generate-statement body)
@@ -4384,6 +4390,48 @@
       (remove-symbol name))
 
     (emit-comment "-- inline end --")))
+
+(defun generate-inline-expr-64 (node)
+  "Generate code for an inlined function expression whose result is 64-bit.
+   Same shape as GENERATE-INLINE-EXPR, but loads the result into a register
+   pair (via *current-64-result*) instead of into A. Longlong locals are
+   never register-promoted (see PROMOTABLE-TO-REGISTER-P), so the result var
+   is always :local storage here."
+  (let* ((result-var (ast-node-value node))
+         (init-decls (first (ast-node-children node)))
+         (body (second (ast-node-children node)))
+         (exit-label-node (third (ast-node-children node)))
+         (inline-vars (register-inline-vars init-decls body)))
+
+    (emit-comment (format nil "-- inline begin (64-bit): result in ~a --" result-var))
+
+    (generate-inline-var-inits init-decls)
+
+    ;; Generate the transformed body
+    (generate-statement body)
+
+    ;; Generate the exit label
+    (generate-statement exit-label-node)
+
+    ;; Load 64-bit result into a register pair
+    (let ((sym (lookup-symbol result-var)))
+      (if sym
+          (let* ((offset (+ (sym-entry-offset sym) *frame-size*))
+                 (addr-temp (alloc-temp-reg))
+                 (result (alloc-reg-pair)))
+            (emit `(A=Rx SP))
+            (emit `(Rx= ,offset ,addr-temp))
+            (emit `(A+=Rx ,addr-temp))
+            (free-temp-reg addr-temp)
+            (emit-load-64 result)
+            (setf *current-64-result* result))
+          (compiler-warning "Inline result var ~a not found" result-var)))
+
+    ;; Clean up: remove inline variables from symbol table
+    (dolist (name inline-vars)
+      (remove-symbol name))
+
+    (emit-comment "-- inline end (64-bit) --")))
 
 (defun generate-inline-return-jump (node)
   "Generate a jump to the inline exit label (used in place of return)"

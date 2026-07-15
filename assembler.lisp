@@ -215,22 +215,33 @@
                             (logand #x7f (ash val -7)))
                     (logand #x7f val))
               (if (within-2sc val 28)
-                (list (logior #x80 
+                (list (logior #x80
                               (logand #x7f (ash val -21)))
-                      (logior #x80 
+                      (logior #x80
                               (logand #x7f (ash val -14)))
-                      (logior #x80 
+                      (logior #x80
                               (logand #x7f (ash val -7)))
                       (logand #x7f val))
-                (list (logior #x80 
+                (list (logior #x80
                               (logand #x7f (ash val -28)))
-                      (logior #x80 
+                      (logior #x80
                               (logand #x7f (ash val -21)))
-                      (logior #x80 
+                      (logior #x80
                               (logand #x7f (ash val -14)))
-                      (logior #x80 
+                      (logior #x80
                               (logand #x7f (ash val -7)))
                       (logand #x7f val)))))))
+
+;;; Like ASM-IMMEDIATE, but forces the encoding to exactly N bytes (rather
+;;; than the smallest tier that fits VAL) by sign-extending into the extra
+;;; leading continuation bytes. VAL must satisfy (within-2sc val (* 7 n)).
+;;; Used by EVAL-ASM-JUMP, which needs to pin a jump's immediate to a byte
+;;; count decided ahead of encoding (see there for why).
+(defun asm-immediate-n (val n)
+  (loop for i from (1- n) downto 0
+        collect (if (zerop i)
+                    (logand #x7f val)
+                    (logior #x80 (logand #x7f (ash val (* -7 i)))))))
 
 ;;; -------------- build op codes -----------------
 ;;; reg/field are alias for the lower 4 bits in the opcode
@@ -525,31 +536,31 @@
         (t (eval instr))))
 
 (defun eval-asm-jump (instr curr-pc debug)
-  (let* ((dest-pc (eval (cadr instr)))
-             (imm-offs nil)
-             (instr-len 2) ; initial size, at least opcode plus one offset byte
-             (prev-len 2)
-             (pc-after-instr (+ curr-pc instr-len))
-             (offs (- dest-pc pc-after-instr)))
-        (if debug (format t "jump to label:~a pc-after-jmp:~a curr-pc:~a offs:~a~%"
-                dest-pc
-                pc-after-instr
-                curr-pc
-                offs))
-        (setf imm-offs (asm-immediate offs))
-        (if debug (format t "A: imm-offs:~a ilen:~a plen:~a~%" imm-offs instr-len prev-len))
-        (setf instr-len (+ 1 (list-length imm-offs)))
-        (if (not (equal instr-len prev-len))
-            (progn ; the length increased so need to recalculate the offset
-              (if debug (format t "B: imm-offs:~a ilen:~a plen:~a~%" imm-offs instr-len prev-len))
-              (setf imm-offs (asm-immediate (- dest-pc (+ curr-pc instr-len))))
-              (if (not (equal instr-len (+ 1 (list-length imm-offs))))
-                  (progn
-                    (setf imm-offs (concatenate 'list (list #x80) imm-offs))
-                    (if debug (format t "C: imm-offs:~a ilen:~a plen:~a~%" imm-offs instr-len prev-len))))))
-        (if debug (format t "dpc:~a offs:~a~%" dest-pc imm-offs))
-        (if debug (print (list (car instr) imm-offs)))
-        (funcall (car instr) imm-offs)))
+  "Encode a jump/call's relative offset from CURR-PC to its destination label.
+   The offset itself depends on the instruction's own byte length (since the
+   offset is measured from the PC *after* the instruction), and the byte
+   length depends on how many bytes the offset needs -- so this searches
+   instr-len upward from the smallest possible encoding (opcode + 1 offset
+   byte), recomputing the offset against each candidate length's own
+   pc-after-instr, until the offset actually fits in that many immediate
+   bytes. instr-len only ever grows here, never shrinks: growing it can only
+   make a backward (negative) offset's magnitude grow and a forward
+   (positive) offset's magnitude shrink or hold, while the encodable range
+   grows by 7 bits per byte, so this is guaranteed to converge without
+   oscillating between tiers -- unlike re-deriving ASM-IMMEDIATE's *minimal*
+   encoding at each guess, which can land on a smaller tier than the
+   instruction length already committed to and desync the two."
+  (let ((dest-pc (eval (cadr instr))))
+    (loop for instr-len from 2 to 6
+          for nbytes = (1- instr-len)
+          for pc-after-instr = (+ curr-pc instr-len)
+          for offs = (- dest-pc pc-after-instr)
+          when (within-2sc offs (* 7 nbytes))
+          do (let ((imm-offs (asm-immediate-n offs nbytes)))
+               (if debug (format t "dpc:~a pc-after-jmp:~a offs:~a imm-offs:~a~%"
+                                 dest-pc pc-after-instr offs imm-offs))
+               (return-from eval-asm-jump (funcall (car instr) imm-offs)))
+          finally (error "Jump offset from pc ~a to ~a too large to encode" curr-pc dest-pc))))
 
 ;;; Iterate through the program and calculate each instructions size to
 ;;; determine position of each label. Labels are updated when encountered.
