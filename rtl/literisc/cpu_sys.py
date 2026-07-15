@@ -13,6 +13,9 @@ from cpu import cpu
 #from tb import load_a_rx, load_rx, jump_relative
 from dp_mem import dp_mem
 from cpu_common import flop
+
+from asm import assemble
+
 import re
 
 #TODO: Fix the problem of cpu making a master request and then being stopped by a slave_request, causing it to miss the reply. Fix by accepting slave_request when cpu is in an acceptable state.
@@ -707,8 +710,20 @@ def cpu_sys(
 #00000000: A0 7E 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |.~..............|""")
 
         # boot-read-interrupt.lisp, reads INTERRUPT_ADDRESS and then jumps to PC=512
-        program = hexdump_to_prog("""\
-00000000: 80 83 FF 1A F8 40 80 84 00 10 FE 00 00 00 00 00  |.....@..........|""")
+#        program = hexdump_to_prog("""\
+#00000000: 80 83 FF 1A F8 40 80 84 00 10 FE 00 00 00 00 00  |.....@..........|""")
+
+        program = dict(enumerate(assemble(
+            """
+            (Rx= INTERRUPT_ADDRESS R0)
+            (A=M[Rx].b R0)
+            (Rx= PROG_BASE R0)
+            (A=Rx R0)
+            (j-a)
+            """,
+            INTERRUPT_ADDRESS=mm.INTERRUPT_ADDRESS,
+            PROG_BASE=512,
+            )))
 
 #        program = hexdump_to_prog("""\
 #00000000: 8F 82 80 00 AF 82 07 A0 7E F4 02 82 84 80 00 1A  |........~.......|

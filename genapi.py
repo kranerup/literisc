@@ -2028,8 +2028,8 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     #define FLEXSWITCH_FIELDS_H
 
     #define uint8_t unsigned char
-    #define uint32_t int
-    #define uint64_t long long
+    #define uint32_t unsigned int
+    #define uint64_t unsigned long long
 
     #define PA_RETURN_TYPE void
     #define PA_RETURN_OK
