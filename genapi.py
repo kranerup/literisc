@@ -2015,6 +2015,7 @@ def genCapi(gRegs,backend,definedUintSize,use_bitfields,field_db,hwconf_yml):
     hc_end_code +=" // EOF\n"
     return (h_code+h_param_defines+h_reg_defines+h_structs+h_func+hc_end_code,c_code+c_api_code+hc_end_code)
 
+# TODO: Make it so the user defines CONF_LOW instead of the api defining it
 # ------------------------------------------------------------ genFieldCapi
 def genFieldCapi(gRegs, backend, definedUintSize):
     wordsize = backend.getWordSize()
@@ -2034,8 +2035,11 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     #define PA_RETURN_TYPE void
     #define PA_RETURN_OK
 
-    #define CONF_LOW 65536
+    #ifndef CONF_LOW
+    #define CONF_LOW 41064
+    #endif
 
+    #ifdef DIRECT_MEMORY_ACCESS
     uint32_t readFromDevice(uint32_t address, uint32_t mode) {
       return ((uint32_t *)CONF_LOW)[address];
     }
@@ -2043,6 +2047,14 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     void writeToDevice(uint32_t address, uint32_t data, uint32_t mode) {
       ((uint32_t *)CONF_LOW)[address] = data;
     }
+    #else
+    uint32_t readFromDevice(uint32_t address, uint32_t mode) {
+      return *(uint32_t *)((uint8_t *)CONF_LOW + address);
+    }
+    void writeToDevice(uint32_t address, uint32_t data, uint32_t mode) {
+      *(uint32_t *)((uint8_t *)CONF_LOW + address) = data;
+    }
+    #endif
 
     """)
 
@@ -3465,6 +3477,7 @@ def createCFieldApplStub():
     // writeToDevice (CONF_LOW), i.e. it exercises live registers --
     // don't run it against fields that aren't safe to scribble over.
     #include <stdio.h>
+    #define DIRECT_MEMORY_ACCESS
     #include "flexswitch_fields.h"
 
     """)
