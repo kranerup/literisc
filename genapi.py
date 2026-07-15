@@ -2218,7 +2218,6 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                             c_code += f"    writeToDevice({addr_expr(w_start)}+i, wcurr, 0);\n"
                             c_code += f"  }}\n"
                         else:
-                            hi_shift = wordsize - bit_off
                             if 'r' in reg_type:
                                 lo_mask = hex((1 << bit_off) - 1)
                                 c_code += f"  {uint_hw} wprev = readFromDevice({addr_expr(w_start)},0) & {lo_mask};\n"
@@ -2232,8 +2231,31 @@ def genFieldCapi(gRegs, backend, definedUintSize):
                             c_code += f"    {uint_hw} wcurr = (i == {nr_hw_words-2}) ? wlast : 0;\n"
                             c_code += f"    for (j = 0; j < 4{inner_bound}; j++) {{\n"
                             c_code += f"      v = {fname}[i*4+j];\n"
-                            c_code += f"      wprev |= v << ({bit_off} + j*8);\n"
-                            c_code += f"      if ({hi_shift} > j*8) wcurr |= v >> ({hi_shift} - j*8);\n"
+                            # A byte at C-runtime position (bit_off + j*8) may:
+                            #   (a) fit entirely within the current word,
+                            #   (b) straddle the boundary (low bits here, high
+                            #       bits spill into wcurr), or
+                            #   (c) fall entirely past the boundary (bit_off
+                            #       is a multiple of 8, e.g. 8/16/24 -- the
+                            #       whole byte spills into wcurr).
+                            # Shifting by >=32 is undefined behavior in C, and
+                            # a naive "wprev |= v << (bit_off+j*8)" plus a
+                            # single right-shifted wcurr term (the previous
+                            # version here) is only actually correct for case
+                            # (b); for (c) the wprev shift is UB (observed in
+                            # practice to sometimes fold to a no-op and
+                            # sometimes to corrupt wprev's low bits with v,
+                            # clobbering whatever *other* field shares that
+                            # word) and the right-shift wcurr term is wrong
+                            # (it needs a LEFT shift instead, since the byte
+                            # doesn't start within the current word at all).
+                            c_code += f"      if ({bit_off} + j*8 < {wordsize}) wprev |= v << ({bit_off} + j*8);\n"
+                            c_code += f"      if ({bit_off} + j*8 + 8 > {wordsize}) {{\n"
+                            c_code += f"        if ({bit_off} + j*8 < {wordsize})\n"
+                            c_code += f"          wcurr |= v >> ({wordsize} - ({bit_off} + j*8));\n"
+                            c_code += f"        else\n"
+                            c_code += f"          wcurr |= v << ({bit_off} + j*8 - {wordsize});\n"
+                            c_code += f"      }}\n"
                             c_code += f"    }}\n"
                             c_code += f"    writeToDevice({addr_expr(w_start)}+i, wprev, 0);\n"
                             c_code += f"    wprev = wcurr;\n"
