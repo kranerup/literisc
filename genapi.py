@@ -43,9 +43,10 @@ debug_bit_packing=False
 # Number of groups the generated read/write tests (wr_rd_field_test.c and
 # wr_rd_test.c -- both use the same grouping so their resulting device
 # memories stay comparable) are split into. Each group is guarded by its own
-# #define TEST_GROUP_<n> so a subset of register groups can be disabled
-# (commented out) when the full test doesn't fit the target, or to bisect a
-# failure.
+# #ifdef TEST_GROUP_<n>; by default all groups are enabled, but a driver
+# file that #includes the test can define WR_RD_TEST_CUSTOM_GROUPS and pick
+# its own subset of TEST_GROUP_<n> defines when the full test doesn't fit
+# the target, or to bisect a failure (see genTestGroupDefines()).
 NR_TEST_SUBDIVISIONS = 20
 
 # All registers are transfeered to this structure
@@ -2516,13 +2517,14 @@ def genReadWriteTest(gRegs,backend,definedUintSize):
     device memory after this test is identical to the memory after
     the field test (both start zeroed). Unlike the field test it runs
     on the host, against a malloc'ed device area.
+
+    The generated file has no main(): it is meant to be #included from
+    a driver file that calls run_wr_rd_test(). See genTestGroupDefines()
+    for the configuration #defines the driver can set.
     """
     c = createCApplStub(backend,main=False)
 
-    c += "//\n// Test group defines -- comment out a group to exclude it\n// from this build (e.g. if the full test doesn't fit).\n//\n"
-    for g in range(NR_TEST_SUBDIVISIONS):
-        c += f"#define TEST_GROUP_{g}\n"
-    c += "\n"
+    c += genTestGroupDefines()
 
     c += "int error=0;\n"
     c += "int correct=0;\n\n"
@@ -2585,17 +2587,23 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
         calls_random += guard_begin + f"  set_random_{reg}();\n" + guard_end
 
         c_write += guard_begin + genRandomWrites(reg, backend, definedUintSize) + guard_end
-        calls_write += guard_begin + f"  write_{reg}({dev_arg});\n" + guard_end
+        calls_write += (guard_begin + f"  write_{reg}({dev_arg});\n"
+                        + "#ifdef TRACE_WR_CHECKSUM\n"
+                        + "  print_checksum(device_ptr);\n"
+                        + "#endif\n" + guard_end)
 
         c_read += guard_begin + genRandomReads(reg, backend, definedUintSize) + guard_end
-        calls_read += guard_begin + f"  read_{reg}({dev_arg});\n" + guard_end
+        calls_read += (guard_begin + f"  read_{reg}({dev_arg});\n"
+                       + "#ifdef TRACE_RD_CHECKSUM\n"
+                       + "  print_read_checksum();\n"
+                       + "#endif\n" + guard_end)
 
     c += c_global
     c += c_random
     c += c_write
     c += c_read
 
-    c_main  = "\nint main(int argc,char **argv) {\n\n"
+    c_main  = "\nint run_wr_rd_test(void) {\n\n"
     # rd/wr test always use a malloced memory area to test the API and
     # being independent of having a actual device connected.
     c_main += backend.initDevice(malloced_mem=True)
@@ -2605,6 +2613,9 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
     c_main += calls_random + "\n"
     c_main += calls_write + "\n"
     c_main += calls_read + "\n"
+    c_main += "  // Write checksum: Fletcher over the whole device memory. Reads do\n"
+    c_main += "  // not modify memory, so this still reflects the write phase.\n"
+    c_main += "  print_checksum(device_ptr);\n"
     c_main += "  print_read_checksum();\n"
     c_main += "  printf(\"Correct values:%d\\n\",correct);\n"
     c_main += "  if(error==0) {\n"
@@ -2612,7 +2623,7 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
     c_main += "  } else {\n"
     c_main += "    printf(\"total ERRORS:%d\\n\",error);\n"
     c_main += "    printf(\"Test FAILED!\\n\");\n"
-    c_main += "    exit(2);\n"
+    c_main += "    return 2;\n"
     c_main += "  }\n"
     c_main += "  return 0;\n"
     c_main += "}\n//EOF\n"
@@ -3699,6 +3710,43 @@ def genFieldRandomReads(reg, backend, definedUintSize, enable_log=False):
     """)
     return func
 
+def genTestGroupDefines():
+    """Configuration preamble shared by wr_rd_test.c and
+    wr_rd_field_test.c. Both files are meant to be #included from a
+    small driver translation unit which calls the run_* function; the
+    driver configures the test with #defines placed before the
+    #include (see the generated comment for the knobs).
+    """
+    c = dedent("""\
+    //
+    // This file is meant to be #included from a driver file that then
+    // calls the run function. Configuration #defines, to be placed
+    // before the #include:
+    //
+    //   WR_RD_TEST_CUSTOM_GROUPS
+    //     By default all TEST_GROUP_<n> groups run. Define this to
+    //     disable the defaults below, and add your own
+    //     #define TEST_GROUP_<n> for each register group to run.
+    //
+    //   TRACE_WR_CHECKSUM
+    //     Print the device-memory checksum (CHK line) after every
+    //     write_<reg>() call, to pinpoint the first register whose
+    //     write makes the checksum diverge.
+    //
+    //   TRACE_RD_CHECKSUM
+    //     Print the running read checksum (RDCHK line) after every
+    //     read_<reg>() call, likewise for the read path.
+    //
+    // Without the TRACE_* defines, both checksums are printed once at
+    // the end of the run function.
+    //
+    #ifndef WR_RD_TEST_CUSTOM_GROUPS
+    """)
+    for g in range(NR_TEST_SUBDIVISIONS):
+        c += f"#define TEST_GROUP_{g}\n"
+    c += "#endif // WR_RD_TEST_CUSTOM_GROUPS\n\n"
+    return c
+
 def genReadChecksumDef():
     """Fletcher checksum accumulated over every field value read back
     through the API during the read phase, byte by byte (LSB first, in
@@ -3734,8 +3782,13 @@ def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, en
     }
     """) if enable_log else ""
 
-    print_checksum_def = dedent("""
+    # print_checksum() is emitted before the application's own
+    # readFromDevice() definition, so declare it here.
+    print_checksum_def = "\nextern uint{0}_t readFromDevice(uint64_t *device_ptr, uint64_t address, int mode);\n".format(backend.getWordSize())
+    print_checksum_def += dedent("""
+    #ifndef NR_WORDS
     #define NR_WORDS 62500
+    #endif
 
     void print_checksum(uint64_t *device_ptr) {
         uint32_t sum1;
@@ -3802,7 +3855,9 @@ def createCFieldApplStub(enable_log=False):
     """) if enable_log else ""
 
     print_checksum_def = dedent("""
+    #ifndef NR_WORDS
     #define NR_WORDS 62500
+    #endif
 
     void print_checksum() {
         uint32_t sum1;
@@ -3837,7 +3892,8 @@ def createCFieldApplStub(enable_log=False):
 
     return dedent("""\
     // (C) Packet Architects AB
-    // Minimal test application for the flexswitch field-level API.
+    // Test for the flexswitch field-level API. Meant to be #included
+    // from a driver file that calls run_wr_rd_field_test().
     #include <stdio.h>
     #define DIRECT_MEMORY_ACCESS
     #include "flexswitch_fields.h"
@@ -3849,22 +3905,24 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     """Assemble wr_rd_field_test.c: preamble, PRNG, then -- for every
     register with both read AND write ('rw' in Type, same gate
     genReadWriteTest() uses) -- global storage arrays plus
-    set_random_<reg>()/write_<reg>()/read_<reg>() functions. main()
-    calls all set_random_* first, then all write_*, then all read_*,
-    exactly mirroring genReadWriteTest()'s three-phase structure.
+    set_random_<reg>()/write_<reg>()/read_<reg>() functions.
+    run_wr_rd_field_test() calls all set_random_* first, then all
+    write_*, then all read_*, exactly mirroring genReadWriteTest()'s
+    three-phase structure.
 
     The registers under test are split across NR_TEST_SUBDIVISIONS
     groups (round-robin, by register index). Each group's code and
-    its calls in main() are wrapped in #ifdef TEST_GROUP_<n> so
-    individual groups can be disabled by commenting out their
-    #define at the top of the generated file.
+    its calls in run_wr_rd_field_test() are wrapped in
+    #ifdef TEST_GROUP_<n>.
+
+    The generated file has no main(): it is meant to be #included from
+    a driver file that calls run_wr_rd_field_test(). See
+    genTestGroupDefines() for the configuration #defines the driver
+    can set.
     """
     c = createCFieldApplStub()
 
-    c += "//\n// Test group defines -- comment out a group to exclude it\n// from this build (e.g. if the full test doesn't fit).\n//\n"
-    for g in range(NR_TEST_SUBDIVISIONS):
-        c += f"#define TEST_GROUP_{g}\n"
-    c += "\n"
+    c += genTestGroupDefines()
 
     c += "int error = 0;\n"
     c += "int correct = 0;\n\n"
@@ -3892,10 +3950,16 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
         calls_random += guard_begin + f"  set_random_{reg}();\n" + guard_end
 
         c_write += guard_begin + genFieldRandomWrites(reg, backend, definedUintSize) + guard_end
-        calls_write += guard_begin + f"  write_{reg}();\n" + guard_end
+        calls_write += (guard_begin + f"  write_{reg}();\n"
+                        + "#ifdef TRACE_WR_CHECKSUM\n"
+                        + "  print_checksum();\n"
+                        + "#endif\n" + guard_end)
 
         c_read += guard_begin + genFieldRandomReads(reg, backend, definedUintSize) + guard_end
-        calls_read += guard_begin + f"  read_{reg}();\n" + guard_end
+        calls_read += (guard_begin + f"  read_{reg}();\n"
+                       + "#ifdef TRACE_RD_CHECKSUM\n"
+                       + "  print_read_checksum();\n"
+                       + "#endif\n" + guard_end)
 
     c += c_global
     c += c_random
@@ -3903,10 +3967,13 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     c += c_read
 
     c += dedent(f"""
-    int main(void) {{
+    int run_wr_rd_field_test(void) {{
     {calls_random}
     {calls_write}
     {calls_read}
+      // Write checksum: Fletcher over the whole device memory. Reads do
+      // not modify memory, so this still reflects the write phase.
+      print_checksum();
       print_read_checksum();
       printf("Correct values:%d\\n", correct);
       if (error==0) {{
