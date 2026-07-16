@@ -1,23 +1,17 @@
-// flexswitch_fields.h's readFromDevice/writeToDevice dereference a raw
-// pointer at the fixed address CONF_LOW (65536). Native (non-liteRISC)
-// builds need real memory mapped there before main() runs, or the very
-// first device access segfaults. Link this file in alongside a group test
-// when compiling with a normal host compiler (clang/gcc) instead of lrcc.
-#define _GNU_SOURCE
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/mman.h>
+// Host-side backing memory for flexswitch_fields.h's device area when a
+// group driver is compiled natively (run_groups_clang.sh).
+//
+// On liteRISC the field API's readFromDevice/writeToDevice hit the
+// configuration memory at the fixed address CONF_LOW. On the host that
+// address is not mappable (vm.mmap_min_addr), so run_groups_clang.sh
+// instead preprocesses the test with
+//   -DCONF_LOW='((unsigned long)conf_low_mem)'
+// making all device accesses land in this zero-initialized array. Its
+// size matches the --conf-mem-size (in 32-bit words) that run_groups.sh
+// passes to lrcc; override with -DCONF_LOW_SHIM_WORDS=<n> if needed.
 
-#define CONF_LOW_BASE ((void *)65536)
-#define CONF_LOW_SIZE (64UL * 1024 * 1024)
+#ifndef CONF_LOW_SHIM_WORDS
+#define CONF_LOW_SHIM_WORDS 10000000
+#endif
 
-__attribute__((constructor))
-static void map_conf_low(void) {
-  void *base = mmap(CONF_LOW_BASE, CONF_LOW_SIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-  if (base == MAP_FAILED) {
-    perror("mmap CONF_LOW");
-    _exit(100);
-  }
-}
+unsigned int conf_low_mem[CONF_LOW_SHIM_WORDS];

@@ -1,28 +1,24 @@
 #!/bin/bash
-# Like run_groups.sh, but compiles+runs each single-group driver
-# natively with clang instead of through lrcc/the liteRISC emulator. This
-# is for checking whether a failure is a liteRISC-specific compiler bug or
-# a bug in the (externally generated) flexswitch_fields.h itself: if a
-# group fails here too, it fails on the reference toolchain, not just ours.
-#
-# Native builds skip liteRISC's own include/stdio.h (its custom putchar
-# writes to a fixed volatile MMIO address, which doesn't exist as a real
-# process) by NOT passing that include dir, so <stdio.h> resolves to the
-# host libc instead. flexswitch_fields.h's fixed CONF_LOW device address
-# is not mappable in a host process (vm.mmap_min_addr), so CONF_LOW is
-# redefined at preprocess time to point into conf_low_shim.c's
-# conf_low_mem array, making readFromDevice/writeToDevice work unmodified.
+# Compile and run each single-group driver of the struct-API test
+# (wr_rd_test_group<N>.c, which #includes wr_rd_test.c with one
+# TEST_GROUP_N enabled) natively on the host. wr_rd_test.c runs against
+# a malloc'ed device area and links against the struct API in
+# flexswitch.c (compiled once, without FLEXSW_DEBUG so the logs stay
+# clean for checksum comparison).
 #
 # By default all 20 groups run. To run a subset, pass group numbers
 # and/or ranges as arguments, e.g.:
-#   ./run_groups_clang.sh 3 7 12-15
+#   ./run_groups_struct.sh 3 7 12-15
+#
+# Compare the resulting logs against the field-API runs with
+# compare_checksums.sh.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="$(dirname "$SCRIPT_DIR")/api"
-SHIM="$SCRIPT_DIR/conf_low_shim.c"
-RESULTS_DIR="$SCRIPT_DIR/results_clang"
+RESULTS_DIR="$SCRIPT_DIR/results_struct"
 TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
+CC="${CC:-clang}"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -42,12 +38,19 @@ else
   done
 fi
 
+# The struct API itself is compiled once and linked into every driver.
+FLEXSW_O="$RESULTS_DIR/flexswitch.o"
+if ! "$CC" -I "$API_DIR" -c "$API_DIR/flexswitch.c" -o "$FLEXSW_O" \
+     > "$RESULTS_DIR/flexswitch.log" 2>&1; then
+  echo "failed to compile flexswitch.c, see $RESULTS_DIR/flexswitch.log" >&2
+  exit 1
+fi
+
 pass=0
 fail=0
 
 for i in $groups_to_run; do
-  SRC="$SCRIPT_DIR/wr_rd_field_test_group${i}.c"
-  PRE="$RESULTS_DIR/group${i}.pre.c"
+  SRC="$SCRIPT_DIR/wr_rd_test_group${i}.c"
   BIN="$RESULTS_DIR/group${i}.bin"
   LOG="$RESULTS_DIR/group${i}.log"
 
@@ -58,16 +61,7 @@ for i in $groups_to_run; do
 
   printf 'group %2d ... ' "$i"
 
-  # Prepend the declaration of the shim's backing array, then redirect
-  # all CONF_LOW device accesses into it.
-  echo "extern unsigned int conf_low_mem[];" > "$PRE"
-  if ! clang -E -P -DCONF_LOW='((unsigned long)conf_low_mem)' -I "$API_DIR" "$SRC" >> "$PRE" 2> "$LOG"; then
-    echo "PREPROCESS FAILED  see $LOG"
-    fail=$((fail + 1))
-    continue
-  fi
-
-  if ! clang "$PRE" "$SHIM" -o "$BIN" >> "$LOG" 2>&1; then
+  if ! "$CC" -I "$API_DIR" "$SRC" "$FLEXSW_O" -o "$BIN" > "$LOG" 2>&1; then
     echo "COMPILE FAILED  see $LOG"
     fail=$((fail + 1))
     continue
