@@ -932,10 +932,13 @@
         (let ((sign-label (gen-label "SIGNEXT64"))
               (end-label (gen-label "SIGNEXT64END"))
               (temp (alloc-temp-reg)))
-          ;; Test bit 31
+          ;; Test bit 31. Reuse the same temp for the zero test instead
+          ;; of emit-test-zero's fresh one -- this can run at high
+          ;; register pressure (e.g. as an operand of a 64-bit op).
           (emit `(Rx= #x80000000 ,temp))
           (emit `(A&=Rx ,temp))
-          (emit-test-zero)
+          (emit `(Rx= 0 ,temp))
+          (emit `(A-=Rx ,temp))
           (emit `(jz ,sign-label))
           ;; Negative: high word = -1
           (emit `(Rx= -1 ,(reg-pair-high result)))
@@ -965,17 +968,57 @@
 
     ;; Evaluate left operand
     (generate-expression-64 left)
-    (let ((left-pair *current-64-result*))
+    (let ((left-pair *current-64-result*)
+          (is-unsigned (or (and left-type (type-desc-unsigned-p left-type))
+                           (and right-type (type-desc-unsigned-p right-type)))))
       (setf *current-64-result* nil)
+
+      ;; Shift by a constant: the right operand never needs to be
+      ;; evaluated, and the constant-shift generators can write their
+      ;; result in place over the source pair (each result word is
+      ;; stored only after the source words it depends on have been
+      ;; read). Handled before the right operand to keep register
+      ;; pressure at its minimum -- one pair.
+      (when (and (or (string= op "<<") (string= op ">>"))
+                 (ast-node-p right)
+                 (eq (ast-node-type right) 'literal)
+                 (integerp (ast-node-value right)))
+        (if (string= op "<<")
+            (generate-shl-64 left-pair (ast-node-value right) left-pair)
+            (generate-shr-64 left-pair (ast-node-value right) left-pair is-unsigned))
+        (setf *current-64-result* left-pair)
+        (return-from generate-binary-op-64))
 
       ;; Evaluate right operand
       (generate-expression-64 right)
       (let ((right-pair *current-64-result*))
         (setf *current-64-result* nil)
 
-        (let ((result-pair (alloc-reg-pair))
-              (is-unsigned (or (and left-type (type-desc-unsigned-p left-type))
-                               (and right-type (type-desc-unsigned-p right-type)))))
+        ;; Bitwise ops compute in place into the left pair (safe: each
+        ;; result word is stored only after both operand words it
+        ;; depends on have been read), so no third pair is needed.
+        (when (member op '("&" "|" "^") :test #'string=)
+          (cond ((string= op "&") (generate-and-64 left-pair right-pair left-pair))
+                ((string= op "|") (generate-or-64  left-pair right-pair left-pair))
+                (t                (generate-xor-64 left-pair right-pair left-pair)))
+          (free-reg-pair right-pair)
+          (setf *current-64-result* left-pair)
+          (return-from generate-binary-op-64))
+
+        ;; Comparisons produce a 32-bit result in A and need no result
+        ;; pair at all.
+        (when (member op '("==" "!=" "<" "<=" ">" ">=") :test #'string=)
+          (cond ((string= op "==") (generate-cmp-64-eq left-pair right-pair))
+                ((string= op "!=") (generate-cmp-64-ne left-pair right-pair))
+                ((string= op "<")  (generate-cmp-64-lt left-pair right-pair is-unsigned))
+                ((string= op "<=") (generate-cmp-64-le left-pair right-pair is-unsigned))
+                ((string= op ">")  (generate-cmp-64-gt left-pair right-pair is-unsigned))
+                (t                 (generate-cmp-64-ge left-pair right-pair is-unsigned)))
+          (free-reg-pair left-pair)
+          (free-reg-pair right-pair)
+          (return-from generate-binary-op-64))
+
+        (let ((result-pair (alloc-reg-pair)))
 
           (cond
             ((string= op "+")
@@ -984,82 +1027,18 @@
             ((string= op "-")
              (generate-sub-64 left-pair right-pair result-pair))
 
-            ((string= op "&")
-             (generate-and-64 left-pair right-pair result-pair))
-
-            ((string= op "|")
-             (generate-or-64 left-pair right-pair result-pair))
-
-            ((string= op "^")
-             (generate-xor-64 left-pair right-pair result-pair))
-
-            ;; Comparison operators - result is 32-bit (0 or 1)
-            ((string= op "==")
-             (generate-cmp-64-eq left-pair right-pair)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ((string= op "!=")
-             (generate-cmp-64-ne left-pair right-pair)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ((string= op "<")
-             (generate-cmp-64-lt left-pair right-pair is-unsigned)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ((string= op "<=")
-             (generate-cmp-64-le left-pair right-pair is-unsigned)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ((string= op ">")
-             (generate-cmp-64-gt left-pair right-pair is-unsigned)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ((string= op ">=")
-             (generate-cmp-64-ge left-pair right-pair is-unsigned)
-             (free-reg-pair left-pair)
-             (free-reg-pair right-pair)
-             (free-reg-pair result-pair)
-             (return-from generate-binary-op-64))
-
-            ;; Shift operators - shift count is 32-bit
+            ;; Shift operators - shift count is 32-bit. Constant shift
+            ;; counts were already handled (in place) before the right
+            ;; operand was evaluated; only variable shifts reach here.
+            ;; The count is the low word of right-pair (high should be 0
+            ;; for reasonable shifts).
             ((string= op "<<")
-             ;; For shifts, we need the count as a 32-bit value
-             ;; right-pair.low contains the count (high should be 0 for reasonable shifts)
-             ;; Check if shift count is a constant
-             (if (and (ast-node-p right)
-                      (eq (ast-node-type right) 'literal)
-                      (integerp (ast-node-value right)))
-                 ;; Constant shift
-                 (generate-shl-64 left-pair (ast-node-value right) result-pair)
-                 ;; Variable shift - use the low word of right-pair as count
-                 (generate-shift-64-variable left-pair (reg-pair-low right-pair)
-                                             result-pair t is-unsigned)))
+             (generate-shift-64-variable left-pair (reg-pair-low right-pair)
+                                         result-pair t is-unsigned))
 
             ((string= op ">>")
-             ;; Similar to left shift
-             (if (and (ast-node-p right)
-                      (eq (ast-node-type right) 'literal)
-                      (integerp (ast-node-value right)))
-                 ;; Constant shift
-                 (generate-shr-64 left-pair (ast-node-value right) result-pair is-unsigned)
-                 ;; Variable shift
-                 (generate-shift-64-variable left-pair (reg-pair-low right-pair)
-                                             result-pair nil is-unsigned)))
+             (generate-shift-64-variable left-pair (reg-pair-low right-pair)
+                                         result-pair nil is-unsigned))
 
             ;; Multiplication - call __MUL64 runtime
             ;; Note: 64-bit mul/div/mod always use runtime functions regardless of
@@ -1221,8 +1200,19 @@
 
         ;; 32-bit expression - promote to 64-bit
         (t
-         (generate-expression node)
-         (generate-cast-to-64 expr-type))))))
+         (if (and (eq (ast-node-type node) 'literal)
+                  (integerp (ast-node-value node)))
+             ;; Constant: both words are known at compile time, so load
+             ;; them straight into the pair -- no runtime sign test, and
+             ;; no extra temps (which matters at high register pressure).
+             (let ((value (ast-node-value node))
+                   (result (alloc-reg-pair)))
+               (emit `(Rx= ,value ,(reg-pair-low result)))
+               (emit `(Rx= ,(if (minusp value) -1 0) ,(reg-pair-high result)))
+               (setf *current-64-result* result))
+             (progn
+               (generate-expression node)
+               (generate-cast-to-64 expr-type))))))))
 
 (defun alloc-temp-reg ()
   "Allocate a temporary register (returns virtual register V0, V1, ...)"

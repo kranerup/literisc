@@ -5683,6 +5683,77 @@ int main() {
     return (int)result;
 }" :max-cycles 100000))))
 
+(deftest test-longlong-register-pressure ()
+  "Test: nested 64-bit ops (constant shift, bitwise and, literal promotion,
+   64-bit compare) inside a call argument, in a function whose locals claim
+   all four local registers R6-R9, leaving only the six R0-R5 temps.
+   Regression test for 'Out of temporary registers': generate-binary-op-64
+   used to hold three register pairs at once (left/right/result), evaluate
+   constant shift counts into a pair it never used, and promote 32-bit
+   literals to 64-bit with a runtime sign test costing two more temps --
+   demand peaked at 7 with only 6 temps free. Constant shifts and bitwise
+   ops now compute in place over the left pair, literal promotion loads
+   both words directly, and comparisons no longer allocate a result pair.
+   (Shape distilled from the generated wr_rd_field_test.c read functions.)"
+  (check
+    (= 1 (run-and-get-result "
+unsigned int sum = 0;
+int result = 0;
+unsigned long long expected[2];
+
+void sink(unsigned char b) { sum = sum * 31 + b; }
+void rd64(unsigned long long *out) { *out = 0x1122334455667788ULL; }
+
+void reader(void) {
+  int mn[] = { 0 };
+  int mx[] = { 1 };
+  for (int s = 0; s < 1; s++) {
+    for (int p = mn[s]; p < mx[s]; p++) {
+      for (int t = 0; t < 1; t++) {
+        int i = (t == 0) ? 0 : 1;
+        int slot = t;
+        unsigned long long v = 0;
+        rd64(&v);
+        sink((unsigned char)((v >> 0) & 0xFF));
+        sink((unsigned char)((v >> 8) & 0xFF));
+        sink((unsigned char)((v >> 32) & 0xFF));
+        if (v != expected[slot]) result = 1;
+        (void)i;
+      }
+    }
+  }
+}
+
+int main() {
+    /* sum = ((0x88*31)+0x77)*31+0x44 = 134453 */
+    expected[0] = 0x1122334455667788ULL;
+    expected[1] = 0;
+    reader();
+    return sum == 134453 && result == 0;
+}" :max-cycles 100000))
+    ;; Same shape under -Os, matching how the generated field tests are built
+    (= 1 (run-and-get-result "
+unsigned int sum = 0;
+unsigned long long g_v;
+void sink(unsigned char b) { sum = sum * 31 + b; }
+void rd64(unsigned long long *out) { *out = g_v; }
+int main() {
+    g_v = 0x1122334455667788ULL;
+    for (int a = 0; a < 1; a++) {
+      for (int b = 0; b < 1; b++) {
+        for (int c = 0; c < 2; c++) {
+          for (int d = 0; d < 1; d++) {
+            unsigned long long v = 0;
+            rd64(&v);
+            sink((unsigned char)((v >> 8) & 0xFF));
+          }
+        }
+      }
+    }
+    /* sum = 0x77*31 + 0x77 = 3808 */
+    return sum == 3808;
+}" :max-cycles 100000 :optimize-size t))))
+
 (deftest test-phase26-longlong ()
   "Run all 64-bit long long tests"
   (combine-results
@@ -5703,7 +5774,8 @@ int main() {
     (test-longlong-shift)
     (test-longlong-multiply)
     (test-longlong-divide)
-    (test-longlong-modulo)))
+    (test-longlong-modulo)
+    (test-longlong-register-pressure)))
 
 ;;; ===========================================================================
 ;;; Phase 27 Tests: Memory Inspection (Test Observability)
