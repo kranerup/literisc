@@ -2574,7 +2574,7 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
     test_regs = [reg for reg in gRegs if 'rw' in gRegs[reg]['Type']]
 
     for i, reg in enumerate(test_regs):
-        group = i % NR_TEST_SUBDIVISIONS
+        group = int(i // (len(test_regs) / NR_TEST_SUBDIVISIONS))
         guard_begin = f"#ifdef TEST_GROUP_{group}\n"
         guard_end   = f"#endif // TEST_GROUP_{group}\n"
 
@@ -3694,6 +3694,40 @@ def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, en
     }
     """) if enable_log else ""
 
+    print_checksum_def = dedent("""
+    #define NR_WORDS 62500
+
+    void print_checksum(uint64_t *device_ptr) {
+        uint32_t sum1;
+        uint32_t sum2;
+        uint32_t w;
+        uint8_t byte_val;
+        uint32_t addr;
+        int k;
+
+        sum1 = 1;
+        sum2 = 0;
+
+        for (addr = 0; addr < NR_WORDS; addr++) {
+            w = readFromDevice(device_ptr, addr, 0);
+
+            for (k = 0; k < 4; k++) {
+                // Extract each byte from the 32-bit word (from most significant to least significant)
+                // k=0 gets bits 24-31, k=1 gets bits 16-23, etc.
+                byte_val = (w >> (24 - (k * 8))) & 0xFF;
+
+                sum1 = sum1 + byte_val;
+                if (sum1 >= 65521) sum1 = sum1 - 65521;
+
+                sum2 = sum2 + sum1;
+                if (sum2 >= 65521) sum2 = sum2 - 65521;
+            }
+        }
+
+        printf("CHK %d %d %d\\n", sum1, sum2, NR_WORDS);
+    }
+    """)
+
     c_code = """// (C) Packet Architects AB
 #include <ctype.h>
 #include <stdio.h>
@@ -3708,7 +3742,7 @@ def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, en
 #define TRUE 1
 #define FALSE 0
 
-""" + log_byte_def
+""" + log_byte_def + print_checksum_def
 
     if main == True:
         c_code += "int main (int argc, char **argv) {\n"
@@ -3725,6 +3759,40 @@ def createCFieldApplStub(enable_log=False):
     }
     """) if enable_log else ""
 
+    print_checksum_def = dedent("""
+    #define NR_WORDS 62500
+
+    void print_checksum() {
+        uint32_t sum1;
+        uint32_t sum2;
+        uint32_t w;
+        uint8_t byte_val;
+        uint32_t addr;
+        int k;
+
+        sum1 = 1;
+        sum2 = 0;
+
+        for (addr = 0; addr < NR_WORDS; addr++) {
+            w = readFromDevice(addr, 0);
+
+            for (k = 0; k < 4; k++) {
+                // Extract each byte from the 32-bit word (from most significant to least significant)
+                // k=0 gets bits 24-31, k=1 gets bits 16-23, etc.
+                byte_val = (w >> (24 - (k * 8))) & 0xFF;
+
+                sum1 = sum1 + byte_val;
+                if (sum1 >= 65521) sum1 = sum1 - 65521;
+
+                sum2 = sum2 + sum1;
+                if (sum2 >= 65521) sum2 = sum2 - 65521;
+            }
+        }
+
+        printf("CHK %d %d %d\\n", sum1, sum2, NR_WORDS);
+    }
+    """)
+
     return dedent("""\
     // (C) Packet Architects AB
     // Minimal test application for the flexswitch field-level API.
@@ -3732,7 +3800,7 @@ def createCFieldApplStub(enable_log=False):
     #define DIRECT_MEMORY_ACCESS
     #include "flexswitch_fields.h"
 
-    """) + log_byte_def + "\n"
+    """) + log_byte_def + print_checksum_def + "\n"
 
 # ------------------------------------------------------------ genFieldReadWriteTest
 def genFieldReadWriteTest(gRegs, backend, definedUintSize):
@@ -3771,7 +3839,7 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     test_regs = [reg for reg in gRegs if 'rw' in gRegs[reg]['Type']]
 
     for i, reg in enumerate(test_regs):
-        group = i % NR_TEST_SUBDIVISIONS
+        group = int(i // (len(test_regs) / NR_TEST_SUBDIVISIONS))
         guard_begin = f"#ifdef TEST_GROUP_{group}\n"
         guard_end   = f"#endif // TEST_GROUP_{group}\n"
 
