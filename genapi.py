@@ -2605,6 +2605,7 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
     c_main += calls_random + "\n"
     c_main += calls_write + "\n"
     c_main += calls_read + "\n"
+    c_main += "  print_read_checksum();\n"
     c_main += "  printf(\"Correct values:%d\\n\",correct);\n"
     c_main += "  if(error==0) {\n"
     c_main += "    printf(\"Test passed.\\n\");\n"
@@ -3408,6 +3409,10 @@ def genRandomReads(reg, backend, definedUintSize, enable_log=False):
                 for j in range(nr_bytes):
                     check_body += (f'    log_byte("{tag}", sliceId, portId, setId, i, {j}, '
                                   f'(int)(({got} >> {8*j}) & 0xFF));\n')
+            # Same byte stream (LSB first, field order) as the field test's
+            # read_<reg>() feeds into checksum_read_byte().
+            for j in range(nr_bytes):
+                check_body += f"    checksum_read_byte((uint8_t)(({got} >> {8*j}) & 0xFF));\n"
             check_body += f"    if( {got} != {exp} ) {{\n"
             check_body += (f"      printf(\"ERROR in {reg} field {fname} Got:%lu Expected:%lu\\n\",\n"
                            f"             (long unsigned int){got},\n"
@@ -3418,6 +3423,8 @@ def genRandomReads(reg, backend, definedUintSize, enable_log=False):
             if enable_log:
                 check_body += f'    for (lb = 0; lb < {nr_bytes}; lb++)\n'
                 check_body += f'      log_byte("{tag}", sliceId, portId, setId, i, lb, {got}[lb]);\n'
+            for j in range(nr_bytes):
+                check_body += f"    checksum_read_byte({got}[{j}]);\n"
             for j in range(nr_bytes):
                 check_body += f"    if( {got}[{j}] != {exp}[{j}] ) {{\n"
                 check_body += (f"      printf(\"ERROR in {reg} part [{j}] field {fname} Got:%lu Expected:%lu\\n\",\n"
@@ -3634,6 +3641,7 @@ def genFieldRandomReads(reg, backend, definedUintSize, enable_log=False):
             rd_calls  += f"    rd_{reg}{slice_pfix}_{fname}( {call_prefix}{sep}got_{fname} );\n"
 
             log_and_check_body += f"    for (bi = 0; bi < {nr_bytes}; bi++) {{\n"
+            log_and_check_body += f"      checksum_read_byte(got_{fname}[bi]);\n"
             if enable_log:
                 log_and_check_body += f'      log_byte("RD {reg}.{fname}", sliceId, portId, setId, i, bi, got_{fname}[bi]);\n'
             log_and_check_body += f"      if (got_{fname}[bi] != {reg}_exp_{fname}{idx}[bi]) {{\n"
@@ -3651,6 +3659,10 @@ def genFieldRandomReads(reg, backend, definedUintSize, enable_log=False):
                 for j in range(nr_bytes):
                     log_and_check_body += (f'    log_byte("RD {reg}.{fname}", sliceId, portId, setId, i, {j}, '
                                f'(int)((got_{fname} >> {8*j}) & 0xFF));\n')
+            # Same byte stream (LSB first, field order) as the struct test's
+            # read_<reg>() feeds into checksum_read_byte().
+            for j in range(nr_bytes):
+                log_and_check_body += f"    checksum_read_byte((uint8_t)((got_{fname} >> {8*j}) & 0xFF));\n"
             log_and_check_body += f"    if (got_{fname} != {reg}_exp_{fname}{idx}) {{\n"
             log_and_check_body += (f"      printf(\"ERROR in {reg} field {fname} Got:%d Expected:%d\\n\", "
                          f"(unsigned long)got_{fname}, (unsigned long){reg}_exp_{fname}{idx});\n")
@@ -3686,6 +3698,34 @@ def genFieldRandomReads(reg, backend, definedUintSize, enable_log=False):
     }}
     """)
     return func
+
+def genReadChecksumDef():
+    """Fletcher checksum accumulated over every field value read back
+    through the API during the read phase, byte by byte (LSB first, in
+    field declaration order). The generated read_<reg>() functions of
+    BOTH wr_rd_test.c (struct API) and wr_rd_field_test.c (field API)
+    feed the identical byte stream into checksum_read_byte() -- unlike
+    the raw readFromDevice() word stream, which differs between the two
+    APIs (the field API re-reads words shared by several fields) -- so
+    the final RDCHK lines are directly comparable between the two read
+    APIs.
+    """
+    return dedent("""
+    uint32_t rd_sum1 = 1;
+    uint32_t rd_sum2 = 0;
+
+    void checksum_read_byte(uint8_t byte_val) {
+        rd_sum1 = rd_sum1 + byte_val;
+        if (rd_sum1 >= 65521) rd_sum1 = rd_sum1 - 65521;
+
+        rd_sum2 = rd_sum2 + rd_sum1;
+        if (rd_sum2 >= 65521) rd_sum2 = rd_sum2 - 65521;
+    }
+
+    void print_read_checksum() {
+        printf("RDCHK %d %d\\n", rd_sum1, rd_sum2);
+    }
+    """)
 
 def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, enable_log=False):
     log_byte_def = dedent("""
@@ -3728,6 +3768,8 @@ def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, en
     }
     """)
 
+    read_checksum_def = genReadChecksumDef()
+
     c_code = """// (C) Packet Architects AB
 #include <ctype.h>
 #include <stdio.h>
@@ -3742,7 +3784,7 @@ def createCApplStub(backend, bwFunctions=False, bytesPerSec=False, main=True, en
 #define TRUE 1
 #define FALSE 0
 
-""" + log_byte_def + print_checksum_def
+""" + log_byte_def + print_checksum_def + read_checksum_def
 
     if main == True:
         c_code += "int main (int argc, char **argv) {\n"
@@ -3800,7 +3842,7 @@ def createCFieldApplStub(enable_log=False):
     #define DIRECT_MEMORY_ACCESS
     #include "flexswitch_fields.h"
 
-    """) + log_byte_def + print_checksum_def + "\n"
+    """) + log_byte_def + print_checksum_def + genReadChecksumDef() + "\n"
 
 # ------------------------------------------------------------ genFieldReadWriteTest
 def genFieldReadWriteTest(gRegs, backend, definedUintSize):
@@ -3865,6 +3907,7 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
     {calls_random}
     {calls_write}
     {calls_read}
+      print_read_checksum();
       printf("Correct values:%d\\n", correct);
       if (error==0) {{
         printf("Field API test passed.\\n");
