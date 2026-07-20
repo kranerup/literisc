@@ -18,8 +18,8 @@
 ;;;   Special registers: IRQ, TICK, INTERRUPT, CPU_RESET (4 bytes)
 ;;;   CONF bus window  : conf-low .. conf-high
 
-(defconstant +imem-depth+ 8192)
-(defconstant +dmem-depth+ 32768)
+(defconstant +imem-depth+ 100000)
+(defconstant +dmem-depth+ 100000)
 (defconstant +io-depth+ 100)
 (defconstant +conf-window-size+ (- (expt 2 24) (expt 2 16)))
 
