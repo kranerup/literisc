@@ -2039,7 +2039,7 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     #define PA_RETURN_OK
 
     #ifndef CONF_LOW
-    #define CONF_LOW 41064
+    #define CONF_LOW 200104
     #endif
 
     #ifdef DIRECT_MEMORY_ACCESS
