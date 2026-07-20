@@ -1123,15 +1123,15 @@
    address space accesses are instead backed by a dedicated local array of
    that many bytes, so callers can exercise conf-mapped fields without a
    live conf bus peer.
-   IMEM-SIZE/DMEM-SIZE, when either is given, size the (combined, flat)
-   program memory to their sum (defaulting the unspecified one to the RTL's
-   default IMEM/DMEM depth) instead of the usual fixed #x10000/#x1000000,
-   and set the initial stack pointer to the top of that memory."
-  (let* ((mem-size (when (or imem-size dmem-size)
-                     (+ (or imem-size lr-soc:+imem-depth+)
-                        (or dmem-size lr-soc:+dmem-depth+))))
+   IMEM-SIZE/DMEM-SIZE size the (combined, flat) program memory to their sum
+   (defaulting either unspecified one to the RTL's default IMEM/DMEM depth),
+   and set the initial stack pointer to the top of that memory -- this always
+   matches generate-program's own default stack-top, so the emulator's dmem
+   array is never smaller than what the compiled code's SP can reach."
+  (let* ((mem-size (+ (or imem-size lr-soc:+imem-depth+)
+                       (or dmem-size lr-soc:+dmem-depth+)))
          (mcode (compile-c-to-asm source :verbose verbose :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead :mem-size mem-size))
-         (dmem (lr-emulator:make-dmem (or mem-size (if conf-socket #x1000000 #x10000))))
+         (dmem (lr-emulator:make-dmem (if conf-socket (max mem-size #x1000000) mem-size)))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose))
          ;; Number of instructions actually executed (secondary return value).
          (instr-count (progn
@@ -1152,7 +1152,9 @@
    Returns (values return-value violations-list).
    violations-list is nil if all callee-saved registers were properly preserved."
   (let* ((mcode (compile-c-to-asm source :verbose verbose :optimize-size optimize-size :peephole peephole))
-         (dmem (lr-emulator:make-dmem #x10000))  ; 64KB data memory
+         ;; Must match generate-program's default stack-top (compile-c-to-asm's
+         ;; caller doesn't pass :mem-size here), or SP starts above this array.
+         (dmem (lr-emulator:make-dmem (+ lr-soc:+imem-depth+ lr-soc:+dmem-depth+)))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
     ;; Run with verification
     (multiple-value-bind (reason verifier)
@@ -1232,7 +1234,9 @@
                          :peephole peephole))
          (symtab (make-hash-table :test 'eql))
          (mcode (assemble (strip-asm-comments asm) verbose symtab))
-         (dmem (lr-emulator:make-dmem #x10000))
+         ;; Must match generate-program's default stack-top (compile-c above
+         ;; doesn't pass :mem-size), or SP starts above this array.
+         (dmem (lr-emulator:make-dmem (+ lr-soc:+imem-depth+ lr-soc:+dmem-depth+)))
          (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug verbose)))
 
     ;; Run the program

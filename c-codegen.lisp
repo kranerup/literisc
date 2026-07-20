@@ -1534,7 +1534,7 @@
 ;;; Main Code Generation Entry Points
 ;;; ===========================================================================
 
-(defun generate-program (ast &optional (stack-top #x8000))
+(defun generate-program (ast &optional (stack-top (+ lr-soc:+imem-depth+ lr-soc:+dmem-depth+)))
   "Generate code for a complete program"
   ;; Reset all codegen state
   (init-registers)
@@ -2395,10 +2395,25 @@
 (defun generate-return (node)
   "Generate code for a return statement"
   (when (ast-node-children node)
-    ;; Generate return expression
-    (generate-expression (first (ast-node-children node)))
-    ;; Move result to P0 (R10)
-    (emit '(Rx=A P0)))
+    (let* ((expr (first (ast-node-children node)))
+           (fn-sym (lookup-symbol (compiler-state-current-function *state*)))
+           (return-type (and fn-sym (sym-entry-type fn-sym))))
+      (if (is-longlong-type return-type)
+          ;; 64-bit return value: result pair goes in P0:P1 (low:high),
+          ;; matching the convention generate-call-64 reads on the caller side.
+          (let ((result-pair (progn (generate-expression-64 expr)
+                                     *current-64-result*)))
+            (emit `(A=Rx ,(reg-pair-low result-pair)))
+            (emit '(Rx=A P0))
+            (emit `(A=Rx ,(reg-pair-high result-pair)))
+            (emit '(Rx=A P1))
+            (free-reg-pair result-pair)
+            (setf *current-64-result* nil))
+          (progn
+            ;; Generate return expression
+            (generate-expression expr)
+            ;; Move result to P0 (R10)
+            (emit '(Rx=A P0))))))
 
   ;; Jump to function epilogue (skip if this is the final return before func_end)
   (unless *skip-final-return-jump*
@@ -2967,6 +2982,11 @@
       (post-op
        ;; Post-increment/decrement: yields the original value, same type as operand
        (get-expression-type (first (ast-node-children node))))
+      (cast
+       ;; A cast's type is its target type, stored in ast-node-value (see
+       ;; parse-unary-expression / generate-cast) -- not ast-node-result-type,
+       ;; which is never populated for cast nodes.
+       (ast-node-value node))
       (call
        ;; Function call - get return type from callee's type
        (let* ((callee (first (ast-node-children node))))

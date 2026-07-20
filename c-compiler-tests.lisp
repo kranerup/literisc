@@ -2303,7 +2303,9 @@ int main() {
   (handler-case
       (let* ((asm (compile-c source :optimize t :annotate nil :optimize-size optimize-size))
              (mcode (assemble (strip-asm-comments asm) nil))
-             (dmem (lr-emulator:make-dmem #x10000))
+             ;; Must match generate-program's default stack-top (compile-c
+             ;; above doesn't pass :mem-size), or SP starts above this array.
+             (dmem (lr-emulator:make-dmem (+ lr-soc:+imem-depth+ lr-soc:+dmem-depth+)))
              (emul (lr-emulator:make-emulator mcode dmem :shared-mem t :debug nil)))
         (lr-emulator:run-emul emul max-cycles nil)
         (let ((result (aref (lr-emulator::processor-state-r
