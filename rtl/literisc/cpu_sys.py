@@ -12,6 +12,7 @@ from constants import compute_memory_map
 from cpu import cpu
 #from tb import load_a_rx, load_rx, jump_relative
 from dp_mem import dp_mem
+from dp_mem_rom import dp_mem_rom
 from cpu_common import flop
 
 from asm import assemble
@@ -21,12 +22,6 @@ import re
 #TODO: Fix the problem of cpu making a master request and then being stopped by a slave_request, causing it to miss the reply. Fix by accepting slave_request when cpu is in an acceptable state.
 
 #TODO: Fix cpu doing write or read on the same cycle that a request_we or request_re is issued. This leads to next cycle a read/write from cpu and read/write from slave is possible. dmem_port_mux makes the slave read/write take priority, making it so the dmem_wenable or dmem_renable gets ignored. Could maybe be fixed by having a mux that sets cpu_waiting to 1 in @always_comb when conf.slave_request_we or conf.slave_request_re is true.
-
-#__verilog__("
-#initial begin
-#    $readmemh("program.hex", rom_mem);
-#end
-#")
 
 def prog_to_tuples( program ):
     lowest = min( program.keys() )
@@ -47,9 +42,6 @@ def hexdump_to_prog( dump ):
             adr, hexdata = line.split(': ')
             prog += [ int(x,16) for x in hexdata.split(" ") ]
     return { idx: val for idx,val in enumerate( prog ) }
-
-def load_rom():
-    __verilog__ = "//TESTING"
 
 def rom(
     odata,
@@ -79,9 +71,6 @@ def rom(
     sel_ram = signal()
     rd_ram = signal()
 
-
-    load = load_rom()
-
     adr_bits = (depth-1).bit_length()
 
     @always_comb
@@ -109,7 +98,7 @@ def rom(
     isro = flop( n_sel_rom, sel_rom, clk_en, clk, sync_rstn )
     isra = flop( n_sel_ram, sel_ram, clk_en, clk, sync_rstn )
 
-    pmem = dp_mem(
+    pmem = dp_mem_rom(
         idata = idata,
         odata = ram_data,
         raddr = r_ram_addr,
