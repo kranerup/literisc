@@ -2006,14 +2006,7 @@
 
 (defun run-with-curses-conf (emul socket-path &optional symtab)
   (format t "run-with-curses-conf: starting, socket-path=~a~%" socket-path)
-  (let* ((server (make-server-socket socket-path))
-         (dummy  (format t "waiting for conf connection on ~a~%" socket-path))
-         (client (accept-connection server))
-         (stream (sb-bsd-sockets:socket-make-stream
-                   client
-                   :input t :output t
-                   :element-type '(unsigned-byte 8)
-                   :buffering :none)))
+  (let ((stream (connect-to-sim socket-path)))
     (format t "conf connected~%")
     (setf *conf-stream* stream)
     (add-conf emul)
@@ -2026,28 +2019,17 @@
           (run-with-curses emul symtab)
           (format t "run-with-curses-conf: run-with-curses returned normally~%"))
       (format t "run-with-curses-conf: cleanup triggered (unwind-protect)~%")
-      (format t "run-with-curses-conf: closing conf stream~%")
       (setf *conf-stream* nil)
-      (format t "run-with-curses-conf: closing client socket~%")
-      (sb-bsd-sockets:socket-close client)
-      (format t "run-with-curses-conf: closing server socket~%")
-      (sb-bsd-sockets:socket-close server)
+      (format t "run-with-curses-conf: closing conf stream~%")
+      (close stream)
       (format t "run-with-curses-conf: cleanup done~%"))))
 
 (defun run-emul-conf (emul max-instr socket-path &optional (debug t))
   "Run the emulator (non-curses) with a conf bus connection.
-   Opens a server socket at SOCKET-PATH, waits for a client, wires the
+   Connects to the simulator's socket at SOCKET-PATH, wires the
    conf read/write callbacks, then runs like RUN-EMUL."
   (format t "run-emul-conf: starting, socket-path=~a~%" socket-path)
-  (let* ((server (make-server-socket socket-path))
-         (dummy  (format t "waiting for conf connection on ~a~%" socket-path))
-         (client (accept-connection server))
-         (stream (sb-bsd-sockets:socket-make-stream
-                   client
-                   :input t :output t
-                   :element-type '(unsigned-byte 8)
-                   :buffering :none)))
-    (declare (ignore dummy))
+  (let ((stream (connect-to-sim socket-path)))
     (format t "conf connected~%")
     (setf *conf-stream* stream)
     (add-conf emul)
@@ -2057,8 +2039,7 @@
     (unwind-protect
         (run-emul emul max-instr debug)
       (setf *conf-stream* nil)
-      (sb-bsd-sockets:socket-close client)
-      (sb-bsd-sockets:socket-close server))))
+      (close stream))))
 
 (defun run-emul-io ( emul pty nr-instr &optional symtab )
   (format t "run-emul-io pty:~a~%" pty)

@@ -1,11 +1,11 @@
 (defpackage :conf-socket
   (:use :cl)
-  (:export :make-server-socket
-           :accept-connection
+  (:export :connect-to-sim
            :read-msg
            :send-master-request
            :+msg-master-reply+
            :+msg-master-request+))
+
 (in-package :conf-socket)
 
 (require :sb-bsd-sockets)
@@ -14,17 +14,30 @@
 (defconstant +msg-master-reply+   2)
 (defconstant +msg-master-request+ 3)
 
-(defun make-server-socket (path)
-  (let ((socket (make-instance 'sb-bsd-sockets:local-socket
-                                :type :stream)))
-    (when (probe-file path)
-      (delete-file path))
-    (sb-bsd-sockets:socket-bind socket path)
-    (sb-bsd-sockets:socket-listen socket 1)
-    socket))
-
-(defun accept-connection (server)
-  (sb-bsd-sockets:socket-accept server))
+(defun connect-to-sim (path &key (retry-interval 0.5) (max-retries nil))
+  "Connect to the simulator's listening socket at PATH.
+Retries every RETRY-INTERVAL seconds until the simulator is up.
+If MAX-RETRIES is non-nil, gives up after that many attempts.
+Returns a binary two-way stream."
+  (loop for attempt from 0
+        do (let ((socket (make-instance 'sb-bsd-sockets:local-socket
+                                        :type :stream)))
+             (handler-case
+                 (progn
+                   (sb-bsd-sockets:socket-connect socket path)
+                   (format t "conf-socket: connected to ~a~%" path)
+                   (return (sb-bsd-sockets:socket-make-stream
+                            socket
+                            :input t :output t
+                            :element-type '(unsigned-byte 8)
+                            :buffering :none)))
+               (sb-bsd-sockets:socket-error (e)
+                 (declare (ignore e))
+                 (sb-bsd-sockets:socket-close socket)
+                 (when (and max-retries (>= attempt max-retries))
+                   (error "conf-socket: could not connect to ~a" path))
+                 (format t "conf-socket: waiting for simulator at ~a...~%" path)
+                 (sleep retry-interval))))))
 
 (defun read-u32 (stream)
   (logior (read-byte stream)
@@ -49,15 +62,6 @@
     (list :type type :address address :data data
           :we we :re re :id id :status status)))
 
-;;(defun write-msg (stream type address data we re id status)
-;;  (write-byte type stream)
-;;  (write-u32 stream address)
-;;  (write-u32 stream data)
-;;  (write-byte we stream)
-;;  (write-byte re stream)
-;;  (write-byte id stream)
-;;  (write-byte status stream)
-;;  (finish-output stream))
 (defun write-msg (stream type address data we re id status)
   (let ((bytes (list type
                      (logand address #xff) (logand (ash address -8) #xff)
@@ -80,20 +84,11 @@
   (write-msg stream +msg-master-request+ address data we re 0 0)
   (format t "send-master-request: done~%"))
 
-;;(defun main ()
-;;  (let* ((server (make-server-socket "/tmp/coe_emulator.sock"))
-;;         (dummy  (format t "COE emulator waiting for connection...~%"))
-;;         (client (accept-connection server))
-;;         (stream (sb-bsd-sockets:socket-make-stream
-;;                   client
-;;                   :input t :output t
-;;                   :element-type '(unsigned-byte 8)
-;;                   :buffering :none)))
-;;    (format t "connected~%")
-;;    (loop
-;;      ;; wait for master reply from C
-;;      (let ((msg (read-msg stream)))
-;;        (format t "got: ~a~%" msg)
-;;        ;; your emulator logic here
-;;        ;; (send-master-request stream address data 1 0)
-;;        ))))
+;; Example usage:
+;;
+;; (defun main ()
+;;   (let ((stream (connect-to-sim "/tmp/coe_emulator.sock")))
+;;     ;; issue a request, wait for the reply
+;;     (send-master-request stream #x10000 #xdeadbeef 1 0)
+;;     (let ((msg (read-msg stream)))
+;;       (format t "got: ~a~%" msg))))

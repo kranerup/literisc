@@ -316,13 +316,17 @@
           (make-constant-node (sym-entry-offset sym)
                               (make-int-type)
                               (ast-node-source-loc node)))
-         ;; Fold constant global to literal
-         ((and *constant-globals* (gethash name *constant-globals*))
+         ;; Fold constant global to literal (unless its value needs more
+         ;; than 32 bits -- e.g. a uint64_t global -- in which case
+         ;; folding would corrupt it; see value-out-of-32bit-range-p)
+         ((and *constant-globals* (gethash name *constant-globals*)
+               (not (value-out-of-32bit-range-p (gethash name *constant-globals*))))
           (make-constant-node (gethash name *constant-globals*)
                               (make-int-type)
                               (ast-node-source-loc node)))
-         ;; Fold constant local to literal
-         ((and *local-constants* (gethash name *local-constants*))
+         ;; Fold constant local to literal (same caveat as above)
+         ((and *local-constants* (gethash name *local-constants*)
+               (not (value-out-of-32bit-range-p (gethash name *local-constants*))))
           (make-constant-node (gethash name *local-constants*)
                               (make-int-type)
                               (ast-node-source-loc node)))
@@ -362,6 +366,25 @@
 (defun to-32bit-unsigned (n)
   "Convert a value to 32-bit unsigned integer"
   (logand n #xFFFFFFFF))
+
+(defun value-out-of-32bit-range-p (n)
+  "T if N cannot be represented exactly by this file's 32-bit constant-
+   folding representation, whether interpreted as signed [-2^31, 2^31)
+   or unsigned [0, 2^32) -- i.e. N needs more than 32 bits.
+
+   This matters because a folded literal's *type* is not reliably known
+   at fold time (see make-constant-node), so the codegen path for a
+   'literal node whose own type isn't recognized as 64-bit falls back to
+   deriving its high word purely from the Lisp value's sign when it's
+   later promoted to a 64-bit context. That is exactly correct for any
+   value in this 32-bit range (sign-extension of a small value, or of a
+   32-bit-unsigned value stored as a negative Lisp integer, reproduces
+   the original bit pattern either way) but silently corrupts a
+   genuinely wide value -- e.g. folding `~((uint64_t)0x1<<47)` down to
+   a 32-bit constant loses the fact that bit 47 must stay clear.
+   Callers must leave such expressions unfolded so they're evaluated at
+   runtime by the (correct) 64-bit codegen instead."
+  (or (< n (- (expt 2 31))) (>= n (expt 2 32))))
 
 ;;; ===========================================================================
 ;;; Binary Operation Folding
@@ -419,9 +442,17 @@
                             :value op
                             :children (list left right)
                             :source-loc (ast-node-source-loc node))
-             ;; Evaluate the operation
-             (let ((result (evaluate-binary-op op left-val right-val)))
-               (make-constant-node result (make-int-type) (ast-node-source-loc node))))))
+             ;; Evaluate the operation. Not safe to fold (e.g. a 64-bit-
+             ;; typed constant expression whose true value needs more
+             ;; than 32 bits, like a shift past bit 31) -> leave it
+             ;; unfolded so it's evaluated correctly at runtime instead.
+             (multiple-value-bind (result safe-p) (evaluate-binary-op op left-val right-val)
+               (if safe-p
+                   (make-constant-node result (make-int-type) (ast-node-source-loc node))
+                   (make-ast-node :type 'binary-op
+                                  :value op
+                                  :children (list left right)
+                                  :source-loc (ast-node-source-loc node)))))))
 
       ;; Not both constants - return with folded children
       (t
@@ -431,60 +462,83 @@
                       :source-loc (ast-node-source-loc node))))))
 
 (defun evaluate-binary-op (op left-val right-val)
-  "Evaluate a binary operation on constant values"
+  "Evaluate a binary operation on constant values.
+   Returns (values result safe-p). SAFE-P is nil -- RESULT must then be
+   ignored -- when either operand, or the true (unclamped, unmasked)
+   result, needs more than 32 bits to represent exactly. That arises
+   for 64-bit/uint64_t-typed compile-time constant expressions (e.g. a
+   shift that pushes a bit past position 31); this function has no
+   64-bit computation mode, so folding such a value here would silently
+   corrupt it (see value-out-of-32bit-range-p). Callers must leave the
+   expression unfolded in that case so it's evaluated correctly by the
+   64-bit runtime codegen instead."
+  (when (or (value-out-of-32bit-range-p left-val)
+            (value-out-of-32bit-range-p right-val))
+    (return-from evaluate-binary-op (values nil nil)))
   (cond
     ;; Arithmetic
     ((string= op "+")
-     (to-32bit-signed (+ left-val right-val)))
+     (values (to-32bit-signed (+ left-val right-val)) t))
     ((string= op "-")
-     (to-32bit-signed (- left-val right-val)))
+     (values (to-32bit-signed (- left-val right-val)) t))
     ((string= op "*")
-     (to-32bit-signed (* left-val right-val)))
+     (values (to-32bit-signed (* left-val right-val)) t))
     ((string= op "/")
-     (if (zerop right-val)
-         0  ; Shouldn't happen, checked above
-         (to-32bit-signed (truncate left-val right-val))))
+     (values (if (zerop right-val)
+                 0  ; Shouldn't happen, checked above
+                 (to-32bit-signed (truncate left-val right-val)))
+             t))
     ((string= op "%")
-     (if (zerop right-val)
-         0  ; Shouldn't happen, checked above
-         (to-32bit-signed (rem left-val right-val))))
+     (values (if (zerop right-val)
+                 0  ; Shouldn't happen, checked above
+                 (to-32bit-signed (rem left-val right-val)))
+             t))
 
     ;; Bitwise (use unsigned for bitwise ops)
     ((string= op "&")
-     (to-32bit-signed (logand (to-32bit-unsigned left-val)
-                              (to-32bit-unsigned right-val))))
+     (values (to-32bit-signed (logand (to-32bit-unsigned left-val)
+                                      (to-32bit-unsigned right-val)))
+             t))
     ((string= op "|")
-     (to-32bit-signed (logior (to-32bit-unsigned left-val)
-                              (to-32bit-unsigned right-val))))
+     (values (to-32bit-signed (logior (to-32bit-unsigned left-val)
+                                      (to-32bit-unsigned right-val)))
+             t))
     ((string= op "^")
-     (to-32bit-signed (logxor (to-32bit-unsigned left-val)
-                              (to-32bit-unsigned right-val))))
+     (values (to-32bit-signed (logxor (to-32bit-unsigned left-val)
+                                      (to-32bit-unsigned right-val)))
+             t))
     ((string= op "<<")
-     (to-32bit-signed (ash (to-32bit-unsigned left-val)
-                           (min right-val 31))))
+     ;; Compute the true shifted value -- no premature clamp of the
+     ;; shift count to 31, which was itself wrong for any left operand
+     ;; wider than 32 bits -- and only fold if it still fits in 32 bits.
+     (let ((raw (ash (to-32bit-unsigned left-val) right-val)))
+       (if (value-out-of-32bit-range-p raw)
+           (values nil nil)
+           (values (to-32bit-signed raw) t))))
     ((string= op ">>")
-     (to-32bit-signed (ash (to-32bit-unsigned left-val)
-                           (- (min right-val 31)))))
+     ;; left-val is already confirmed in-range above, and a right shift
+     ;; only shrinks magnitude, so no re-check is needed here.
+     (values (to-32bit-signed (ash (to-32bit-unsigned left-val) (- right-val))) t))
 
     ;; Comparison (result is 0 or 1)
     ((string= op "==")
-     (if (= left-val right-val) 1 0))
+     (values (if (= left-val right-val) 1 0) t))
     ((string= op "!=")
-     (if (/= left-val right-val) 1 0))
+     (values (if (/= left-val right-val) 1 0) t))
     ((string= op "<")
-     (if (< left-val right-val) 1 0))
+     (values (if (< left-val right-val) 1 0) t))
     ((string= op ">")
-     (if (> left-val right-val) 1 0))
+     (values (if (> left-val right-val) 1 0) t))
     ((string= op "<=")
-     (if (<= left-val right-val) 1 0))
+     (values (if (<= left-val right-val) 1 0) t))
     ((string= op ">=")
-     (if (>= left-val right-val) 1 0))
+     (values (if (>= left-val right-val) 1 0) t))
 
     ;; Logical (result is 0 or 1)
     ((string= op "&&")
-     (if (and (not (zerop left-val)) (not (zerop right-val))) 1 0))
+     (values (if (and (not (zerop left-val)) (not (zerop right-val))) 1 0) t))
     ((string= op "||")
-     (if (or (not (zerop left-val)) (not (zerop right-val))) 1 0))
+     (values (if (or (not (zerop left-val)) (not (zerop right-val))) 1 0) t))
 
     (t
      (error "Unknown binary operator in constant folding: ~a" op))))
@@ -516,15 +570,25 @@
 
 (defun evaluate-unary-op (op val)
   "Evaluate a unary operation on a constant value.
-   Returns nil if the operation cannot be folded."
+   Returns nil if the operation cannot be folded -- either because it's
+   inherently unfoldable (address-of, dereference, ...), or because VAL
+   or the true result needs more than 32 bits to represent exactly
+   (see value-out-of-32bit-range-p): this function has no 64-bit
+   computation mode, so folding e.g. `~((uint64_t)0x1<<47)` here would
+   silently corrupt it. Callers must leave such expressions unfolded
+   so they're evaluated correctly by the 64-bit runtime codegen."
   (cond
     ;; Negation
     ((string= op "-")
-     (to-32bit-signed (- val)))
+     (if (value-out-of-32bit-range-p val)
+         nil
+         (to-32bit-signed (- val))))
 
     ;; Bitwise NOT
     ((string= op "~")
-     (to-32bit-signed (lognot (to-32bit-unsigned val))))
+     (if (value-out-of-32bit-range-p val)
+         nil
+         (to-32bit-signed (lognot (to-32bit-unsigned val)))))
 
     ;; Logical NOT
     ((string= op "!")
@@ -581,6 +645,18 @@
             ((and (type-desc-p target-type)
                   (= (type-desc-size target-type) 2))
              (make-constant-node (logand val #xFFFF) target-type (ast-node-source-loc node)))
+            ;; Cast to a 64-bit type whose value doesn't fit in 32 bits --
+            ;; make-constant-node always truncates to 32 bits, so folding
+            ;; here would corrupt it. Leave unfolded for runtime evaluation
+            ;; instead (must be checked before the int/default case below,
+            ;; which assumes the value already fits in 32 bits).
+            ((and (type-desc-p target-type)
+                  (>= (type-size target-type) 8)
+                  (value-out-of-32bit-range-p val))
+             (make-ast-node :type 'cast
+                            :value target-type
+                            :children (list expr)
+                            :source-loc (ast-node-source-loc node)))
             ;; Cast to int (4 bytes) - value unchanged (already 32-bit)
             (t
              (make-constant-node val (or target-type (make-int-type)) (ast-node-source-loc node)))))
