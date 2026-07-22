@@ -38,8 +38,8 @@ emit_drivers() {
 #define WR_RD_TEST_CUSTOM_GROUPS
 #define TEST_GROUP_${i}
 // For per-register checksum bisection, uncomment:
-//#define TRACE_WR_CHECKSUM
-//#define TRACE_RD_CHECKSUM
+#define TRACE_WR_CHECKSUM
+#define TRACE_RD_CHECKSUM
 #include "$(basename "$src")"
 
 int main(void) {
