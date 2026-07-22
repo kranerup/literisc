@@ -2394,16 +2394,82 @@ def genFieldCapi(gRegs, backend, definedUintSize):
     c_code += "#endif\n// EOF\n"
     return c_code
 
+# ------------------------------------------------------------ genTestValueAssignment
+def genTestValueAssignment(member_expr, fsize, is_bytearray_storage, field_uint):
+    """Emit C statements that assign a deterministic, coverage-
+    guaranteeing test value to `member_expr` for a field of `fsize`
+    bits. Shared by genRandomStruct() and genFieldRandomStruct() so
+    the struct-API and field-API tests draw byte-for-byte identical
+    values from the same seed/test_pass.
+
+    Replaces a plain PRNG draw because that can't *guarantee* the
+    coverage a hand-verification test needs:
+      - Forcing the field's LSB to `test_pass` (0 or 1, set by the
+        two-pass driver loop in run_wr_rd_test()/run_wr_rd_field_test())
+        and its MSB to (1-test_pass) guarantees that, across the two
+        passes, every field's MSB and LSB each take both 0 and 1.
+      - For fsize>=2, forcing MSB!=LSB within a single value also
+        rules out the degenerate all-0/all-1 pattern -- regardless of
+        what the non-boundary bits happen to be.
+      - Non-boundary bytes are an arithmetic ladder (base + 17*j mod
+        256, `base` a single next_random() draw) rather than
+        independent per-byte draws: step 17 is coprime to 256, so
+        every byte of one field instance is pairwise distinct from
+        every other, which guarantees a byte-order-swap bug changes
+        the value (a uniform or accidentally-repeating byte pattern
+        would not detect that).
+
+    `member_expr` is a scalar lvalue when is_bytearray_storage is
+    False (assigned once, as `field_uint`), or indexed as
+    `member_expr[j]` (uint8_t) when True.
+    """
+    nr_bytes = (fsize + 7) // 8
+    top_bits = fsize - (nr_bytes - 1) * 8   # bits of the field held in the top byte
+    top_mask = (1 << top_bits) - 1
+    msb_bit = fsize - 1                     # field MSB, scalar (whole-value) bit position
+    msb_bit_in_top_byte = top_bits - 1      # field MSB's bit position within the top byte
+    lsb_equals_msb = (fsize == 1)           # 1-bit fields: only one bit to force
+
+    def ladder_byte(j):
+        expr = f"((uint8_t)(base + {17*j}))"
+        if j == nr_bytes - 1 and top_bits != 8:
+            expr = f"({expr} & 0x{top_mask:x})"
+        return expr
+
+    c = "    base = (uint8_t)next_random();\n"
+
+    if is_bytearray_storage:
+        for j in range(nr_bytes):
+            c += f"    {member_expr}[{j}] = (uint8_t)({ladder_byte(j)});\n"
+        c += (f"    {member_expr}[0] = ({member_expr}[0] & (uint8_t)~0x1) | "
+              f"(uint8_t)(test_pass & 0x1);\n")
+        if not lsb_equals_msb:
+            c += (f"    {member_expr}[{nr_bytes-1}] = ({member_expr}[{nr_bytes-1}] & "
+                  f"(uint8_t)~((uint8_t)0x1<<{msb_bit_in_top_byte})) | "
+                  f"((uint8_t)(1-(test_pass & 1))<<{msb_bit_in_top_byte});\n")
+    else:
+        c += "    tv = 0;\n"
+        for j in range(nr_bytes):
+            c += f"    tv |= ((uint64_t)({ladder_byte(j)})) << {8*j};\n"
+        c += "    tv = (tv & ~(uint64_t)0x1) | (test_pass & 0x1);\n"
+        if not lsb_equals_msb:
+            c += (f"    tv = (tv & ~((uint64_t)0x1<<{msb_bit})) | "
+                  f"((uint64_t)(1-(test_pass & 1))<<{msb_bit});\n")
+        c += f"    {member_expr} = ({field_uint})tv;\n"
+
+    return c
+
 # ------------------------------------------------------------ genRandomStruct
 def genRandomStruct(reg, backend, definedUintSize, random_seed):
     """Global expected-value storage (one t_<reg> struct per
     [slot][port][set][slice] combination) plus a set_random_<reg>()
     that fills it -- the struct-API twin of genFieldRandomStruct().
     It must stay draw-for-draw identical to genFieldRandomStruct()
-    (same PRNG, same per-register seed, same draw order and masking
-    per field, same first/last-entry slot storage) so wr_rd_test and
-    wr_rd_field_test write identical values to identical addresses and
-    the resulting device memories can be compared word for word.
+    (same PRNG, same per-register seed, same draw order, same
+    genTestValueAssignment() call per field, same first/last-entry
+    slot storage) so wr_rd_test and wr_rd_field_test write identical
+    values to identical addresses and the resulting device memories
+    can be compared word for word.
     """
     fields    = gRegs[reg]['Fields']
     is_single = gRegs[reg]['Single']
@@ -2446,51 +2512,21 @@ def genRandomStruct(reg, backend, definedUintSize, random_seed):
     c_global = f"t_{reg} {reg}_data[{storage_entries}][{nr_ports}][{nr_sets}][{nr_slice}];\n"
 
     set_random_body = ""
-    has_bytearray_field = False
-    has_wide_field = False
 
     for field in fields:
         fname = convertToLegal(field['Name'])
         fsize = calcSize(field['Start bit'], field['End bit'])
         member = f"{reg}_data[slot][portId][setId][sliceId].{fname}"
-
-        if fsize > 64:
-            # Byte array in both APIs: one next_random() draw per byte,
-            # then mask the top byte -- exactly like genFieldRandomStruct.
-            has_bytearray_field = True
-            nr_bytes = (fsize + 7) // 8
-            set_random_body += f"    for (bi = 0; bi < {nr_bytes}; bi++)\n"
-            set_random_body += f"      {member}[bi] = (uint8_t)next_random();\n"
-            if fsize % 8 != 0:
-                top_mask = (1 << (fsize % 8)) - 1
-                set_random_body += f"    {member}[{nr_bytes-1}] &= 0x{top_mask:x};\n"
-        elif fsize > 32:
-            # One next_random64() draw, like the field test. The struct
-            # may store the field as a byte array (when it is wider than
-            # the API word) -- split the same value LSB first then.
-            has_wide_field = True
-            if fsize == 64:
-                mask = "0xFFFFFFFFFFFFFFFFULL"
-            else:
-                mask = f"0x{(1 << fsize) - 1:X}ULL"
-            set_random_body += f"    random_value = next_random64() & {mask};\n"
-            if fsize > definedUintSize:
-                nr_bytes = (fsize + 7) // 8
-                for j in range(nr_bytes):
-                    set_random_body += f"    {member}[{j}] = (uint8_t)(random_value >> {8*j});\n"
-            else:
-                set_random_body += f"    {member} = random_value;\n"
-        else:
-            mask = f"0x{(1 << fsize) - 1:X}"
-            set_random_body += f"    {member} = next_random() & {mask};\n"
-
-    bi_decl = "  int bi;\n" if has_bytearray_field else ""
-    rv_decl = "  uint64_t random_value;\n" if has_wide_field else ""
+        is_bytearray = (fsize > 64) or (fsize > definedUintSize)
+        field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
+        set_random_body += genTestValueAssignment(member, fsize, is_bytearray, field_uint)
 
     func = dedent(f"""
     void set_random_{reg}(void) {{
-      rng_state = {random_seed};
-    {bi_decl}{rv_decl}  int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
+      rng_state = {random_seed} + (uint32_t)test_pass * 999983u;
+      uint8_t base;
+      uint64_t tv;
+      int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
       int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
       int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
       printf("Creating random values for: {reg}\\n");
@@ -2549,7 +2585,11 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
   dev_ptr_{dwidth} = (uint{dwidth}_t*)(device_ptr);
   dev_ptr_{dwidth}[address] = data;
 
-  // This is a write check.
+  // This is a write check. Reset once per test_pass (see
+  // run_wr_rd_test()) -- each address is legitimately written once
+  // per pass (two passes total, one per test-value variant), so this
+  // only flags a *second* write within the same pass, which still
+  // means something else's address computation collided with this one.
   if( dev_ptr_written[address] ==1) {{
     printf("Address %li is aready written!\\n",address);
     printf("ERROR - Terminating\\n");
@@ -2610,9 +2650,19 @@ void writeToDevice(uint64_t *device_ptr,uint64_t address,uint{dwidth}_t data,int
     # The field test read-modify-writes against zeroed device memory;
     # zero the malloc'ed area so untouched words/bits match it too.
     c_main += "  memset(device_ptr, 0, (size_t)8*size_of_mem_area);\n\n"
+    c_main += "  // Two passes over every register: test_pass=0 then test_pass=1,\n"
+    c_main += "  // each a full write-all/read-all cycle (see genTestValueAssignment()\n"
+    c_main += "  // for why -- every field's MSB/LSB must see both 0 and 1, which a\n"
+    c_main += "  // single-entry register can only get across two passes, not two\n"
+    c_main += "  // indices). dev_ptr_written resets each pass since re-writing the\n"
+    c_main += "  // same address across passes is expected; within one pass it still\n"
+    c_main += "  // catches a genuine address collision.\n"
+    c_main += "  for (test_pass = 0; test_pass < 2; test_pass++) {\n"
+    c_main += "    memset(dev_ptr_written, 0, sizeof(dev_ptr_written));\n"
     c_main += calls_random + "\n"
     c_main += calls_write + "\n"
     c_main += calls_read + "\n"
+    c_main += "  }\n"
     c_main += "  // Write checksum: Fletcher over the whole device memory. Reads do\n"
     c_main += "  // not modify memory, so this still reflects the write phase.\n"
     c_main += "  print_checksum(device_ptr);\n"
@@ -3117,7 +3167,8 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
     genEdgeIndexLoop) plus a set_random_<reg>() function that fills
     them -- the field-API equivalent of genRandomStruct(), since
     there's no single struct to hold values in, just per-field
-    arrays.
+    arrays. Must stay draw-for-draw identical to genRandomStruct()
+    (see genTestValueAssignment()).
     """
     fields    = gRegs[reg]['Fields']
     is_single = gRegs[reg]['Single']
@@ -3162,7 +3213,6 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
 
     c_global = ""
     set_random_body = ""
-    has_bytearray_field = False
 
     for field in fields:
         fname = convertToLegal(field['Name'])
@@ -3170,31 +3220,21 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
         is_bytearray = fsize > 64
         field_uint = "uint64_t" if fsize > definedUintSize else f"uint{definedUintSize}_t"
         idx = "[slot][portId][setId][sliceId]"
+        member = f"{reg}_exp_{fname}{idx}"
 
         if is_bytearray:
-            has_bytearray_field = True
             nr_bytes = (fsize + 7) // 8
             c_global += f"uint8_t {reg}_exp_{fname}[{storage_entries}][{nr_ports}][{nr_sets}][{nr_slice}][{nr_bytes}];\n"
-            set_random_body += f"    for (bi = 0; bi < {nr_bytes}; bi++)\n"
-            set_random_body += f"      {reg}_exp_{fname}{idx}[bi] = (uint8_t)next_random();\n"
-            if fsize % 8 != 0:
-                top_mask = (1 << (fsize % 8)) - 1
-                set_random_body += f"    {reg}_exp_{fname}{idx}[{nr_bytes-1}] &= 0x{top_mask:x};\n"
         else:
-            if fsize == 64:
-                mask = "0xFFFFFFFFFFFFFFFFULL"
-            else:
-                mask = f"0x{(1 << fsize) - 1:X}ULL"
-            randexpr = "next_random64()" if fsize > 32 else "next_random()"
             c_global += f"{field_uint} {reg}_exp_{fname}[{storage_entries}][{nr_ports}][{nr_sets}][{nr_slice}];\n"
-            set_random_body += f"    {reg}_exp_{fname}{idx} = ({field_uint})({randexpr} & {mask});\n"
-
-    bi_decl = "  int bi;\n" if has_bytearray_field else ""
+        set_random_body += genTestValueAssignment(member, fsize, is_bytearray, field_uint)
 
     func = dedent(f"""
     void set_random_{reg}(void) {{
-      rng_state = {random_seed};
-    {bi_decl}  int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
+      rng_state = {random_seed} + (uint32_t)test_pass * 999983u;
+      uint8_t base;
+      uint64_t tv;
+      int port_min[] = {{ {','.join(str(x) for x in port_min)} }};
       int port_max[] = {{ {','.join(str(x) for x in port_max)} }};
       int entries[] = {{ {','.join(str(x) for x in nr_entries)} }};
       printf("Creating random field values for: {reg}\\n");
@@ -3211,10 +3251,23 @@ def genFieldRandomStruct(reg, backend, definedUintSize, random_seed):
 
 # ------------------------------------------------------------ genFieldTestPRNG
 def genFieldTestPRNG():
-    """Tiny xorshift32 PRNG so we don't need stdlib's rand()/srand()."""
+    """Tiny xorshift32 PRNG so we don't need stdlib's rand()/srand().
+    Only used to draw an 8-bit `base` per field in
+    genTestValueAssignment() -- the actual test-value bit pattern is
+    deterministic, not the PRNG output itself (see that function).
+
+    test_pass selects which of the two deterministic value variants
+    genTestValueAssignment() produces; the driver loop in
+    run_wr_rd_test()/run_wr_rd_field_test() runs the whole
+    random/write/read sequence once per value of test_pass (0 then 1)
+    so every field gets both variants, including fields in
+    single-entry (non-table) registers that genEdgeIndexLoop only
+    ever visits at one index.
+    """
     return dedent("""\
     // Minimal xorshift32 PRNG -- avoids depending on stdlib rand()/srand().
     static uint32_t rng_state = 0x9e3779b9u;
+    int test_pass = 0;
 
     static uint32_t next_random(void) {
       uint32_t x = rng_state;
@@ -3223,12 +3276,6 @@ def genFieldTestPRNG():
       x ^= x << 5;
       rng_state = x;
       return x;
-    }
-
-    static uint64_t next_random64(void) {
-      uint64_t hi = next_random();
-      uint64_t lo = next_random();
-      return (hi << 32) | lo;
     }
 
     """)
@@ -3968,9 +4015,13 @@ def genFieldReadWriteTest(gRegs, backend, definedUintSize):
 
     c += dedent(f"""
     int run_wr_rd_field_test(void) {{
+      // Two passes (test_pass=0 then 1), same reasoning as
+      // run_wr_rd_test() -- see genTestValueAssignment().
+      for (test_pass = 0; test_pass < 2; test_pass++) {{
     {calls_random}
     {calls_write}
     {calls_read}
+      }}
       // Write checksum: Fletcher over the whole device memory. Reads do
       // not modify memory, so this still reflects the write phase.
       print_checksum();
