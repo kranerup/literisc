@@ -1126,12 +1126,12 @@ def cpu_sys(
                 slave_state.next = SLAVE_WAIT
                 if slave_pending_we == 1:
                 #if slave_pending_we == 1 and req_reading == 0:
-                    if conf.slave_request_address == mm.INTERRUPT_ADDRESS:
+                    if slave_pending_address == mm.INTERRUPT_ADDRESS:
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = slave_pending_data
-                    elif conf.slave_request_address == mm.CPU_RESET_ADDRESS:
+                    elif slave_pending_address == mm.CPU_RESET_ADDRESS:
                         n_cpu_rstn.next = 0
-                    elif conf.slave_request_address <= mm.IMEM_HIGH:
+                    elif slave_pending_address <= mm.IMEM_HIGH:
                         conf_slave_imem_wadr.next    = slave_pending_address
                         conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
