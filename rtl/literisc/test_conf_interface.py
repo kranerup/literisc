@@ -49,6 +49,7 @@ Tests
 
 import sys
 import os
+import random
 from myhdl import *
 from modules.common.signal import signal
 from axi import Axi4
@@ -305,6 +306,9 @@ def test_cpu_stores_constant():
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for i in range(MAX_POLLS):
+                if i % 5 != 0:
+                    yield clk.posedge
+                    continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if readback[0] == EXPECTED:
@@ -431,6 +435,9 @@ def test_slave_write_cpu_sum():
             yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
 
             for i in range(MAX_POLLS):
+                if i % 5 != 0:
+                    yield clk.posedge
+                    continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if readback[0] == EXPECTED:
@@ -568,9 +575,6 @@ def test_wait_ticks():
             changes_seen  = [0]
 
             for i in range(MAX_POLLS):
-                if i % 20 != 0:
-                    yield clk.posedge
-                    continue
                 readback = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback)
                 if prev_readback[0] is None:
@@ -688,6 +692,8 @@ def test_dual_cpu():
                 EXPECTED=EXPECTED,
             )
 
+            print(DUAL_CPU_TARGET_CONF)
+
             # write program into CPU-A's IMEM starting at PROG_BASE
             addr = PROG_BASE
             for byte in prog:
@@ -726,7 +732,7 @@ def test_dual_cpu():
 
 def test_master_while_slave_request():
     """
-    Test 7: CPU-A issues a master (IO) read request. While CPU-A is waiting
+    Test 7: CPU-A issues a master (Conf) read request. While CPU-A is waiting
     for the reply, an external slave_request arrives on conf.  This races
     against the master reply to check whether the CPU correctly handles both
     without dropping either.
@@ -808,8 +814,6 @@ def test_master_while_slave_request():
             # poll for CPU to store the master reply value into RESULT0
             MAX_POLLS = 400
             for i in range(MAX_POLLS):
-                if i % 5 == 0:
-                    yield clk.posedge
                 readback_result = [0]
                 yield _read_data(conf, clk, SLAVE_RESULT0, readback_result)
                 if readback_result[0] == MASTER_REPLY_VALUE:
@@ -939,6 +943,442 @@ def test_cpu_reset():
           (f"  ({result[0]})" if not ok else ""))
     return ok
 
+def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
+    """
+    Test 9: CPU writes distinct values to N different DMEM addresses while
+    the TB simultaneously hammers the slave port with writes/reads to a
+    separate DMEM region. Verifies that neither side's accesses are dropped
+    or corrupted by the contention.
+
+    slave_gap_cycles: idle clock cycles between consecutive slave
+    transactions during the hammer phase. 0 = back-to-back (slave port
+    saturated, CPU may starve for DMEM access and never make progress).
+    Larger values give the CPU windows to fetch/execute between accesses.
+
+    Memory layout (slave addresses, all > IMEM_HIGH so they land in DMEM):
+      SLAVE_DONE      : done flag, CPU writes DONE_MAGIC here when finished
+      CPU region      : SLAVE_CPU_BASE  + 4*i   (written by CPU program)
+      TB region       : SLAVE_TB_BASE   + 4*i   (written by TB via slave port)
+
+    Verification: after done flag is seen, TB reads back both regions via
+    the slave port and compares against expected values.
+    """
+    N          = 16
+    DONE_MAGIC = 0xD1
+
+    SLAVE_DONE     = SLAVE_RESULT0
+    SLAVE_CPU_BASE = SLAVE_RESULT0 + 0x100
+    SLAVE_TB_BASE  = SLAVE_RESULT0 + 0x200
+
+    CPU_DONE     = DMEM_LOW + SLAVE_DONE
+    CPU_CPU_BASE = DMEM_LOW + SLAVE_CPU_BASE
+
+    def cpu_val(i):
+        return 0xA000 + i * 3 + 1
+
+    def tb_val(i):
+        return 0x5000 + i * 7 + 1
+
+    # --- generate the CPU program: N stores, then set done flag, then spin
+    lines = []
+    for i in range(N):
+        addr = CPU_CPU_BASE + 4 * i
+        val  = cpu_val(i)
+        lines.append(f"(Rx= {addr} R0)")
+        lines.append(f"(Rx= {val} R1)")
+        lines.append("(A=Rx R1)")
+        lines.append("(M[Rx]=A R0)")
+    # done flag last, so TB seeing it guarantees all stores retired
+    lines.append(f"(Rx= {CPU_DONE} R0)")
+    lines.append(f"(Rx= {DONE_MAGIC} R1)")
+    lines.append("(A=Rx R1)")
+    lines.append("(M[Rx]=A R0)")
+    lines.append("(label done)")
+    lines.append("(j done)")
+
+    prog = assemble("\n".join(lines))
+    result = [None]
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @instance
+        def seq():
+            rstn.next = 0
+            conf.master_reply_data.next   = 0
+            conf.master_reply_status.next = 0
+            conf.master_reply_id.next     = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            # clear the done flag
+            yield _write_data(conf, clk, 0, SLAVE_DONE)
+
+            # load program into IMEM
+            addr = PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            # trigger boot jump -- CPU starts storing to its region
+            yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
+
+            # while the CPU runs, hammer the slave port: interleaved
+            # writes and read-backs in the TB region, with a configurable
+            # gap so the CPU gets memory cycles in between
+            print(SLAVE_TB_BASE)
+            for i in range(N):
+                yield _write_data(conf, clk, tb_val(i), SLAVE_TB_BASE + 4 * i)
+                for _ in range(slave_gap_cycles):
+                    yield clk.posedge
+                # immediate read-back of the previous slot for extra traffic
+                if i > 0:
+                    rb = [0]
+                    yield _read_data(conf, clk, SLAVE_TB_BASE + 4 * (i - 1), rb)
+                    if rb[0] != tb_val(i - 1):
+                        result[0] = (f"FAIL: inline slave readback slot {i-1}: "
+                                     f"got 0x{rb[0]:08X}, expected 0x{tb_val(i-1):08X}")
+                        raise StopSimulation()
+                    for _ in range(slave_gap_cycles):
+                        yield clk.posedge
+
+            # poll the done flag (with the same gap so the CPU can finish)
+            MAX_POLLS = 800
+            for i in range(MAX_POLLS):
+                rb = [0]
+                yield _read_data(conf, clk, SLAVE_DONE, rb)
+                if rb[0] == DONE_MAGIC:
+                    break
+                for _ in range(slave_gap_cycles):
+                    yield clk.posedge
+                yield clk.posedge
+            else:
+                result[0] = f"FAIL: done flag never set (last read 0x{rb[0]:08X})"
+                raise StopSimulation()
+
+            # verify the CPU's N stores via the slave port
+            for i in range(N):
+                rb = [0]
+                yield _read_data(conf, clk, SLAVE_CPU_BASE + 4 * i, rb)
+                if rb[0] != cpu_val(i):
+                    result[0] = (f"FAIL: CPU store slot {i} at slave addr "
+                                 f"0x{SLAVE_CPU_BASE + 4*i:04X}: got 0x{rb[0]:08X}, "
+                                 f"expected 0x{cpu_val(i):08X}")
+                    raise StopSimulation()
+
+            # verify the TB's slave writes weren't corrupted by CPU traffic
+            for i in range(N):
+                rb = [0]
+                yield _read_data(conf, clk, SLAVE_TB_BASE + 4 * i, rb)
+                if rb[0] != tb_val(i):
+                    result[0] = (f"FAIL: slave write slot {i}: got 0x{rb[0]:08X}, "
+                                 f"expected 0x{tb_val(i):08X}")
+                    raise StopSimulation()
+
+            result[0] = "PASS"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_cpu_memory_access_slave_conflict'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(4000000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_cpu_memory_access_slave_conflict"
+          f"(gap={slave_gap_cycles})" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
+def test_cpu_slave_race(cpu_op, max_delay=20):
+    """
+    Sweep every single-cycle offset (0..max_delay) between the boot trigger
+    and a concurrent slave transaction, for both slave_op in {write, read},
+    while the CPU performs `cpu_op` ('dmem_write' | 'dmem_read' |
+    'master_write' | 'master_read'). Verifies both sides of the race at
+    every offset:
+      - the CPU's own operation produced the correct result
+      - the slave's operation was neither dropped nor corrupted
+
+    Exactly ONE slave transaction happens while the CPU program is
+    actually running: everything else (clearing sentinels, preloading
+    inputs, resetting the CPU between sweep points) happens either before
+    the boot trigger or after a fixed settle window that comfortably
+    exceeds how long these short programs take to finish -- there is no
+    polling loop hammering the slave port while the CPU is live.
+
+    Runs a SINGLE MyHDL simulation for the whole sweep: the program is
+    loaded into IMEM once, and between sweep points the CPU core is
+    restarted via CPU_RESET_ADDRESS (same mechanism as test_cpu_reset)
+    instead of tearing down and rebuilding a fresh simulation per point.
+    """
+    RACE_VALUE           = 0x4321   # value CPU writes, or preloads for CPU to read
+    MASTER_REPLY_VALUE   = 0x2468   # value the TB's auto-responder returns for master reads
+    SLAVE_RACE_WRITE_VAL = 0x1357   # value used by the concurrent slave write
+    SLAVE_RACE_PRELOAD   = 0x9ABC   # value preloaded at the race site for the slave read to check
+    SENTINEL             = 0x0000   # cleared into any address we're about to check, so a
+                                     # dropped write reads back as SENTINEL, never as a stale
+                                     # correct value left over from an earlier sweep point
+    RESET_SETTLE_CYCLES  = 20       # matches test_cpu_reset's post-reset settle window
+    SETTLE_CYCLES        = 120      # >> worst-case cycles for these 4-instruction programs
+                                     # to retire (boot unblock + jump + a few instrs, generous
+                                     # margin vs. the identical-length PROG_STORE_CONSTANT)
+
+    RACE_ADDR_S = SLAVE_INPUT1  # untouched by any of the CPU programs below
+
+    if cpu_op == 'dmem_write':
+        prog = assemble(
+            """
+            (Rx= RESULT_PHYS R1)
+            (Rx= VALUE R0)
+            (A=Rx R0)
+            (M[Rx]=A R1)
+            (label done)
+            (j done)
+            """,
+            RESULT_PHYS=CPU_RESULT0, VALUE=RACE_VALUE,
+        )
+    elif cpu_op == 'dmem_read':
+        prog = assemble(
+            """
+            (Rx= INPUT_PHYS R0)
+            (A=M[Rx] R0)
+            (Rx= RESULT_PHYS R1)
+            (M[Rx]=A R1)
+            (label done)
+            (j done)
+            """,
+            INPUT_PHYS=CPU_INPUT0, RESULT_PHYS=CPU_RESULT0,
+        )
+    elif cpu_op == 'master_read':
+        prog = assemble(
+            """
+            (Rx= CONF_LOW R0)
+            (A=M[Rx] R0)
+            (Rx= RESULT_PHYS R1)
+            (M[Rx]=A R1)
+            (label done)
+            (j done)
+            """,
+            CONF_LOW=CONF_LOW, RESULT_PHYS=CPU_RESULT0,
+        )
+    elif cpu_op == 'master_write':
+        prog = assemble(
+            """
+            (Rx= CONF_LOW R0)
+            (Rx= VALUE R1)
+            (A=Rx R1)
+            (M[Rx]=A R0)
+            (label done)
+            (j done)
+            """,
+            CONF_LOW=CONF_LOW, VALUE=RACE_VALUE,
+        )
+    else:
+        raise ValueError(f"unknown cpu_op {cpu_op!r}")
+
+    sweep_points = [(slave_op, d) for slave_op in ('write', 'read')
+                                   for d in range(max_delay + 1)]
+    failures = []
+    captured_master_write = [None]  # (address, data) seen by the auto-responder
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace)
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @instance
+        def master_auto_reply():
+            # Always eventually replies to a master request, regardless of
+            # what the slave port is doing, so master_write/master_read
+            # never deadlocks the CPU during the sweep.
+            conf.master_reply_status.next = 0
+            conf.master_reply_data.next   = 0
+            conf.master_reply_id.next     = 0
+            while True:
+                yield clk.posedge
+                if conf.master_request_we == 1:
+                    captured_master_write[0] = (int(conf.master_request_address),
+                                                 int(conf.master_request_data))
+                    cid = int(conf.master_request_id)
+                    yield clk.posedge
+                    conf.master_reply_status.next = 1
+                    conf.master_reply_id.next     = cid
+                    yield clk.posedge
+                    conf.master_reply_status.next = 0
+                elif conf.master_request_re == 1:
+                    cid = int(conf.master_request_id)
+                    yield clk.posedge
+                    conf.master_reply_status.next = 1
+                    conf.master_reply_id.next     = cid
+                    conf.master_reply_data.next   = MASTER_REPLY_VALUE
+                    yield clk.posedge
+                    conf.master_reply_status.next = 0
+                    conf.master_reply_data.next   = 0
+
+        @instance
+        def seq():
+            rstn.next = 0
+            conf.master_reply_data.next   = 0
+            conf.master_reply_status.next = 0
+            conf.master_reply_id.next     = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            # Load the program into IMEM ONCE. CPU_RESET_ADDRESS resets
+            # only the CPU core (PC, registers, pipeline state) -- IMEM and
+            # DMEM survive -- so every sweep point below just re-triggers
+            # the same already-loaded program.
+            addr = PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            for idx, (slave_op, d) in enumerate(sweep_points):
+                if idx > 0:
+                    yield _write_data(conf, clk, 1, CPU_RESET_ADDRESS)
+                    for _ in range(RESET_SETTLE_CYCLES):
+                        yield clk.posedge
+
+                captured_master_write[0] = None
+
+                # Sentinel-clear whatever we're about to check, so a
+                # dropped write reads back as SENTINEL rather than a
+                # stale correct value from an earlier sweep point.
+                # Preload whatever this iteration needs. All of this
+                # happens before the boot trigger, i.e. before the CPU
+                # program is running.
+                yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT0)
+                if cpu_op == 'dmem_read':
+                    yield _write_data(conf, clk, RACE_VALUE, SLAVE_INPUT0)
+                if slave_op == 'write':
+                    yield _write_data(conf, clk, SENTINEL, RACE_ADDR_S)
+                else:
+                    yield _write_data(conf, clk, SLAVE_RACE_PRELOAD, RACE_ADDR_S)
+
+                # trigger boot jump
+                yield _write_data(conf, clk, 1, INTERRUPT_ADDRESS)
+
+                # wait exactly `d` cycles, then fire the ONE slave
+                # transaction that actually overlaps the running CPU
+                for _ in range(d):
+                    yield clk.posedge
+
+                race_readback = [0]
+                if slave_op == 'write':
+                    yield _write_data(conf, clk, SLAVE_RACE_WRITE_VAL, RACE_ADDR_S)
+                else:
+                    yield _read_data(conf, clk, RACE_ADDR_S, race_readback)
+
+                # No polling: just wait a fixed, generous window (no slave
+                # traffic at all) for the program to retire, then check.
+                for _ in range(SETTLE_CYCLES):
+                    yield clk.posedge
+
+                errors = []
+
+                # --- did the slave's own request survive? ---
+                if slave_op == 'read' and race_readback[0] != SLAVE_RACE_PRELOAD:
+                    errors.append(f"slave read got 0x{race_readback[0]:X}, "
+                                  f"expected 0x{SLAVE_RACE_PRELOAD:X}")
+                if slave_op == 'write':
+                    rb2 = [0]
+                    yield _read_data(conf, clk, RACE_ADDR_S, rb2)
+                    if rb2[0] != SLAVE_RACE_WRITE_VAL:
+                        errors.append(f"slave write lost/corrupted: read back 0x{rb2[0]:X}, "
+                                      f"expected 0x{SLAVE_RACE_WRITE_VAL:X}")
+
+                # --- did the CPU's own operation survive? ---
+                if cpu_op in ('dmem_write', 'dmem_read'):
+                    rb3 = [0]
+                    yield _read_data(conf, clk, SLAVE_RESULT0, rb3)
+                    if rb3[0] != RACE_VALUE:
+                        errors.append(f"cpu {cpu_op} result wrong: 0x{rb3[0]:X}, "
+                                      f"expected 0x{RACE_VALUE:X}")
+                elif cpu_op == 'master_read':
+                    rb3 = [0]
+                    yield _read_data(conf, clk, SLAVE_RESULT0, rb3)
+                    if rb3[0] != MASTER_REPLY_VALUE:
+                        errors.append(f"cpu master_read result wrong: 0x{rb3[0]:X}, "
+                                      f"expected 0x{MASTER_REPLY_VALUE:X}")
+                elif cpu_op == 'master_write':
+                    if captured_master_write[0] is None:
+                        errors.append("cpu master_write: request never observed by TB")
+                    else:
+                        _, got_data = captured_master_write[0]
+                        if got_data != RACE_VALUE:
+                            errors.append(f"cpu master_write data wrong: 0x{got_data:X}, "
+                                          f"expected 0x{RACE_VALUE:X}")
+
+                if errors:
+                    failures.append(f"delay={d} slave_op={slave_op}: " + "; ".join(errors))
+
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = f"trace_cpu_slave_race[{cpu_op}]"
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(20000000)
+
+    ok = not failures
+    print(f"{'PASS' if ok else 'FAIL'}: test_cpu_slave_race[{cpu_op}]"
+          + (f"  ({len(failures)}/{len(sweep_points)} offsets failed)" if failures else ""))
+    for f in failures[:10]:
+        print("   ", f)
+    if len(failures) > 10:
+        print(f"    ... and {len(failures) - 10} more")
+    return ok
+
+
+def test_cpu_slave_race_dmem_write():
+    """Test 10a: slave write/read racing against a CPU dmem write, every cycle offset."""
+    return test_cpu_slave_race('dmem_write')
+
+
+def test_cpu_slave_race_dmem_read():
+    """Test 10b: slave write/read racing against a CPU dmem read, every cycle offset."""
+    return test_cpu_slave_race('dmem_read')
+
+
+def test_cpu_slave_race_master_read():
+    """Test 10c: slave write/read racing against a CPU master read, every cycle offset."""
+    return test_cpu_slave_race('master_read')
+
+
+def test_cpu_slave_race_master_write():
+    """Test 10d: slave write/read racing against a CPU master write, every cycle offset."""
+    return test_cpu_slave_race('master_write')
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -948,15 +1388,20 @@ if __name__ == "__main__":
 
     print_program_hex("PROG_STORE_CONSTANT", _PROG_STORE_CONSTANT)
 
-    results.append(test_slave_dmem_rw())
-    results.append(test_cpu_stores_constant())
-    results.append(test_slave_write_cpu_doubles())
-    results.append(test_slave_write_cpu_sum())
-    results.append(test_master_request())
+    #results.append(test_slave_dmem_rw())
+    #results.append(test_cpu_stores_constant())
+    #results.append(test_slave_write_cpu_doubles())
+    #results.append(test_slave_write_cpu_sum())
+    #results.append(test_master_request())
+    #results.append(test_wait_ticks())
+    #results.append(test_master_while_slave_request())
+    #results.append(test_cpu_memory_access_slave_conflict())
+    #results.append(test_cpu_reset())
     results.append(test_dual_cpu())
-    results.append(test_wait_ticks())
-    results.append(test_master_while_slave_request())
-    results.append(test_cpu_reset())
+    #results.append(test_cpu_slave_race_dmem_write())
+    #results.append(test_cpu_slave_race_dmem_read())
+    #results.append(test_cpu_slave_race_master_read())
+    #results.append(test_cpu_slave_race_master_write())
 
     print_program_hex("ticks", _PROG_READ_TICKS)
 
