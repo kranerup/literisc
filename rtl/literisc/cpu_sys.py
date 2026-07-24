@@ -160,11 +160,8 @@ def cpu_sys(
     dmem_muxed_dout = signal(CPU_DMEM_DATA_BITS)
     dmem_rd = signal()
     dmem_wr = signal()
-    prev_dmem_rd = signal()
     dmem_wr_sz = signal(2)
     sel_imem_src = signal()
-
-    idmem_rd = flop(dmem_rd, prev_dmem_rd, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     
     halt = signal()
     intr = signal()
@@ -251,6 +248,7 @@ def cpu_sys(
     req_rd = signal()
     req_wr = signal()
     req_done = signal()
+    prev_req_done = signal()
     req_addr = signal(PERIP_ADDR_BITS)
     req_wdata = signal(PERIP_DATA_BITS)
     req_rdata = signal(PERIP_DATA_BITS)
@@ -258,6 +256,7 @@ def cpu_sys(
     req_reading = signal()
     n_req_reading = signal()
     dmem_renable = signal()
+    prev_dmem_renable = signal()
     dmem_wenable = signal()
     imem_wenable = signal()
     n_imem_src = signal()
@@ -302,6 +301,9 @@ def cpu_sys(
     iis2  = flop( n_imem_src2,   imem_src2,    clk_en=None, clk=clk, sync_rstn=sync_rstn )
     iih   = flop( n_imem_hold_data,    imem_hold_data,    clk_en=None, clk=clk, sync_rstn=sync_rstn )
     idf   = flop( n_deferred_cpu_imem_radr, deferred_cpu_imem_radr, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+    idmem_renable = flop(dmem_renable, prev_dmem_renable, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    ireq_done = flop( req_done, prev_req_done, clk_en=None, clk=clk, sync_rstn=sync_rstn )
 
     # interrupt-address blocking mechanism
     intr_addr_valid    = signal()
@@ -1065,13 +1067,21 @@ def cpu_sys(
         #            m_state.next = M_WAIT_WREADY
 
     SLAVE_IDLE   = 0
-    SLAVE_READ1  = 1
-    SLAVE_READ2  = 2
-    SLAVE_WRITE  = 3
+    SLAVE_WAIT   = 1
+    SLAVE_READ1  = 2
+    SLAVE_READ2  = 3
+    SLAVE_WRITE  = 4
 
-    slave_state = signal(2)  # declare as Signal outside the process
-    slave_state_prev = signal(2)
+    slave_state = signal(3)  # declare as Signal outside the process
+    slave_state_prev = signal(3)
     isp = flop(slave_state, slave_state_prev, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+
+    slave_pending_we      = signal()
+    slave_pending_re      = signal()
+    slave_pending_address = signal(32)
+    slave_pending_data    = signal(CPU_DMEM_DATA_BITS)
+    slave_pending_id      = signal(8)  # whatever width slave_request_id is
+    slave_ongoing = signal()
 
     @always(clk.posedge)
     def conf_slave():
@@ -1089,37 +1099,61 @@ def cpu_sys(
 
         if sync_rstn == 0:
             slave_state.next = SLAVE_IDLE
+            slave_pending_we.next      = 0
+            slave_pending_re.next      = 0
+            slave_pending_address.next = 0
+            slave_pending_data.next    = 0
+            slave_pending_id.next      = 0
+            slave_ongoing.next = 0
         else:
             if slave_state == SLAVE_IDLE:
-                if conf.slave_request_we:
-                    print("address: ", conf.slave_request_address)
+                if conf.slave_request_we == 1 or conf.slave_request_re == 1:
+                    # latch everything now before it disappears
+                    slave_pending_we.next      = conf.slave_request_we
+                    slave_pending_re.next      = conf.slave_request_re
+                    slave_pending_address.next = conf.slave_request_address
+                    slave_pending_data.next    = conf.slave_request_data
+                    slave_pending_id.next      = conf.slave_request_id
+                    slave_ongoing.next = 1
+                    slave_state.next = SLAVE_WAIT
+                    #if req_done == 0 and prev_req_done == 0 and prev_dmem_rd == 0 and dmem_rd == 0:
+                    #    slave_state.next = SLAVE_WAIT
+
+                #if slave_ongoing == 1 and req_done == 0 and prev_req_done == 0 and prev_dmem_rd == 0 and dmem_rd == 0:
+                #    slave_state.next = SLAVE_WAIT
+
+            if slave_state == SLAVE_WAIT:
+                slave_state.next = SLAVE_WAIT
+                if slave_pending_we == 1:
+                #if slave_pending_we == 1 and req_reading == 0:
                     if conf.slave_request_address == mm.INTERRUPT_ADDRESS:
                         intr_addr_valid.next = 1
-                        intr_addr_data.next  = conf.slave_request_data
+                        intr_addr_data.next  = slave_pending_data
                     elif conf.slave_request_address == mm.CPU_RESET_ADDRESS:
                         n_cpu_rstn.next = 0
                     elif conf.slave_request_address <= mm.IMEM_HIGH:
-                        conf_slave_imem_wadr.next    = conf.slave_request_address
-                        conf_slave_imem_din.next     = conf.slave_request_data
+                        conf_slave_imem_wadr.next    = slave_pending_address
+                        conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
                     else:
-                        conf_slave_dmem_wadr.next    = conf.slave_request_address
-                        conf_slave_dmem_din.next     = conf.slave_request_data
+                        conf_slave_dmem_wadr.next    = slave_pending_address
+                        conf_slave_dmem_din.next     = slave_pending_data
                         conf_slave_dmem_wenable.next = 1
                         conf_slave_dmem_wmask.next   = 0b1111
                     #conf.slave_reply_id.next     = conf.slave_request_id
                     slave_state.next             = SLAVE_WRITE
-
-                elif conf.slave_request_re:
-                    conf_slave_dmem_radr.next    = conf.slave_request_address
+                #elif slave_pending_re == 1 and req_reading == 0:
+                elif slave_pending_re == 1:
+                    conf_slave_dmem_radr.next    = slave_pending_address
                     conf_slave_dmem_renable.next = 1
                     slave_state.next             = SLAVE_READ1
 
             elif slave_state == SLAVE_WRITE:
                 conf.slave_reply_status.next = 1
-                conf.slave_reply_id.next     = conf.slave_request_id
+                conf.slave_reply_id.next     = slave_pending_id
                 slave_state.next             = SLAVE_IDLE
-                print("slave back to IDLE, cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
+                slave_ongoing.next = 0
+                #print("slave back to IDLE, cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
 
             elif slave_state == SLAVE_READ1:
                 slave_state.next       = SLAVE_READ2
@@ -1129,8 +1163,9 @@ def cpu_sys(
                 #print("dmem_out: ", dmem_dout)
                 #print("slave_reply_data:", conf.slave_reply_data.next)
                 conf.slave_reply_status.next = 1
-                conf.slave_reply_id.next     = conf.slave_request_id
+                conf.slave_reply_id.next     = slave_pending_id
                 slave_state.next             = SLAVE_IDLE
+                slave_ongoing.next = 0
 
     @always(clk.posedge)
     def conf_master():
@@ -1171,26 +1206,25 @@ def cpu_sys(
                 if conf.master_reply_status != 0:
                     req_got_reply.next = 1
                     req_rdata.next = conf.master_reply_data
-                    if slave_state == SLAVE_IDLE and conf.slave_request_we == 0 and conf.slave_request_re == 0:
+                    if slave_state == SLAVE_IDLE:
                         req_done.next = 1
                         m_state.next = M_IDLE
-                elif req_got_reply == 1 and slave_state == SLAVE_IDLE and conf.slave_request_we == 0 and conf.slave_request_re == 0:
+                elif req_got_reply == 1 and slave_state == SLAVE_IDLE:
                     req_done.next = 1
                     m_state.next = M_IDLE
             elif m_state == M_WAIT_WRITE:
                 if conf.master_reply_status != 0:
                     req_got_reply.next = 1
-                    if slave_state == SLAVE_IDLE and conf.slave_request_we == 0 and conf.slave_request_re == 0:
+                    if slave_state == SLAVE_IDLE:
                         req_done.next = 1
                         m_state.next = M_IDLE
-                elif req_got_reply == 1 and slave_state == SLAVE_IDLE and conf.slave_request_we == 0 and conf.slave_request_re == 0:
+                elif req_got_reply == 1 and slave_state == SLAVE_IDLE:
                     req_done.next = 1
                     m_state.next = M_IDLE
 
     @always_comb
     def wait_for_slave():
-        if (slave_state == SLAVE_IDLE and prev_dmem_rd == 0 and req_done == 0 and (conf.slave_request_re == 1 or conf.slave_request_we == 1)) or slave_state == SLAVE_READ1 or slave_state == SLAVE_WRITE:
-        #if slave_state != SLAVE_IDLE:
+        if slave_state != SLAVE_IDLE and dmem_renable == 0 and prev_dmem_renable == 0 and req_done == 0 and prev_req_done == 0:
             cpu_waiting_final.next = 1
         else:
             cpu_waiting_final.next = cpu_waiting
