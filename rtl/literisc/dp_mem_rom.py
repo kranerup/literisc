@@ -1,7 +1,27 @@
 from myhdl import *
 from modules.common.signal import signal
 
-def dp_mem(
+#def load_rom(data, i, o):
+#    o.driven = "wire"
+#    #print("hello")
+#    #__verilog__ = "assign %(o)s = %(i)s //here"
+#    #__verilog__ = \
+#    #'''
+#    #assign %(o)s = %(i)s //here
+#    #'''
+#    __verilog__ = \
+#    '''
+#initial begin
+#    $readmemh("boot.hex", imem_pmem_data); // here
+#end
+#    '''
+#
+#    @always_comb
+#    def hello():
+#        o.next = i
+#    return instances()
+
+def dp_mem_rom(
     idata,
     odata,
     raddr,
@@ -20,6 +40,10 @@ def dp_mem(
     nr_col = mask_bits
 
     data = [ signal(width) for _ in range( depth ) ]
+
+    #temp1 = Signal(modbv(0)[1:])
+    #temp2 = signal()
+    #load_rom_verilog = load_rom(data, temp1, temp2)
 
     @always(clk.posedge)
     def porta():
