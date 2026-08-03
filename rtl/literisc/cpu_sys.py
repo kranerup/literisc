@@ -17,6 +17,8 @@ from cpu_common import flop
 
 from asm import assemble
 
+from conf_map import ConfMap
+
 import re
 
 #TODO: Fix the problem of cpu making a master request and then being stopped by a slave_request, causing it to miss the reply. Fix by accepting slave_request when cpu is in an acceptable state.
@@ -129,6 +131,7 @@ def cpu_sys(
         axi,
         conf,
         instr_trace,
+        conf_map = ConfMap(0, 8191, 8192, 8192 + 32768 - 1, 8192 + 32768, 8192 + 32768 + 1),
         imem_depth = IMEM_DEPTH,
         dmem_depth = DMEM_DEPTH,
         boot_code_path = "./lcpu_boot_code.hex",
@@ -1126,16 +1129,16 @@ def cpu_sys(
                 slave_state.next = SLAVE_WAIT
                 if slave_pending_we == 1:
                 #if slave_pending_we == 1 and req_reading == 0:
-                    if slave_pending_address == mm.INTERRUPT_ADDRESS:
+                    if slave_pending_address == conf_map.interrupt:
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = slave_pending_data
-                    elif slave_pending_address == mm.CPU_RESET_ADDRESS:
+                    elif slave_pending_address == conf_map.cpu_reset:
                         n_cpu_rstn.next = 0
-                    elif slave_pending_address <= mm.IMEM_HIGH:
+                    elif slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
                         conf_slave_imem_wadr.next    = slave_pending_address
                         conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
-                    else:
+                    elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
                         conf_slave_dmem_wadr.next    = slave_pending_address
                         conf_slave_dmem_din.next     = slave_pending_data
                         conf_slave_dmem_wenable.next = 1
