@@ -44,7 +44,6 @@ class MemoryMap:
 def compute_memory_map(imem_depth=IMEM_DEPTH, dmem_depth=DMEM_DEPTH):
     return MemoryMap(imem_depth, dmem_depth)
 
-
 # Default map, used by every module-level name below so that
 # `from constants import *` keeps working unchanged for the default sizes.
 _default_map = compute_memory_map()
