@@ -1,14 +1,22 @@
 #!/usr/bin/env -S sbcl --script
 ;;; lrcc - liteRISC C Compiler
 ;;; Command-line compiler for C to liteRISC machine code
-
 (require :asdf)
+
+;; Load quicklisp if available (needed to resolve external dependencies)
 (let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
   (when (probe-file ql-setup) (load ql-setup)))
+;;
+;; Register the script's own directory so ASDF finds literisc.asd
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
   (pushnew script-directory asdf:*central-registry* :test #'equal))
+
+;; Prefer ql:quickload (fetches missing dependencies automatically);
+;; fall back to plain ASDF if quicklisp isn't installed.
 (handler-case
-    (asdf:load-system :literisc :verbose nil)
+    (if (find-package :quicklisp)
+        (uiop:symbol-call :ql :quickload :literisc :silent t)
+        (asdf:load-system :literisc :verbose nil))
   (error (e)
     (format *error-output* "Error loading compiler: ~a~%" e)
     (sb-ext:exit :code 1)))
@@ -100,6 +108,16 @@
                                                 #\.)))
                          (format out " ")))
             (format out "|~%")))))
+
+(defun write-vmem-file (bytes filename)
+  "Write bytes in Verilog $readmemh format: one hex byte per line,
+   with an @0 origin so sparse loading also works."
+  (let* ((vec (coerce bytes 'vector))
+         (len (length vec)))
+    (with-open-file (out filename :direction :output :if-exists :supersede)
+      (format out "@00000000~%")
+      (loop for i from 0 below len
+            do (format out "~2,'0x~%" (aref vec i))))))
 
 (defun write-binary-file (bytes filename)
   "Write raw bytes to a binary file"
@@ -325,9 +343,14 @@
                                                  :mem-size mem-size)))
              (if output-file
                  (progn
-                   (if (string-suffix-p output-file ".bin")
-                       (write-binary-file mcode output-file)
-                       (write-hex-file mcode output-file))
+                   (cond
+                     ((string-suffix-p output-file ".bin")
+                      (write-binary-file mcode output-file))
+                     ((or (string-suffix-p output-file ".mem")
+                          (string-suffix-p output-file ".vmem"))
+                      (write-vmem-file mcode output-file))
+                     (t
+                      (write-hex-file mcode output-file)))
                    (when verbose
                      (format t "Wrote ~a bytes to ~a~%" (length mcode) output-file)))
                  (lr-asm:hexdump mcode)))))))))
