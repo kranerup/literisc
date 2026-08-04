@@ -45,6 +45,19 @@ def hexdump_to_prog( dump ):
             prog += [ int(x,16) for x in hexdata.split(" ") ]
     return { idx: val for idx,val in enumerate( prog ) }
 
+def parse_readmemh(text):
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    text = re.sub(r'//.*', '', text)
+    prog = {}
+    addr = 0
+    for tok in text.split():
+        if tok.startswith('@'):
+            addr = int(tok[1:], 16)
+        else:
+            prog[addr] = int(tok, 16)
+            addr += 1
+    return prog
+
 def rom(
     odata,
     idata,
@@ -57,6 +70,7 @@ def rom(
     sync_rstn,
     depth,
     content,
+    disable_rom = False, # used for simulation
     input_flops = 0,
     output_flops = 0,
     name = None ):
@@ -134,7 +148,9 @@ def cpu_sys(
         conf_map = ConfMap(0, 8191, 8192, 8192 + 32768 - 1, 8192 + 32768, 8192 + 32768 + 1),
         imem_depth = IMEM_DEPTH,
         dmem_depth = DMEM_DEPTH,
-        boot_code_path = "./lcpu_boot_code.hex",
+        #boot_code_path = "./lcpu_boot_code.hex",
+        boot_code_path = None, # read rom from this path if it isn't None,
+        disable_rom = False,
         ):
 
     # Address-map regions derived from imem_depth/dmem_depth (not the fixed
@@ -948,6 +964,10 @@ def cpu_sys(
 #end
 #"""
 
+    if boot_code_path != None:
+        with open(boot_code_path) as f:
+            boot_code = prog_to_tuples(parse_readmemh(f.read()))
+
     imem = rom(
         odata        = imem_dout,
         idata        = imem_final_din,
@@ -962,6 +982,7 @@ def cpu_sys(
         input_flops  = 0,
         output_flops = 0,
         content      = boot_code,
+        disable_rom  = disable_rom,
         name         = 'imem')
 
 

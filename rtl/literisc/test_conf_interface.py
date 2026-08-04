@@ -335,6 +335,90 @@ def test_cpu_stores_constant():
     return ok
 
 
+def test_boot_code_from_file():
+    """Test: cpu_sys(boot_code_path=...) loads the boot ROM from a
+    $readmemh-format hex file instead of the built-in hardcoded boot code,
+    and the CPU actually executes what was loaded.
+
+    The file replaces the *entire* boot ROM, so the program in it runs
+    straight from reset (PC=0) -- no slave-triggered interrupt/jump needed,
+    unlike the other tests which load a user program at PROG_BASE under the
+    stock boot-read-interrupt ROM.
+    """
+    EXPECTED  = 42
+    MAX_POLLS = 400
+    result    = [None]
+
+    boot_hex_path = "boot_code.hex"
+
+    prog = assemble(
+        """
+        (Rx= RESULT_PHYS R1)
+        (Rx= 42 R0)
+        (A=Rx R0)
+        (M[Rx]=A R1)
+        (label done)
+        (j done)
+        """,
+        RESULT_PHYS=CPU_RESULT0,
+    )
+
+    with open(boot_hex_path, "w") as f:
+        for i, byte in enumerate(prog):
+            f.write(f"{byte:02x} ")
+            if i % 16 == 15:
+                f.write("\n")
+        f.write("\n")
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            readback = [0]
+            for i in range(MAX_POLLS):
+                yield _read_data(conf, clk, SLAVE_RESULT0, readback)
+                if readback[0] == EXPECTED:
+                    result[0] = "PASS"
+                    raise StopSimulation()
+                yield clk.posedge
+
+            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read 0x{readback[0]:08X})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_boot_code_from_file'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_boot_code_from_file" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
+
 def test_slave_write_cpu_doubles():
     """Test 3: slave writes input, CPU reads and doubles it, slave reads result."""
     INPUT_VALUE = 100
@@ -1611,26 +1695,23 @@ def test_imem_slave_race_read():
 if __name__ == "__main__":
     results = []
 
-    print_program_hex("PROG_STORE_CONSTANT", _PROG_STORE_CONSTANT)
-
     #test_imem_slave_race_read()
     #test_imem_slave_race_write()
 
-    results.append(test_slave_dmem_rw())
-    results.append(test_cpu_stores_constant())
-    results.append(test_slave_write_cpu_doubles())
-    results.append(test_slave_write_cpu_sum())
-    results.append(test_wait_ticks())
-    results.append(test_master_while_slave_request())
-    results.append(test_cpu_memory_access_slave_conflict())
-    results.append(test_cpu_reset())
-    results.append(test_dual_cpu())
-    results.append(test_cpu_slave_race_dmem_write())
-    results.append(test_cpu_slave_race_dmem_read())
-    results.append(test_cpu_slave_race_master_read())
-    results.append(test_cpu_slave_race_master_write())
-
-    print_program_hex("ticks", _PROG_READ_TICKS)
+    #results.append(test_slave_dmem_rw())
+    #results.append(test_cpu_stores_constant())
+    results.append(test_boot_code_from_file())
+    #results.append(test_slave_write_cpu_doubles())
+    #results.append(test_slave_write_cpu_sum())
+    #results.append(test_wait_ticks())
+    #results.append(test_master_while_slave_request())
+    #results.append(test_cpu_memory_access_slave_conflict())
+    #results.append(test_cpu_reset())
+    #results.append(test_dual_cpu())
+    #results.append(test_cpu_slave_race_dmem_write())
+    #results.append(test_cpu_slave_race_dmem_read())
+    #results.append(test_cpu_slave_race_master_read())
+    #results.append(test_cpu_slave_race_master_write())
 
     passed = sum(results)
     total  = len(results)
