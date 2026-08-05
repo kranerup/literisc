@@ -13,4 +13,5 @@ rstn = signal()
 obs_trace = Signal(modbv(0)[69:])
 
 toVerilog.standard = 'systemverilog'
-itop = toVerilog( cpu_sys, clk, rstn, axi, conf, obs_trace )
+itop = toVerilog( cpu_sys, clk, rstn, axi, conf, obs_trace, "boot_code.mem")
+#itop = toVerilog( cpu_sys, clk, rstn, axi, conf, obs_trace)

@@ -229,7 +229,7 @@ def test_slave_dmem_rw():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -284,7 +284,7 @@ def test_cpu_stores_constant():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -377,7 +377,7 @@ def test_boot_code_from_file():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map,
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
                         boot_code_path=boot_hex_path)
 
         @always(clk.posedge)
@@ -433,7 +433,7 @@ def test_slave_write_cpu_doubles():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -497,7 +497,7 @@ def test_slave_write_cpu_sum():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -561,7 +561,7 @@ def test_master_request():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -631,7 +631,7 @@ def test_wait_ticks():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         cycle_count = Signal(intbv(0)[32:])
 
@@ -720,10 +720,10 @@ def test_dual_cpu():
 
         instr_trace_a = Signal(modbv(0)[69:])
         conf_map_a = ConfMap()
-        icpu_a = cpu_sys(clk, rstn, axi_a, conf_a, instr_trace_a, conf_map_a)
+        icpu_a = cpu_sys(clk, rstn, axi_a, conf_a, instr_trace_a, conf_map=conf_map_a)
         instr_trace_b = Signal(modbv(0)[69:])
         conf_map_b = ConfMap()
-        icpu_b = cpu_sys(clk, rstn, axi_b, conf_b, instr_trace_b, conf_map_b)
+        icpu_b = cpu_sys(clk, rstn, axi_b, conf_b, instr_trace_b, conf_map=conf_map_b)
 
         # --- cross-connect A master -> B slave ----------------------------
         @always_comb
@@ -840,7 +840,7 @@ def test_master_while_slave_request():
 
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(delay(10))
         def clk_gen():
@@ -968,7 +968,7 @@ def test_cpu_reset():
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(clk.posedge)
         def inc_ticks():
@@ -1101,7 +1101,7 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(delay(10))
         def clk_gen():
@@ -1300,7 +1300,7 @@ def test_cpu_slave_race(cpu_op, max_delay=20):
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(delay(10))
         def clk_gen():
@@ -1578,7 +1578,7 @@ def test_imem_slave_race(cpu_op, max_delay=40):
         conf = Conf()
         instr_trace = Signal(modbv(0)[69:])
         conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map)
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
 
         @always(delay(10))
         def clk_gen():
@@ -1687,6 +1687,79 @@ def test_imem_slave_race_read():
     """Test 11b: slave imem write racing against a CPU imem read, every cycle offset."""
     return test_imem_slave_race('imem_read')
 
+def test_read_coreversion():
+    """
+    """
+    EXPECTED  = 42
+    MAX_POLLS = 400
+    result    = [None]
+
+    boot_hex_path = "boot_code.mem"
+
+    #prog = assemble(
+    #    """
+    #    (Rx= RESULT_PHYS R1)
+    #    (Rx= 42 R0)
+    #    (A=Rx R0)
+    #    (M[Rx]=A R1)
+    #    (label done)
+    #    (j done)
+    #    """,
+    #    RESULT_PHYS=CPU_RESULT0,
+    #)
+
+    #with open(boot_hex_path, "w") as f:
+    #    for i, byte in enumerate(prog):
+    #        f.write(f"{byte:02x} ")
+    #        if i % 16 == 15:
+    #            f.write("\n")
+    #    f.write("\n")
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            readback = [0]
+
+            for i in range(10000):
+                yield clk.posedge
+
+            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read 0x{readback[0]:08X})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_read_coreversion'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_read_coreversion" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1700,7 +1773,7 @@ if __name__ == "__main__":
 
     #results.append(test_slave_dmem_rw())
     #results.append(test_cpu_stores_constant())
-    results.append(test_boot_code_from_file())
+    #results.append(test_boot_code_from_file())
     #results.append(test_slave_write_cpu_doubles())
     #results.append(test_slave_write_cpu_sum())
     #results.append(test_wait_ticks())
@@ -1712,6 +1785,7 @@ if __name__ == "__main__":
     #results.append(test_cpu_slave_race_dmem_read())
     #results.append(test_cpu_slave_race_master_read())
     #results.append(test_cpu_slave_race_master_write())
+    results.append(test_read_coreversion())
 
     passed = sum(results)
     total  = len(results)

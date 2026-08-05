@@ -145,11 +145,11 @@ def cpu_sys(
         axi,
         conf,
         instr_trace,
+        boot_code_path = None, # read rom from this path if it isn't None,
         conf_map = ConfMap(0, 8191, 8192, 8192 + 32768 - 1, 8192 + 32768, 8192 + 32768 + 1),
         imem_depth = IMEM_DEPTH,
         dmem_depth = DMEM_DEPTH,
         #boot_code_path = "./lcpu_boot_code.hex",
-        boot_code_path = None, # read rom from this path if it isn't None,
         disable_rom = False,
         ):
 
@@ -955,6 +955,15 @@ def cpu_sys(
 #00000730: 00 1F 82 10 B2 01 10 0A 11 0B AF F9 48 80 00 1F  |............H...|
 #00000740: 82 00 B2 01 10 0A 11 0B AF F1 63 8A 00 1F 80 20  |..........c.... |
 #00000750: B0 0F F5 06 F7 FE 00 00 00 00 00 00 00 00 00 00  |................|""")
+
+#    program = hexdump_to_prog("""
+#00000000: 8F 8C 9A 40 AF 3A A0 7E F4 02 82 8C 9B 28 1A B2  |...@.:.~.....(..|
+#00000010: 32 12 0A F5 02 1E FE F6 F4 03 1F 80 74 B0 0F 1F  |2...........t...|
+#00000020: 5C 08 1A 02 1B 03 12 0A 8B 00 AF 5C 1A 02 F8 13  |\..........\....|
+#00000030: 02 1F 23 08 13 D2 0A 1F 80 0C B0 0F F5 03 F7 FE  |..#.............|
+#00000040: F6 F4 03 1F 80 74 B0 0F 1F 82 08 B2 02 8A 00 8B  |.....t..........|
+#00000050: 00 8C 8F FF FF FF 7F AF FF 3D 1A 03 12 63 1F 22  |.........=...c."|
+#00000060: 08 12 0A 1F 80 0C B0 0F F5 03 F7 FE 00 00 00 00  |................|""")
 
 
     boot_code = prog_to_tuples( program )
