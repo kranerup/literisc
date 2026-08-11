@@ -71,6 +71,7 @@ def rom(
     depth,
     content,
     disable_rom = False, # used for simulation
+    boot_code_path = None,
     input_flops = 0,
     output_flops = 0,
     name = None ):
@@ -89,20 +90,32 @@ def rom(
 
     adr_bits = (depth-1).bit_length()
 
-    @always_comb
-    def select():
-        n_sel_rom.next = 1
-        n_sel_ram.next = 0
-        rd_ram.next = 0
-        if raddr >= len(content):
+    if disable_rom:
+        @always_comb
+        def select():
             n_sel_rom.next = 0
             n_sel_ram.next = 1
             rd_ram.next = 1
             rom_addr.next = 0
-        else:
-            rom_addr.next = raddr
-        r_ram_addr.next = ( raddr - len(content) ) & (2**adr_bits - 1)
-        w_ram_addr.next = ( waddr - len(content) ) & (2**adr_bits - 1)
+
+            r_ram_addr.next = raddr & (2**adr_bits - 1)
+            w_ram_addr.next = waddr & (2**adr_bits - 1)
+
+    else:
+        @always_comb
+        def select():
+            n_sel_rom.next = 1
+            n_sel_ram.next = 0
+            rd_ram.next = 0
+            if raddr >= len(content):
+                n_sel_rom.next = 0
+                n_sel_ram.next = 1
+                rd_ram.next = 1
+                rom_addr.next = 0
+            else:
+                rom_addr.next = raddr
+            r_ram_addr.next = ( raddr - len(content) ) & (2**adr_bits - 1)
+            w_ram_addr.next = ( waddr - len(content) ) & (2**adr_bits - 1)
 
     @always_comb
     def read():
@@ -992,8 +1005,8 @@ def cpu_sys(
         output_flops = 0,
         content      = boot_code,
         disable_rom  = disable_rom,
+        boot_code_path = boot_code_path,
         name         = 'imem')
-
 
     # ---------------- AXI master ------------------------- single beat, non-pipelined master
 
@@ -1159,22 +1172,24 @@ def cpu_sys(
                 slave_state.next = SLAVE_WAIT
                 if slave_pending_we == 1:
                 #if slave_pending_we == 1 and req_reading == 0:
+                    slave_state.next             = SLAVE_WRITE
                     if slave_pending_address == conf_map.interrupt:
                         intr_addr_valid.next = 1
                         intr_addr_data.next  = slave_pending_data
                     elif slave_pending_address == conf_map.cpu_reset:
                         n_cpu_rstn.next = 0
                     elif slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
-                        conf_slave_imem_wadr.next    = slave_pending_address
+                        conf_slave_imem_wadr.next    = slave_pending_address - conf_map.imem_low
                         conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
                     elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
-                        conf_slave_dmem_wadr.next    = slave_pending_address
+                        conf_slave_dmem_wadr.next    = slave_pending_address - conf_map.dmem_low
                         conf_slave_dmem_din.next     = slave_pending_data
                         conf_slave_dmem_wenable.next = 1
                         conf_slave_dmem_wmask.next   = 0b1111
+                    else:
+                        slave_state.next = SLAVE_IDLE
                     #conf.slave_reply_id.next     = conf.slave_request_id
-                    slave_state.next             = SLAVE_WRITE
                 #elif slave_pending_re == 1 and req_reading == 0:
                 elif slave_pending_re == 1:
                     conf_slave_dmem_radr.next    = slave_pending_address
