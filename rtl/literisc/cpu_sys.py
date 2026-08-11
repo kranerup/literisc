@@ -1192,7 +1192,7 @@ def cpu_sys(
                     #conf.slave_reply_id.next     = conf.slave_request_id
                 #elif slave_pending_re == 1 and req_reading == 0:
                 elif slave_pending_re == 1:
-                    conf_slave_dmem_radr.next    = slave_pending_address
+                    conf_slave_dmem_radr.next    = slave_pending_address - conf_map.dmem_low
                     conf_slave_dmem_renable.next = 1
                     slave_state.next             = SLAVE_READ1
 

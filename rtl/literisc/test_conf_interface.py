@@ -60,6 +60,7 @@ from constants import (
     INTERRUPT_ADDRESS, IMEM_HIGH, DMEM_LOW, DMEM_HIGH,
     TICK_ADDRESS, CPU_RESET_ADDRESS,
     CONF_LOW, CONF_HIGH,
+    compute_memory_map,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -548,6 +549,147 @@ def test_slave_write_cpu_sum():
     print(f"{'PASS' if ok else 'FAIL'}: test_slave_write_cpu_sum" +
           (f"  ({result[0]})" if not ok else ""))
     return ok
+
+def test_conf_map_variant(imem_depth, dmem_depth, imem_low, dmem_low, label):
+    """Test: slave writes two inputs, CPU adds them, slave reads sum -- same
+    shape as test_slave_write_cpu_sum, but with a conf_map whose imem_low/
+    dmem_low are nonzero (and, for the "gapped" variant, not even adjacent
+    to each other). conf_slave_imem_wadr/conf_slave_dmem_wadr are computed
+    as `slave_pending_address - conf_map.imem_low/dmem_low`, entirely
+    independent of cpu_sys's own internal address decode (which always
+    starts IMEM at physical 0) -- so the slave-side base is a pure
+    addressing convention that must be exercised at nonzero/non-contiguous
+    values, not just the imem_low=0 default every other test uses.
+
+    imem_low/dmem_low: slave-bus base addresses for IMEM/DMEM (arbitrary,
+    independent of each other and of the CPU's own zero-based view).
+    """
+    mm = compute_memory_map(imem_depth, dmem_depth)  # CPU-side view: IMEM_LOW=0, DMEM_LOW=imem_depth
+
+    imem_high = imem_low + imem_depth - 1
+    dmem_high = dmem_low + dmem_depth - 1
+
+    # Physical DMEM word offsets used by this test (same word, addressed
+    # differently by the slave bus vs. the CPU's own program).
+    phys_result0 = 0x10
+    phys_input0  = 0x18
+    phys_input1  = 0x1C
+
+    slave_result0 = dmem_low + phys_result0
+    slave_input0  = dmem_low + phys_input0
+    slave_input1  = dmem_low + phys_input1
+
+    cpu_result0 = mm.DMEM_LOW + phys_result0
+    cpu_input0  = mm.DMEM_LOW + phys_input0
+    cpu_input1  = mm.DMEM_LOW + phys_input1
+
+    INPUT_A   = 37
+    INPUT_B   = 63
+    EXPECTED  = INPUT_A + INPUT_B
+    MAX_POLLS = 400
+    result    = [None]
+
+    prog = assemble(
+        """
+        (Rx= INPUT0_PHYS R0)
+        (A=M[Rx] R0)
+        (Rx=A R2)
+        (Rx= INPUT1_PHYS R1)
+        (A=M[Rx] R1)
+        (A+=Rx R2)
+        (Rx= RESULT_PHYS R3)
+        (M[Rx]=A R3)
+        (label done)
+        (j done)
+        """,
+        INPUT0_PHYS=cpu_input0,
+        INPUT1_PHYS=cpu_input1,
+        RESULT_PHYS=cpu_result0,
+    )
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap(
+            imem_low=imem_low, imem_high=imem_high,
+            dmem_low=dmem_low, dmem_high=dmem_high,
+            interrupt=dmem_high + 1, cpu_reset=dmem_high + 2,
+        )
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        imem_depth=imem_depth, dmem_depth=dmem_depth)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = imem_low + PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            yield _write_data(conf, clk, INPUT_A, slave_input0)
+            yield _write_data(conf, clk, INPUT_B, slave_input1)
+            yield _write_data(conf, clk, 1, conf_map.interrupt)
+
+            for i in range(MAX_POLLS):
+                if i % 5 != 0:
+                    yield clk.posedge
+                    continue
+                readback = [0]
+                yield _read_data(conf, clk, slave_result0, readback)
+                if readback[0] == EXPECTED:
+                    result[0] = "PASS"
+                    raise StopSimulation()
+                yield clk.posedge
+
+            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]}, expected {EXPECTED})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = f'trace_conf_map_{label}'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_conf_map_variant[{label}]" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
+
+def test_conf_map_offset():
+    """Test 5a: conf_map with a nonzero, contiguous slave-bus base --
+    imem_low=0x1000, dmem immediately following imem (dmem_low=imem_high+1)."""
+    imem_depth = 2048
+    imem_low   = 0x1000
+    dmem_low   = imem_low + imem_depth
+    return test_conf_map_variant(imem_depth=imem_depth, dmem_depth=4096,
+                                  imem_low=imem_low, dmem_low=dmem_low,
+                                  label="offset")
+
+
+def test_conf_map_gapped():
+    """Test 5b: conf_map with nonzero, non-contiguous imem_low/dmem_low --
+    a deliberate gap between the IMEM and DMEM windows on the slave bus."""
+    return test_conf_map_variant(imem_depth=16384, dmem_depth=65536,
+                                  imem_low=0x10000, dmem_low=0x40000,
+                                  label="gapped")
+
 
 def test_master_request():
     """Test 5: Master reads address CONF_LOW and puts the result into accumulator."""
@@ -1776,6 +1918,8 @@ if __name__ == "__main__":
     #results.append(test_boot_code_from_file())
     #results.append(test_slave_write_cpu_doubles())
     #results.append(test_slave_write_cpu_sum())
+    results.append(test_conf_map_offset())
+    results.append(test_conf_map_gapped())
     #results.append(test_wait_ticks())
     #results.append(test_master_while_slave_request())
     #results.append(test_cpu_memory_access_slave_conflict())
@@ -1785,7 +1929,7 @@ if __name__ == "__main__":
     #results.append(test_cpu_slave_race_dmem_read())
     #results.append(test_cpu_slave_race_master_read())
     #results.append(test_cpu_slave_race_master_write())
-    results.append(test_read_coreversion())
+    #results.append(test_read_coreversion())
 
     passed = sum(results)
     total  = len(results)
