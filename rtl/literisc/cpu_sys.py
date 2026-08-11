@@ -1201,7 +1201,7 @@ def cpu_sys(
                         slave_state.next = SLAVE_IDLE
 
             elif slave_state == SLAVE_WRITE:
-                conf.slave_reply_status.next = 1
+                conf.slave_reply_status.next = 2
                 conf.slave_reply_id.next     = slave_pending_id
                 slave_state.next             = SLAVE_IDLE
                 slave_ongoing.next = 0
@@ -1255,7 +1255,7 @@ def cpu_sys(
                     conf.master_request_we.next = 1
                     m_state.next = M_WAIT_WRITE
             elif m_state == M_WAIT_READ:
-                if conf.master_reply_status != 0:
+                if conf.master_reply_status == 1:
                     req_got_reply.next = 1
                     req_rdata.next = conf.master_reply_data
                     if slave_state == SLAVE_IDLE:
@@ -1265,7 +1265,7 @@ def cpu_sys(
                     req_done.next = 1
                     m_state.next = M_IDLE
             elif m_state == M_WAIT_WRITE:
-                if conf.master_reply_status != 0:
+                if conf.master_reply_status == 2:
                     req_got_reply.next = 1
                     if slave_state == SLAVE_IDLE:
                         req_done.next = 1
