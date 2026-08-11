@@ -18,14 +18,16 @@ Address arithmetic
   IMEM  : byte addresses  0 .. IMEM_HIGH  (slave writes go here when addr <= IMEM_HIGH)
   DMEM  : byte addresses  DMEM_LOW .. DMEM_HIGH
 
-  Slave DMEM write addr S  ->  dp_mem[S]
-  CPU DMEM phys byte  addr P  ->  dp_mem[P - DMEM_LOW]
+  Slave DMEM addr S (read or write)  ->  dp_mem[S - conf_map.dmem_low]
+  CPU DMEM phys byte addr P          ->  dp_mem[P - DMEM_LOW]
 
   So slave addr S and CPU addr P access the same dp_mem word when:
-      S = P - DMEM_LOW  (i.e. P = S + DMEM_LOW)
+      S - conf_map.dmem_low = P - DMEM_LOW
+  With the default conf_map (conf_map.dmem_low == DMEM_LOW), this
+  collapses to S = P -- no extra offset needed on the CPU side.
 
   For slave addr to be a DMEM write (not IMEM), S must be > IMEM_HIGH.
-  The lowest safe pair: S = IMEM_HIGH+1, P = S + DMEM_LOW.
+  The lowest safe value: S = IMEM_HIGH+1 (== DMEM_LOW == conf_map.dmem_low).
 
   CONF / master port
   ------------------
@@ -79,10 +81,10 @@ SLAVE_RESULT1 = SLAVE_RESULT0 + 4
 SLAVE_INPUT0  = SLAVE_RESULT0 + 8
 SLAVE_INPUT1  = SLAVE_RESULT0 + 12
 
-CPU_RESULT0   = DMEM_LOW + SLAVE_RESULT0
-CPU_RESULT1   = DMEM_LOW + SLAVE_RESULT1
-CPU_INPUT0    = DMEM_LOW + SLAVE_INPUT0
-CPU_INPUT1    = DMEM_LOW + SLAVE_INPUT1
+CPU_RESULT0   = SLAVE_RESULT0
+CPU_RESULT1   = SLAVE_RESULT1
+CPU_INPUT0    = SLAVE_INPUT0
+CPU_INPUT1    = SLAVE_INPUT1
 
 # CONF / master port: CONF_LOW..CONF_HIGH, large enough to reach DMEM on B.
 # CPU master requests: slave_addr = (cpu_addr - CONF_LOW) // 4
@@ -1207,8 +1209,8 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
     SLAVE_CPU_BASE = SLAVE_RESULT0 + 0x100
     SLAVE_TB_BASE  = SLAVE_RESULT0 + 0x200
 
-    CPU_DONE     = DMEM_LOW + SLAVE_DONE
-    CPU_CPU_BASE = DMEM_LOW + SLAVE_CPU_BASE
+    CPU_DONE     = SLAVE_DONE
+    CPU_CPU_BASE = SLAVE_CPU_BASE
 
     def cpu_val(i):
         return 0xA000 + i * 3 + 1
@@ -1913,22 +1915,22 @@ if __name__ == "__main__":
     #test_imem_slave_race_read()
     #test_imem_slave_race_write()
 
-    #results.append(test_slave_dmem_rw())
-    #results.append(test_cpu_stores_constant())
-    #results.append(test_boot_code_from_file())
-    #results.append(test_slave_write_cpu_doubles())
-    #results.append(test_slave_write_cpu_sum())
+    results.append(test_slave_dmem_rw())
+    results.append(test_cpu_stores_constant())
+    results.append(test_boot_code_from_file())
+    results.append(test_slave_write_cpu_doubles())
+    results.append(test_slave_write_cpu_sum())
     results.append(test_conf_map_offset())
     results.append(test_conf_map_gapped())
-    #results.append(test_wait_ticks())
-    #results.append(test_master_while_slave_request())
-    #results.append(test_cpu_memory_access_slave_conflict())
-    #results.append(test_cpu_reset())
-    #results.append(test_dual_cpu())
-    #results.append(test_cpu_slave_race_dmem_write())
-    #results.append(test_cpu_slave_race_dmem_read())
-    #results.append(test_cpu_slave_race_master_read())
-    #results.append(test_cpu_slave_race_master_write())
+    results.append(test_wait_ticks())
+    results.append(test_master_while_slave_request())
+    results.append(test_cpu_memory_access_slave_conflict())
+    results.append(test_cpu_reset())
+    results.append(test_dual_cpu())
+    results.append(test_cpu_slave_race_dmem_write())
+    results.append(test_cpu_slave_race_dmem_read())
+    results.append(test_cpu_slave_race_master_read())
+    results.append(test_cpu_slave_race_master_write())
     #results.append(test_read_coreversion())
 
     passed = sum(results)

@@ -1169,7 +1169,6 @@ def cpu_sys(
                 #    slave_state.next = SLAVE_WAIT
 
             if slave_state == SLAVE_WAIT:
-                slave_state.next = SLAVE_WAIT
                 if slave_pending_we == 1:
                 #if slave_pending_we == 1 and req_reading == 0:
                     slave_state.next             = SLAVE_WRITE
@@ -1179,7 +1178,7 @@ def cpu_sys(
                     elif slave_pending_address == conf_map.cpu_reset:
                         n_cpu_rstn.next = 0
                     elif slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
-                        conf_slave_imem_wadr.next    = slave_pending_address - conf_map.imem_low
+                        conf_slave_imem_wadr.next    = slave_pending_address  - conf_map.imem_low
                         conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
                     elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
@@ -1192,9 +1191,14 @@ def cpu_sys(
                     #conf.slave_reply_id.next     = conf.slave_request_id
                 #elif slave_pending_re == 1 and req_reading == 0:
                 elif slave_pending_re == 1:
-                    conf_slave_dmem_radr.next    = slave_pending_address - conf_map.dmem_low
-                    conf_slave_dmem_renable.next = 1
                     slave_state.next             = SLAVE_READ1
+                    if slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
+                        print("TODO: implement reading from imem")
+                    elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
+                        conf_slave_dmem_radr.next    = slave_pending_address - conf_map.dmem_low
+                        conf_slave_dmem_renable.next = 1
+                    else:
+                        slave_state.next = SLAVE_IDLE
 
             elif slave_state == SLAVE_WRITE:
                 conf.slave_reply_status.next = 1
