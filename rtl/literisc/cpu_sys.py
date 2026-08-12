@@ -230,6 +230,15 @@ def cpu_sys(
             instr_trace,
             False)
 
+    # --------------- simulation console output ------------
+    # Mirrors the emulator's write-cb-write-char: a store to CONSOLE_ADDRESS
+    # prints its low byte as a character, so `printf`/`putchar` (which target
+    # _outch = (volatile char*)0xffffffff, see include/stdio.h) produce
+    # identical output whether run on the emulator or in RTL simulation.
+    @always(clk.posedge)
+    def console_out():
+        if sync_rstn == 1 and cpu_dmem_adr == CONSOLE_ADDRESS and dmem_wr == 1:
+            print(chr(int(dmem_din) & 0xff), end='', flush=True)
 
     # --------------- cpu clock gating ------------
     cpu_waiting = signal()
@@ -528,9 +537,14 @@ def cpu_sys(
         else:
             n_req_reading.next = 0
             if dmem_rd == 1 or dmem_wr == 1:
+                # --- console output (carved out of the top of the CONF window) ---
+                if cpu_dmem_adr == CONSOLE_ADDRESS and dmem_wr == 1:
+                    n_cpu_waiting.next = 0
+                    dmem_renable.next = 0
+                    dmem_wenable.next = 0
                 # --- IO access ---------------
                 #if cpu_dmem_adr >= mm.CONF_LOW and cpu_dmem_adr <= mm.CONF_HIGH:
-                if cpu_dmem_adr >= mm.CONF_LOW:
+                elif cpu_dmem_adr >= mm.CONF_LOW:
                     n_cpu_waiting.next = 1
                     n_wait_type.next = IO_WAIT
                     req_rd.next = dmem_rd
