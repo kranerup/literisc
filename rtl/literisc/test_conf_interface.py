@@ -1469,7 +1469,7 @@ def test_cpu_slave_race(cpu_op, max_delay=20):
                                                  int(conf.master_request_data))
                     cid = int(conf.master_request_id)
                     yield clk.posedge
-                    conf.master_reply_status.next = 1
+                    conf.master_reply_status.next = 2
                     conf.master_reply_id.next     = cid
                     yield clk.posedge
                     conf.master_reply_status.next = 0

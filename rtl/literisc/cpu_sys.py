@@ -1168,7 +1168,7 @@ def cpu_sys(
                 #if slave_ongoing == 1 and req_done == 0 and prev_req_done == 0 and prev_dmem_rd == 0 and dmem_rd == 0:
                 #    slave_state.next = SLAVE_WAIT
 
-            if slave_state == SLAVE_WAIT:
+            elif slave_state == SLAVE_WAIT:
                 if slave_pending_we == 1:
                 #if slave_pending_we == 1 and req_reading == 0:
                     slave_state.next             = SLAVE_WRITE
@@ -1204,7 +1204,9 @@ def cpu_sys(
                 conf.slave_reply_status.next = 2
                 conf.slave_reply_id.next     = slave_pending_id
                 slave_state.next             = SLAVE_IDLE
-                slave_ongoing.next = 0
+                slave_ongoing.next      = 0
+                slave_pending_we.next   = 0
+                slave_pending_re.next   = 0
                 #print("slave back to IDLE, cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
 
             elif slave_state == SLAVE_READ1:
@@ -1217,7 +1219,9 @@ def cpu_sys(
                 conf.slave_reply_status.next = 1
                 conf.slave_reply_id.next     = slave_pending_id
                 slave_state.next             = SLAVE_IDLE
-                slave_ongoing.next = 0
+                slave_ongoing.next      = 0
+                slave_pending_we.next   = 0
+                slave_pending_re.next   = 0
 
     @always(clk.posedge)
     def conf_master():
