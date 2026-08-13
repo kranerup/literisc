@@ -182,6 +182,28 @@ def rom(
 
     return instances()
 
+def console_out_inst(clk, sync_rstn, cpu_dmem_adr, dmem_wr, dmem_din):
+    # Mirrors the emulator's write-cb-write-char: a store to CONSOLE_ADDRESS
+    # prints its low byte as a character, so `printf`/`putchar` (which target
+    # _outch = (volatile char*)0xffffffff, see include/stdio.h) produce
+    # identical output whether run on the emulator or in RTL simulation.
+    # MyHDL's toVerilog can't convert chr()/%c, so the Verilog side is
+    # hand-written here (see sync_flop_signal in Common.py for the same
+    # pattern) while the Python side below drives plain `Simulation()` runs.
+    __verilog__ = '''
+always @(posedge %(clk)s) begin
+    if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1)
+        $write("%%c", %(dmem_din)s[7:0]);
+end
+'''
+
+    @always(clk.posedge)
+    def sim():
+        if sync_rstn == 1 and cpu_dmem_adr == CONSOLE_ADDRESS and dmem_wr == 1:
+            print("%c" % (int(dmem_din) & 0xff), end='', flush=True)
+
+    return instances()
+
 def cpu_sys(
         clk,
         sync_rstn,
@@ -266,14 +288,7 @@ def cpu_sys(
             False)
 
     # --------------- simulation console output ------------
-    # Mirrors the emulator's write-cb-write-char: a store to CONSOLE_ADDRESS
-    # prints its low byte as a character, so `printf`/`putchar` (which target
-    # _outch = (volatile char*)0xffffffff, see include/stdio.h) produce
-    # identical output whether run on the emulator or in RTL simulation.
-    @always(clk.posedge)
-    def console_out():
-        if sync_rstn == 1 and cpu_dmem_adr == CONSOLE_ADDRESS and dmem_wr == 1:
-            print(chr(int(dmem_din) & 0xff), end='', flush=True)
+    console_out = console_out_inst(clk, sync_rstn, cpu_dmem_adr, dmem_wr, dmem_din)
 
     # --------------- cpu clock gating ------------
     cpu_waiting = signal()
