@@ -246,11 +246,13 @@ def cpu_sys(
     n_cpu_waiting = signal()
     wait_type = signal(4)
     n_wait_type = signal(4)
+    prev_wait_type = signal(4)
 
     cpu_waiting_final = signal()
     prev_cpu_waiting_final = signal()
 
     icpuwait = flop(cpu_waiting, prev_cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn)
+    iprev_wait_type = flop(wait_type, prev_wait_type, clk_en=None, clk=clk, sync_rstn=sync_rstn)
     icpuwait_final = flop(cpu_waiting_final, prev_cpu_waiting_final, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     #@always_comb
@@ -395,8 +397,9 @@ def cpu_sys(
 
     @always_comb
     def imem_dout_mux():
-        if prev_cpu_waiting_final == 1 and cpu_waiting_final == 0:
+        if prev_cpu_waiting_final == 1 and cpu_waiting_final == 0 and prev_wait_type != IMEM_WAIT:
             imem_final_dout.next = imem_dout_cached
+            #imem_final_dout.next = imem_dout 
         else:
             imem_final_dout.next = imem_dout
         #imem_final_dout.next = imem_dout
