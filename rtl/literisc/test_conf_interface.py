@@ -1055,9 +1055,14 @@ def test_imem_write_from_global():
 
     This program does the minimal version by hand: write a byte to a
     register-held IMEM address (M[Rx].b=A, address in Rx, value in A),
-    matching what `x = 0;` compiles to when x lives in IMEM. Address 7 is
-    just past this tiny program's own bytes -- unused scratch space, still
-    well within the IMEM range.
+    matching what `x = 0;` compiles to when x lives in IMEM. Address 0 is
+    this tiny program's own first byte (self-overwrite of an
+    already-fetched instruction; harmless since it's never re-fetched).
+    The underflow this test targets only happens when the write address is
+    *smaller* than the whole program's length (len(content)) -- an
+    earlier version of this test wrote to an address exactly equal to
+    len(content), which lands in-bounds and can't reproduce the bug at
+    all.
 
     KNOWN FAILING -- documents the bug; imem_final_wadr should be
     cpu_dmem_adr directly (IMEM_LOW is always 0), not dmem_adr.
@@ -1065,7 +1070,7 @@ def test_imem_write_from_global():
     boot_hex_path = "imem_write_from_global.hex"
     prog = assemble(
         """
-        (Rx= 7 R0)
+        (Rx= 0 R0)
         (A= 0)
         (M[Rx].b=A R0)
         (label done)
@@ -2623,26 +2628,26 @@ if __name__ == "__main__":
     results.append(test_imem_word_read())
     results.append(test_imem_offset_read())
     results.append(test_imem_write_from_global())
-    #results.append(test_slave_dmem_rw())
-    #results.append(test_cpu_stores_constant())
-    #results.append(test_boot_code_from_file())
-    #results.append(test_slave_write_cpu_doubles())
-    #results.append(test_slave_write_cpu_sum())
-    #results.append(test_conf_map_offset())
-    #results.append(test_conf_map_gapped())
-    #results.append(test_wait_ticks())
-    #results.append(test_master_while_slave_request())
-    #results.append(test_cpu_memory_access_slave_conflict())
-    #results.append(test_cpu_reset())
-    #results.append(test_dual_cpu())
-    #results.append(test_cpu_slave_race_dmem_write())
-    #results.append(test_cpu_slave_race_dmem_read())
-    #results.append(test_cpu_slave_race_master_read())
-    #results.append(test_cpu_slave_race_master_write())
-    #results.append(test_no_print_c_program())
-    #results.append(test_console_output())
-    #results.append(test_puts_c_program())
-    #results.append(test_console_output_c_program())
+    results.append(test_slave_dmem_rw())
+    results.append(test_cpu_stores_constant())
+    results.append(test_boot_code_from_file())
+    results.append(test_slave_write_cpu_doubles())
+    results.append(test_slave_write_cpu_sum())
+    results.append(test_conf_map_offset())
+    results.append(test_conf_map_gapped())
+    results.append(test_wait_ticks())
+    results.append(test_master_while_slave_request())
+    results.append(test_cpu_memory_access_slave_conflict())
+    results.append(test_cpu_reset())
+    results.append(test_dual_cpu())
+    results.append(test_cpu_slave_race_dmem_write())
+    results.append(test_cpu_slave_race_dmem_read())
+    results.append(test_cpu_slave_race_master_read())
+    results.append(test_cpu_slave_race_master_write())
+    results.append(test_no_print_c_program())
+    results.append(test_console_output())
+    results.append(test_puts_c_program())
+    results.append(test_console_output_c_program())
     #results.append(test_read_coreversion())
 
     passed = sum(results)

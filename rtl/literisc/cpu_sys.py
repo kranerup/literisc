@@ -65,6 +65,7 @@ def rom(
     renable,
     waddr,
     wenable,
+    wmask,
     clk,
     clk_en,
     sync_rstn,
@@ -121,12 +122,33 @@ def rom(
     def read():
         n_rom_data.next = 0
         if renable == 1 and n_sel_rom == 1:
-            n_rom_data.next = content[int(rom_addr)]
+            # content[] is a genuinely packed byte array (the assembler
+            # lays consecutive bytes of a word at consecutive addresses,
+            # e.g. "X: adword 3"), unlike pmem below (one independent
+            # full-width cell per numeric address) -- so a word read here
+            # has to actually gather and pack 4 consecutive bytes,
+            # little-endian, matching adword()'s own byte order. Bytes
+            # past the end of content[] (e.g. a word read whose low byte
+            # is the last content[] byte) read as 0.
+            base = int(rom_addr)
+            b0 = content[base]   if base   < len(content) else 0
+            b1 = content[base+1] if base+1 < len(content) else 0
+            b2 = content[base+2] if base+2 < len(content) else 0
+            b3 = content[base+3] if base+3 < len(content) else 0
+            n_rom_data.next = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
     icw  = flop( n_rom_data, rom_data, clk_en, clk, sync_rstn )
     isro = flop( n_sel_rom, sel_rom, clk_en, clk, sync_rstn )
     isra = flop( n_sel_ram, sel_ram, clk_en, clk, sync_rstn )
 
+    # pmem (unlike content[] above) is one independent full-width cell per
+    # numeric address -- data[N] holds a whole word directly, not the Nth
+    # byte of some packed sequence -- so a word read of it is already just
+    # dp_mem_rom's own registered odata, no byte-gathering needed. Its
+    # write mask, though, needs to be real (byte-lane-aware, from wmask)
+    # rather than the old single-bit wenable-as-wmask, so a partial
+    # (byte-sized) write doesn't clobber the other 3 bytes of a cell with
+    # garbage from idata's unused upper bits.
     pmem = dp_mem_rom(
         idata = idata,
         odata = ram_data,
@@ -134,7 +156,7 @@ def rom(
         waddr = w_ram_addr,
         renable = rd_ram,
         wenable = wenable,
-        wmask = wenable,
+        wmask = wmask,
         clk   = clk,
         clk_en = clk_en,
         depth = depth - len(content),
@@ -177,9 +199,14 @@ def cpu_sys(
     imem_radr = Signal(modbv(0)[32:])
     imem_wadr = Signal(modbv(0)[32:])
     imem_din = Signal(modbv(0)[8:])
-    imem_dout = Signal(modbv(0)[8:])
-    imem_final_dout = Signal(modbv(0)[8:])
-    imem_dout_cached = Signal(modbv(0)[8:])
+    # IMEM's physical storage (both the boot-ROM content[] prefix and the
+    # writable dp_mem_rom extension) can natively hold/return a full word;
+    # these are full-width so a CPU-side word read (Rx=M[A]) doesn't need
+    # to be split into 4 separate byte fetches the way instruction fetch
+    # itself (genuinely 1 byte at a time, for variable-length decode) does.
+    imem_dout = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
+    imem_final_dout = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
+    imem_dout_cached = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
     cpu_imem_rd = Signal(modbv(0)[1:])
     dmem_imem_rd = Signal(modbv(0)[1:])
     imem_rd = Signal(modbv(0)[1:])
@@ -322,6 +349,7 @@ def cpu_sys(
     conf_slave_imem_wadr    = signal(32)
     conf_slave_imem_din     = signal(CPU_DMEM_DATA_BITS)
     conf_slave_imem_wenable = signal()
+    conf_slave_imem_wmask   = signal(4)
 
     # muxed signals going into dp_mem
     dmem_final_radr    = signal(32)
@@ -336,6 +364,7 @@ def cpu_sys(
     imem_final_wadr    = signal(32)
     imem_final_din     = signal(CPU_DMEM_DATA_BITS)
     imem_final_wenable = signal()
+    imem_final_wmask   = signal(4)
 
     icw   = flop( n_cpu_waiting, cpu_waiting, clk_en=None, clk=clk, sync_rstn=sync_rstn )
     icwio = flop( n_wait_type,   wait_type,   clk_en=None, clk=clk, sync_rstn=sync_rstn )
@@ -358,8 +387,8 @@ def cpu_sys(
 
     sel_axi_rd_data = signal()
 
-    n_imem_dout_cached = Signal(modbv(0)[8:])
-    imem_dout_cached = Signal(modbv(0)[8:])
+    n_imem_dout_cached = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
+    imem_dout_cached = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
     icache = flop(n_imem_dout_cached, imem_dout_cached, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     tick_sel  = signal(3)   # which bit to watch, 1-5 (0 = disabled)
@@ -459,10 +488,16 @@ def cpu_sys(
             imem_final_wadr.next    = conf_slave_imem_wadr
             imem_final_din.next     = conf_slave_imem_din
             imem_final_wenable.next = conf_slave_imem_wenable
+            imem_final_wmask.next   = conf_slave_imem_wmask
         else:
             imem_final_wadr.next    = dmem_adr
             imem_final_din.next     = dmem_din
             imem_final_wenable.next = imem_wenable
+            # dmem_wmask is already computed from dmem_wr_sz for regular
+            # DMEM writes -- the same CPU store that targets an IMEM
+            # address carries the same size, so reuse it rather than
+            # duplicating the byte/half-word/word -> mask logic.
+            imem_final_wmask.next  = dmem_wmask
 
     @always_comb
     def decode():
@@ -1014,6 +1049,7 @@ def cpu_sys(
         renable      = imem_rd,
         waddr        = imem_final_wadr,
         wenable      = imem_final_wenable,
+        wmask        = imem_final_wmask,
         clk          = cpu_clk,
         clk_en       = rom_clk_en,
         sync_rstn    = sync_rstn,
@@ -1156,6 +1192,7 @@ def cpu_sys(
         conf_slave_dmem_wmask.next        = 0b1111
         conf_slave_dmem_din.next          = 0
         conf_slave_imem_wenable.next      = 0
+        conf_slave_imem_wmask.next        = 0b1111
         conf_slave_imem_din.next          = 0
         n_cpu_rstn.next = 1
         intr_addr_valid.next              = 0
