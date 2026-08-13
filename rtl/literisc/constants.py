@@ -3,11 +3,16 @@
 #   DMEM             : DMEM_LOW .. DMEM_HIGH   DMEM_DEPTH bytes
 #   PERIPHERAL IO    : IO_LOW   .. IO_HIGH     (UART, GPIO etc), IO_DEPTH bytes
 #   Special registers: IRQ, TICK, INTERRUPT, CPU_RESET (4 bytes)
-#   CONF bus window  : CONF_LOW .. CONF_HIGH
+#   CONF bus window  : CONF_LOW .. CONSOLE_ADDRESS - 1
+#   Console register : CONSOLE_ADDRESS (top of the 32-bit space, carved out of
+#                       the CONF window; matches the emulator's _outch/putchar
+#                       convention in include/stdio.h)
 
 PERIP_ADDR_BITS    = 16
 PERIP_DATA_BITS    = 32
 CPU_DMEM_DATA_BITS = 32
+
+CONSOLE_ADDRESS = 0xFFFFFFFF
 
 IMEM_DEPTH  = 8192
 DMEM_DEPTH  = 32768
@@ -39,7 +44,6 @@ class MemoryMap:
         # CONF bus window, immediately after peripheral IO
         self.CONF_LOW  = self.IO_HIGH + 5
         self.CONF_HIGH = self.CONF_LOW + CONF_WINDOW_SIZE - 1
-
 
 def compute_memory_map(imem_depth=IMEM_DEPTH, dmem_depth=DMEM_DEPTH):
     return MemoryMap(imem_depth, dmem_depth)
