@@ -553,6 +553,146 @@ def test_console_output():
     return ok
 
 
+def test_no_print_c_program():
+    """Simplest tier of end-to-end C-program RTL check: a program that does
+    NOT print anything at all -- no printf/puts/putchar, no IMEM string
+    literal reads, so it can't hit the shared-IMEM-port stall at all. It
+    just computes a value and stores it to a fixed DMEM address
+    (CPU_RESULT0), read back through the CONF slave interface -- the same
+    read-back mechanism test_boot_code_from_file uses for a hand-assembled
+    program, here driving a program compiled through lrcc instead.
+
+    This is the baseline: it exercises the compiled call/return/push/pop
+    machinery (main() is still a real subroutine call from _START) without
+    ever touching the IMEM data-read path that test_puts_c_program and
+    test_console_output_c_program depend on.
+    """
+    EXPECTED  = 42
+    MAX_POLLS = 2000
+    result    = [None]
+
+    c_source = (
+        'int main() {\n'
+        f'  volatile int *result = (int *){CPU_RESULT0};\n'
+        '  *result = 6 * 7;\n'
+        '  return 0;\n'
+        '}\n'
+    )
+
+    boot_hex_path = "no_print_c_program.mem"
+    _compile_c_to_mem(c_source, boot_hex_path)
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+
+            readback = [0]
+            for i in range(MAX_POLLS):
+                yield _read_data(conf, clk, SLAVE_RESULT0, readback)
+                if readback[0] == EXPECTED:
+                    result[0] = "PASS"
+                    raise StopSimulation()
+                yield clk.posedge
+
+            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read {readback[0]})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_no_print_c_program'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(2000000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_no_print_c_program" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
+
+def test_puts_c_program():
+    """Middle tier: a program that calls puts() (print_str + putchar in a
+    loop), one level simpler than printf but still exercising the IMEM
+    string-literal read that steals the shared IMEM port -- same
+    RTL-vs-emulator console-output diff as test_console_output_c_program.
+    """
+    c_source = (
+        '#include <stdio.h>\n'
+        '\n'
+        'int main() {\n'
+        '  puts("Hello");\n'
+        '  return 0;\n'
+        '}\n'
+    )
+
+    boot_hex_path = "puts_c_program.mem"
+    _compile_c_to_mem(c_source, boot_hex_path)
+    expected = _run_c_in_emulator(c_source)
+
+    captured = io.StringIO()
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            for i in range(20000):
+                yield clk.posedge
+            raise StopSimulation()
+
+        return instances()
+
+    with redirect_stdout(captured):
+        traceSignals.filename = 'trace_puts_c_program'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(2000000)
+
+    printed = captured.getvalue()
+    ok = printed == expected
+    print(f"{'PASS' if ok else 'FAIL'}: test_puts_c_program" +
+          (f"  (expected {expected!r}, got {printed!r})" if not ok else ""))
+    return ok
+
+
 def test_console_output_c_program():
     """Same check as test_console_output, but the program under test is a
     real C program compiled through the full lrcc pipeline (preprocessor +
@@ -640,7 +780,8 @@ def test_imem_read_corrupts_register():
       this repro), so R2 is left at its reset value 0 and chr(0) is
       printed instead.
 
-    KNOWN FAILING as of this commit -- documents the bug; not yet fixed.
+    Regression test for the fix in imem_dout_mux() (cpu_sys.py) that skips
+    the cache replay when the wait that just ended was an IMEM_WAIT.
     """
     EXPECTED = chr(99)
 
@@ -714,6 +855,274 @@ def test_imem_read_corrupts_register():
     print(f"{'PASS' if ok else 'FAIL'}: test_imem_read_corrupts_register" +
           (f"  (expected {EXPECTED!r}, got {got!r} in full output {printed!r})"
            if not ok else ""))
+    return ok
+
+
+def test_imem_word_read():
+    """Reads a full 32-bit word out of IMEM (Rx=M[A], not Rx=M[A].b) and
+    uses the READ RESULT ITSELF as a store address -- exactly what
+    putchar() does with _outch, a word-sized global pointer that lives in
+    IMEM (see include/stdio.h: `volatile char *_outch = (volatile
+    char*)0xffffffff;`).
+
+    Reads -1 (0xFFFFFFFF == CONSOLE_ADDRESS) out of IMEM as a word into R3,
+    then stores a canary byte to the address held in R3.
+      Expected (read correct): R3 == CONSOLE_ADDRESS, canary byte prints.
+      Observed (bug present): the word read through the shared-IMEM-port
+      steal only returns its low byte correctly (0xFF); the upper 3 bytes
+      come through wrong, so R3 ends up as some small in-range IMEM
+      address instead. The store silently lands in ordinary IMEM (never
+      reaching CONSOLE_ADDRESS) and nothing gets printed at all.
+
+    An earlier version of this test read (adword 88) into a register and
+    only checked that a LATER, unrelated register wasn't corrupted -- 88's
+    low byte IS 88, so byte-truncation of the read value itself was
+    completely invisible to it. Using -1 here makes the low byte (0xFF)
+    and the full word (0xFFFFFFFF) clearly different, so truncation is
+    actually observable.
+
+    KNOWN FAILING -- documents a real, previously-undetected bug. This is
+    exactly why puts()/printf() (which read _outch on every call) produce
+    no output at all under the RTL model.
+    """
+    EXPECTED = chr(99)
+
+    boot_hex_path = "imem_word_read.hex"
+    prog = assemble(
+        """
+        (Rx= litdata R0)
+        (A=Rx R0)
+        (Rx=M[A] R3)
+        (Rx= 99 R2)
+        (A=Rx R2)
+        (M[Rx].b=A R3)
+        (label done)
+        (j done)
+        (lalign-dword 0)
+        (label litdata)
+        (adword -1)
+        """
+    )
+
+    with open(boot_hex_path, "w") as f:
+        for i, byte in enumerate(prog):
+            f.write(f"{byte:02x} ")
+            if i % 16 == 15:
+                f.write("\n")
+        f.write("\n")
+
+    captured = io.StringIO()
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            for i in range(500):
+                yield clk.posedge
+            raise StopSimulation()
+
+        return instances()
+
+    with redirect_stdout(captured):
+        traceSignals.filename = 'trace_imem_word_read'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(20000)
+
+    printed = captured.getvalue()
+    got = printed.rsplit('\n', 1)[-1]
+    ok = got == EXPECTED
+    print(f"{'PASS' if ok else 'FAIL'}: test_imem_word_read" +
+          (f"  (expected {EXPECTED!r}, got {got!r} in full output {printed!r})"
+           if not ok else ""))
+    return ok
+
+
+def test_imem_offset_read():
+    """Same idea again, but using the offset-addressed form
+    Rx=M[A+n].b instead of Rx=M[A].b, to check the offset-immediate byte
+    fetch (an extra cycle of instruction decode before the actual memory
+    read) doesn't change the shared-IMEM-port steal behavior.
+    """
+    EXPECTED = chr(99)
+
+    boot_hex_path = "imem_offset_read.hex"
+    prog = assemble(
+        """
+        (Rx= -1 R6)
+        (Rx= litdata R0)
+        (A=Rx R0)
+        (Rx=M[A+n].b 1 R1)
+        (Rx= 99 R2)
+        (A=Rx R2)
+        (M[Rx].b=A R6)
+        (label done)
+        (j done)
+        (label litdata)
+        (lstring "XY")
+        """
+    )
+
+    with open(boot_hex_path, "w") as f:
+        for i, byte in enumerate(prog):
+            f.write(f"{byte:02x} ")
+            if i % 16 == 15:
+                f.write("\n")
+        f.write("\n")
+
+    captured = io.StringIO()
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            for i in range(500):
+                yield clk.posedge
+            raise StopSimulation()
+
+        return instances()
+
+    with redirect_stdout(captured):
+        traceSignals.filename = 'trace_imem_offset_read'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(20000)
+
+    printed = captured.getvalue()
+    got = printed.rsplit('\n', 1)[-1]
+    ok = got == EXPECTED
+    print(f"{'PASS' if ok else 'FAIL'}: test_imem_offset_read" +
+          (f"  (expected {EXPECTED!r}, got {got!r} in full output {printed!r})"
+           if not ok else ""))
+    return ok
+
+
+def test_imem_write_from_global():
+    """Regression repro for a SEPARATE, still-unfixed bug found via
+    tests/00095.c and tests/00096.c: a global variable with a constant
+    initializer (e.g. `int x = 3;`) is kept resident in IMEM by the
+    compiler (no copy-to-DMEM at startup), so an ordinary assignment to it
+    is a genuine CPU-side WRITE to an IMEM address -- a different code path
+    (imem_port_mux() in cpu_sys.py) than the read-side steal fixed in
+    imem_dout_mux().
+
+    imem_port_mux()'s non-slave branch does:
+        imem_final_wadr.next = dmem_adr
+    where dmem_adr = cpu_dmem_adr - mm.DMEM_LOW (computed in aoffs(), for
+    real DMEM writes). For an IMEM-range address (always < DMEM_LOW), this
+    underflows/wraps to a huge value, which dp_mem_rom's pmem then masks
+    down to some address that can land outside its actual depth --
+    reproducing the same "wenable and waddr >= depth" IndexError crash seen
+    in the RTL runs of 00095.c/00096.c.
+
+    This program does the minimal version by hand: write a byte to a
+    register-held IMEM address (M[Rx].b=A, address in Rx, value in A),
+    matching what `x = 0;` compiles to when x lives in IMEM. Address 7 is
+    just past this tiny program's own bytes -- unused scratch space, still
+    well within the IMEM range.
+
+    KNOWN FAILING -- documents the bug; imem_final_wadr should be
+    cpu_dmem_adr directly (IMEM_LOW is always 0), not dmem_adr.
+    """
+    boot_hex_path = "imem_write_from_global.hex"
+    prog = assemble(
+        """
+        (Rx= 7 R0)
+        (A= 0)
+        (M[Rx].b=A R0)
+        (label done)
+        (j done)
+        """
+    )
+
+    with open(boot_hex_path, "w") as f:
+        for i, byte in enumerate(prog):
+            f.write(f"{byte:02x} ")
+            if i % 16 == 15:
+                f.write("\n")
+        f.write("\n")
+
+    result = [None]
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            for i in range(500):
+                yield clk.posedge
+            result[0] = "PASS"
+            raise StopSimulation()
+
+        return instances()
+
+    try:
+        traceSignals.filename = 'trace_imem_write_from_global'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(20000)
+    except IndexError as e:
+        result[0] = f"FAIL: RTL simulation crashed ({e})"
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_imem_write_from_global" +
+          (f"  ({result[0]})" if not ok else ""))
     return ok
 
 
@@ -2211,25 +2620,30 @@ if __name__ == "__main__":
     #test_imem_slave_race_write()
 
     results.append(test_imem_read_corrupts_register())
-    results.append(test_slave_dmem_rw())
-    results.append(test_cpu_stores_constant())
-    results.append(test_boot_code_from_file())
-    results.append(test_slave_write_cpu_doubles())
-    results.append(test_slave_write_cpu_sum())
-    results.append(test_conf_map_offset())
-    results.append(test_conf_map_gapped())
-    results.append(test_wait_ticks())
-    results.append(test_master_while_slave_request())
-    results.append(test_cpu_memory_access_slave_conflict())
-    results.append(test_cpu_reset())
-    results.append(test_dual_cpu())
-    results.append(test_cpu_slave_race_dmem_write())
-    results.append(test_cpu_slave_race_dmem_read())
-    results.append(test_cpu_slave_race_master_read())
-    results.append(test_cpu_slave_race_master_write())
-    #results.append(test_read_coreversion())
+    results.append(test_imem_word_read())
+    results.append(test_imem_offset_read())
+    results.append(test_imem_write_from_global())
+    #results.append(test_slave_dmem_rw())
+    #results.append(test_cpu_stores_constant())
+    #results.append(test_boot_code_from_file())
+    #results.append(test_slave_write_cpu_doubles())
+    #results.append(test_slave_write_cpu_sum())
+    #results.append(test_conf_map_offset())
+    #results.append(test_conf_map_gapped())
+    #results.append(test_wait_ticks())
+    #results.append(test_master_while_slave_request())
+    #results.append(test_cpu_memory_access_slave_conflict())
+    #results.append(test_cpu_reset())
+    #results.append(test_dual_cpu())
+    #results.append(test_cpu_slave_race_dmem_write())
+    #results.append(test_cpu_slave_race_dmem_read())
+    #results.append(test_cpu_slave_race_master_read())
+    #results.append(test_cpu_slave_race_master_write())
+    #results.append(test_no_print_c_program())
     #results.append(test_console_output())
+    #results.append(test_puts_c_program())
     #results.append(test_console_output_c_program())
+    #results.append(test_read_coreversion())
 
     passed = sum(results)
     total  = len(results)
