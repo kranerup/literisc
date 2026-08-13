@@ -131,10 +131,18 @@ def rom(
             # past the end of content[] (e.g. a word read whose low byte
             # is the last content[] byte) read as 0.
             base = int(rom_addr)
-            b0 = content[base]   if base   < len(content) else 0
-            b1 = content[base+1] if base+1 < len(content) else 0
-            b2 = content[base+2] if base+2 < len(content) else 0
-            b3 = content[base+3] if base+3 < len(content) else 0
+            b0 = 0
+            b1 = 0
+            b2 = 0
+            b3 = 0
+            if base < len(content):
+                b0 = content[base]
+            if base + 1 < len(content):
+                b1 = content[base+1]
+            if base + 2 < len(content):
+                b2 = content[base+2]
+            if base + 3 < len(content):
+                b3 = content[base+3]
             n_rom_data.next = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
     icw  = flop( n_rom_data, rom_data, clk_en, clk, sync_rstn )
