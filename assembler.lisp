@@ -567,9 +567,9 @@
 ;;; Return true if any label changed position compared to previous values.
 ;;; All labels initial value is larger than 32 bits so that labels can only
 ;;; shrink when iterating multiple times.
-(defun calc-labels (aprog &optional debug)
+(defun calc-labels (aprog &optional debug (base 0))
   (if debug (format t "--- calc labels ---~%"))
-  (let ((curr-pc 0)
+  (let ((curr-pc base)
         (diff nil))
     (dolist (item aprog)
       (if (equal (car item) 'label)
@@ -612,21 +612,21 @@
              symtab))
 
 ;;; Calculate label positions until there are no more changes.
-(defun minimize-labels (aprog verbose)
+(defun minimize-labels (aprog verbose &optional (base 0))
   (loop for i from 1 to 200
-        while (calc-labels aprog verbose)
+        while (calc-labels aprog verbose base)
         finally (when (= i 201)
                   (error "minimize labels didn't stabilize"))))
 
-(defun assemble (aprog &optional (verbose nil) (symtab nil))
+(defun assemble (aprog &optional (verbose nil) (symtab nil) (base 0))
   (define-labels aprog verbose)
-  (minimize-labels aprog verbose)
+  (minimize-labels aprog verbose base)
   (if symtab
       (progn
         (when verbose (list-labels aprog))
         (create-symtab aprog symtab)))
   (if verbose (format t "--- assemble ---~%"))
-  (loop with mcode := nil and curr-pc := 0
+  (loop with mcode := nil and curr-pc := base
         for item in aprog
         if (listp item) do (setf mcode (eval-asm item curr-pc t verbose))
         ;if (listp item) do (format t "pc:~a mcode:~a~%" curr-pc mcode)

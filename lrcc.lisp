@@ -9,7 +9,8 @@
 ;;
 ;; Register the script's own directory so ASDF finds literisc.asd
 (let ((script-directory (make-pathname :directory (pathname-directory *load-truename*))))
-  (pushnew script-directory asdf:*central-registry* :test #'equal))
+  (pushnew script-directory asdf:*central-registry* :test #'equal)
+  (defparameter cl-user::*lrcc-root* script-directory))
 
 ;; Prefer ql:quickload (fetches missing dependencies automatically);
 ;; fall back to plain ASDF if quicklisp isn't installed.
@@ -31,6 +32,10 @@
   (format t "  -S                   Output assembly code only (pretty printed)~%")
   (format t "  -r, --run            Run program in emulator (program output to stdout,~%")
   (format t "                       return value to stderr)~%")
+  (format t "  --rtl                Run program in the MyHDL RTL simulation of cpu_sys~%")
+  (format t "                       instead of the emulator (program output to stdout)~%")
+  (format t "  --rtl-cycles <n>     Clock cycles to run under --rtl (default: 20000)~%")
+  (format t "  --rtl-trace          Write a VCD trace when running under --rtl~%")
   (format t "  --ui                 Run program in curses emulator UI (interactive debugger)~%")
   (format t "  --conf               Enable conf bus connection (default socket)~%")
   (format t "  --no-conf            Disable conf bus connection (default)~%")
@@ -52,6 +57,9 @@
   (format t "  -fkeep-unused-functions~%")
   (format t "                       Compile functions even if unreachable from main~%")
   (format t "                       (default: unused functions are eliminated)~%")
+  (format t "  --base <addr>        Assemble as if loaded at <addr> instead of 0~%")
+  (format t "                       (decimal or 0x-prefixed hex; only valid for -o/hexdump~%")
+  (format t "                       output, not with -r/--ui/--rtl which always run at 0)~%")
   (format t "  -v, --verbose        Verbose output~%")
   (format t "  -h, --help           Show this help message~%")
   (format t "~%Source is always preprocessed via clang -E -P before compilation.~%")
@@ -65,7 +73,9 @@
   (format t "  lrcc --ui --conf-socket /tmp/my.sock hello.c # With conf bus (custom socket)~%")
   (format t "  lrcc -I include -Os -r hello.c               # With stdio.h, optimized for size~%")
   (format t "  lrcc -r --imem-size 4096 --dmem-size 8192 hello.c  # Compile and run with a smaller memory map~%")
-  (format t "  lrcc -O -r hello.c                           # Full optimization for speed~%"))
+  (format t "  lrcc -O -r hello.c                           # Full optimization for speed~%")
+  (format t "  lrcc -I include -Os --rtl hello.c            # Run in the MyHDL RTL simulation~%")
+  (format t "  lrcc -o hello.hex --base 0x200 hello.c       # Assemble for load address 512~%"))
 
 (defun pretty-print-asm (asm-list)
   "Pretty print assembly code in a readable format"
@@ -109,13 +119,13 @@
                          (format out " ")))
             (format out "|~%")))))
 
-(defun write-vmem-file (bytes filename)
+(defun write-vmem-file (bytes filename &optional (base 0))
   "Write bytes in Verilog $readmemh format: one hex byte per line,
-   with an @0 origin so sparse loading also works."
+   with an @<base> origin so sparse/offset loading also works."
   (let* ((vec (coerce bytes 'vector))
          (len (length vec)))
     (with-open-file (out filename :direction :output :if-exists :supersede)
-      (format out "@00000000~%")
+      (format out "@~8,'0x~%" base)
       (loop for i from 0 below len
             do (format out "~2,'0x~%" (aref vec i))))))
 
@@ -154,12 +164,16 @@
          (dmem-size nil)
          (run-program nil)
          (run-ui nil)
+         (run-rtl nil)
+         (rtl-cycles 20000)
+         (rtl-trace nil)
          (optimize nil)
          (peephole nil)
          (optimize-size t)
          (eliminate-dead t)
          (verbose nil)
          (include-dirs nil)
+         (base 0)
          (source-file nil))
 
     ;; Parse command line arguments
@@ -181,6 +195,20 @@
                (setf run-program t))
               ((string= arg "--ui")
                (setf run-ui t))
+              ((string= arg "--rtl")
+               (setf run-rtl t))
+              ((string= arg "--rtl-cycles")
+               (if args
+                   (let ((n (parse-integer (pop args) :junk-allowed t)))
+                     (unless (and n (> n 0))
+                       (format *error-output* "Error: --rtl-cycles requires a positive integer argument~%")
+                       (sb-ext:exit :code 1))
+                     (setf rtl-cycles n))
+                   (progn
+                     (format *error-output* "Error: --rtl-cycles requires an argument~%")
+                     (sb-ext:exit :code 1))))
+              ((string= arg "--rtl-trace")
+               (setf rtl-trace t))
               ((string= arg "--conf")
                (setf conf-socket "/tmp/coe_emulator.sock"))
               ((string= arg "--no-conf")
@@ -233,6 +261,16 @@
                (setf peephole nil))
               ((string= arg "-fkeep-unused-functions")
                (setf eliminate-dead nil))
+              ((string= arg "--base")
+               (if args
+                   (handler-case
+                       (setf base (parse-address (pop args)))
+                     (error ()
+                       (format *error-output* "Error: --base requires a valid decimal or 0x-hex address~%")
+                       (sb-ext:exit :code 1)))
+                   (progn
+                     (format *error-output* "Error: --base requires an argument~%")
+                     (sb-ext:exit :code 1))))
               ((or (string= arg "-v") (string= arg "--verbose"))
                (setf verbose t))
               ((string= arg "-I")
@@ -264,6 +302,12 @@
       (format *error-output* "Error: Source file not found: ~a~%" source-file)
       (sb-ext:exit :code 1))
 
+    ;; --base only affects assembled machine-code layout; the emulator, curses
+    ;; UI, and RTL simulation all always run a program image loaded at 0.
+    (when (and (/= base 0) (or run-program run-ui run-rtl))
+      (format *error-output* "Error: --base cannot be used with -r/--ui/--rtl~%")
+      (sb-ext:exit :code 1))
+
     ;; Preprocess with cpp
     (let ((source (cpp-preprocess source-file (nreverse include-dirs)))
           (mem-size (when (or imem-size dmem-size)
@@ -290,6 +334,44 @@
                                                     :if-exists :supersede)
                    (pretty-print-asm asm))
                  (pretty-print-asm asm))))
+
+          (run-rtl
+           (when verbose
+             (format t "Compiling ~a...~%" source-file))
+           (let* ((mcode (compile-c-to-asm source :verbose verbose
+                                                   :optimize optimize
+                                                   :optimize-size optimize-size
+                                                   :peephole peephole
+                                                   :eliminate-dead eliminate-dead
+                                                   :mem-size mem-size))
+                  (mem-file (format nil "/tmp/lrcc-rtl-~a-~a.mem"
+                                     (get-universal-time) (random 1000000)))
+                  (rtl-root (merge-pathnames "rtl/" cl-user::*lrcc-root*))
+                  (myhdl-dir (merge-pathnames "myhdl/" rtl-root))
+                  (literisc-dir (merge-pathnames "literisc/" rtl-root))
+                  (run-script (merge-pathnames "run_c_program.py" literisc-dir))
+                  (pythonpath (format nil "~a:~a"
+                                       (namestring myhdl-dir) (namestring rtl-root)))
+                  (py-args (append (list (namestring run-script) mem-file
+                                          "--cycles" (write-to-string rtl-cycles))
+                                    (when imem-size
+                                      (list "--imem-size" (write-to-string imem-size)))
+                                    (when dmem-size
+                                      (list "--dmem-size" (write-to-string dmem-size)))
+                                    (when rtl-trace (list "--trace"))))
+                  (exit-code 1))
+             (write-vmem-file mcode mem-file)
+             (unwind-protect
+                 (let ((proc (sb-ext:run-program "python3" py-args
+                                                  :search t
+                                                  :wait t
+                                                  :output *standard-output*
+                                                  :error *error-output*
+                                                  :environment (cons (format nil "PYTHONPATH=~a" pythonpath)
+                                                                      (sb-ext:posix-environ)))))
+                   (setf exit-code (sb-ext:process-exit-code proc)))
+               (ignore-errors (delete-file mem-file)))
+             (sb-ext:exit :code exit-code)))
 
           (run-program
            (when verbose
@@ -340,7 +422,8 @@
                                                  :optimize-size optimize-size
                                                  :peephole peephole
                                                  :eliminate-dead eliminate-dead
-                                                 :mem-size mem-size)))
+                                                 :mem-size mem-size
+                                                 :base base)))
              (if output-file
                  (progn
                    (cond
@@ -348,12 +431,18 @@
                       (write-binary-file mcode output-file))
                      ((or (string-suffix-p output-file ".mem")
                           (string-suffix-p output-file ".vmem"))
-                      (write-vmem-file mcode output-file))
+                      (write-vmem-file mcode output-file base))
                      (t
                       (write-hex-file mcode output-file)))
                    (when verbose
                      (format t "Wrote ~a bytes to ~a~%" (length mcode) output-file)))
                  (lr-asm:hexdump mcode)))))))))
+
+(defun parse-address (str)
+  "Parse a decimal or 0x-prefixed hex address string"
+  (if (and (> (length str) 1) (char= (char str 0) #\0) (char-equal (char str 1) #\x))
+      (parse-integer str :start 2 :radix 16)
+      (parse-integer str)))
 
 (defun string-suffix-p (string suffix)
   "Check if STRING ends with SUFFIX"

@@ -1110,10 +1110,10 @@
                (and (listp instr) (eq (first instr) :comment)))
              asm))
 
-(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t) (mem-size nil))
-  "Compile C source and assemble to machine code"
+(defun compile-c-to-asm (source &key (verbose nil) (optimize nil) (optimize-size t) (peephole nil) (eliminate-dead t) (mem-size nil) (base 0))
+  "Compile C source and assemble to machine code, laid out starting at address BASE"
   (let ((asm (compile-c source :verbose verbose :annotate nil :optimize optimize :optimize-size optimize-size :peephole peephole :eliminate-dead eliminate-dead :mem-size mem-size)))
-    (assemble (strip-asm-comments asm) verbose)))
+    (assemble (strip-asm-comments asm) verbose nil base)))
 
 (defun run-c-program (source &key (verbose nil) (max-cycles 10000) (optimize nil) (optimize-size t) (peephole nil) (conf-socket nil) (conf-mem-size nil) (eliminate-dead t) (imem-size nil) (dmem-size nil))
   "Compile, assemble, and run a C program, returning the result.
