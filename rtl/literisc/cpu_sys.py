@@ -199,6 +199,7 @@ always @(posedge %(clk)s) begin
         `PA_PRINT_PA_TOP $write(" ", $time, "ns. RTL_INFO!\\n");
         `endif
         `endif
+    end
 end
 '''
 
