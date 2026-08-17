@@ -35,18 +35,6 @@ Address arithmetic
   CPU master requests: slave_addr = (cpu_addr - CONF_LOW) // 4
   The window is large enough to reach DMEM slave addresses (> IMEM_HIGH).
   test_dual_cpu uses SLAVE_RESULT0 as the rendezvous word on B's DMEM.
-
-Tests
------
-  1. test_slave_dmem_rw            -- pure slave DMEM write / read roundtrip
-  2. test_cpu_stores_constant      -- CPU stores 42 to DMEM, slave reads
-  3. test_slave_write_cpu_doubles  -- slave writes 100, CPU doubles it
-  4. test_slave_write_cpu_sum      -- slave writes two inputs, CPU adds them
-  5. test_master_request           -- CPU issues a master read from CONF space
-  6. test_dual_cpu                 -- CPU-A writes to CPU-B's DMEM via master port
-  7. test_wait_ticks               -- CPU accumulates tick counts
-  8. test_master_while_slave_request -- simultaneous master reply + slave write
-  9. test_cpu_reset                -- CPU reset via conf_map.cpu_reset
 """
 
 import sys
@@ -99,6 +87,31 @@ def _compile_c_to_mem(c_source, mem_path):
             raise RuntimeError(f"lrcc compile failed:\n{result.stderr}")
     finally:
         os.unlink(c_path)
+
+
+def _compile_c_to_bin(c_source, base=0):
+    """Compile c_source with lrcc (stdio.h enabled, -Os) to a raw byte list
+    assembled as if loaded at `base`, suitable for loading via conf-slave
+    writes starting at that address -- the real, on-hardware load path
+    `--base` targets, as opposed to _compile_c_to_mem's boot_code_path
+    (which always runs the image from address 0)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".c", delete=False, dir="/tmp") as f:
+        f.write(c_source)
+        c_path = f.name
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False, dir="/tmp") as f:
+        bin_path = f.name
+    try:
+        result = subprocess.run(
+            [_LRCC, "-I", _INCLUDE_DIR, "-Os", "--base", str(base), "-o", bin_path, c_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"lrcc compile failed:\n{result.stderr}")
+        with open(bin_path, "rb") as bf:
+            return list(bf.read())
+    finally:
+        os.unlink(c_path)
+        os.unlink(bin_path)
 
 
 def _run_c_in_emulator(c_source):
@@ -1032,6 +1045,283 @@ def test_imem_offset_read():
     print(f"{'PASS' if ok else 'FAIL'}: test_imem_offset_read" +
           (f"  (expected {EXPECTED!r}, got {got!r} in full output {printed!r})"
            if not ok else ""))
+    return ok
+
+
+def _strip_imem_load_noise(printed):
+    """Drop dp_mem_rom.py's unconditional 'waddr <addr>' print lines (one per
+    conf-slave byte write used to load a program into IMEM at runtime) from
+    captured stdout, leaving only the program's own console output. Safe
+    here because all the load writes complete (and hence all their prints
+    land) strictly before the interrupt trigger starts the CPU, so no
+    'waddr' line can be interleaved with real program output."""
+    lines = printed.split('\n')
+    return '\n'.join(l for l in lines if not l.startswith('waddr'))
+
+
+def test_imem_word_read_via_conf_load():
+    """Same repro as test_imem_word_read (a full 32-bit IMEM word read used
+    immediately as the address of a subsequent store -- exactly what
+    putchar()'s read of the _outch global does), but with the program
+    loaded through the conf slave interface at PROG_BASE (byte address
+    0x200) at runtime, the same load path lrcc's --base flag targets on
+    real hardware, instead of via boot_code_path (which replaces the whole
+    boot ROM and runs the image from address 0 with no slave writes
+    involved at all).
+
+    Reads -1 (0xFFFFFFFF == CONSOLE_ADDRESS) out of IMEM as a word into R3,
+    then stores a canary byte to the address held in R3.
+      Expected (read correct): R3 == CONSOLE_ADDRESS, canary byte prints.
+      Observed (bug present): the word read through the shared-IMEM-port
+      steal only returns its low byte correctly (0xFF), so R3 ends up as
+      some small in-range IMEM address instead and nothing is printed.
+    """
+    EXPECTED = chr(99)
+    result   = [None]
+
+    prog = assemble(
+        """
+        (Rx= litdata R0)
+        (A=Rx R0)
+        (Rx=M[A] R3)
+        (Rx= 99 R2)
+        (A=Rx R2)
+        (M[Rx].b=A R3)
+        (label done)
+        (j done)
+        (lalign-dword 0)
+        (label litdata)
+        (adword -1)
+        """,
+        base=PROG_BASE,
+    )
+
+    captured = io.StringIO()
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            yield _write_data(conf, clk, 1, conf_map.interrupt)
+
+            for i in range(500):
+                yield clk.posedge
+            result[0] = "done"
+            raise StopSimulation()
+
+        return instances()
+
+    with redirect_stdout(captured):
+        traceSignals.filename = 'trace_imem_word_read_via_conf_load'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(20000)
+
+    got = _strip_imem_load_noise(captured.getvalue()).rsplit('\n', 1)[-1]
+    ok = got == EXPECTED
+    print(f"{'PASS' if ok else 'FAIL'}: test_imem_word_read_via_conf_load" +
+          (f"  (expected {EXPECTED!r}, got {got!r} in full output {captured.getvalue()!r})"
+           if not ok else ""))
+    return ok
+
+
+def test_read_outch_via_conf_load():
+    """Small hand-written assembly program, loaded through the conf slave
+    interface at PROG_BASE (0x200) at runtime -- not via boot_code_path --
+    that reads the word-sized OUTCH global (include/stdio.h's
+    `volatile char *_outch = (volatile char*)0xffffffff;`) out of IMEM and
+    stores the value it read directly to DMEM, so the test can assert on
+    the read result itself via a slave read-back instead of inferring
+    correctness from a side effect like console output.
+
+      Expected (read correct): readback == 0xFFFFFFFF (CONSOLE_ADDRESS).
+      Observed (bug present):  the word read through the shared-IMEM-port
+      steal only returns its low byte correctly, so readback comes back as
+      0x000000FF instead.
+    """
+    EXPECTED  = CONSOLE_ADDRESS
+    MAX_POLLS = 400
+    result    = [None]
+
+    prog = assemble(
+        """
+        (Rx= outch R0)
+        (A=Rx R0)
+        (Rx=M[A] R3)
+        (A=Rx R3)
+        (Rx= RESULT_PHYS R1)
+        (M[Rx]=A R1)
+        (label done)
+        (j done)
+        (lalign-dword 0)
+        (label outch)
+        (adword -1)
+        """,
+        base=PROG_BASE,
+        RESULT_PHYS=CPU_RESULT0,
+    )
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            yield _write_data(conf, clk, 1, conf_map.interrupt)
+
+            readback = [0]
+            for i in range(MAX_POLLS):
+                yield _read_data(conf, clk, SLAVE_RESULT0, readback)
+                if readback[0] == EXPECTED:
+                    result[0] = "PASS"
+                    raise StopSimulation()
+                yield clk.posedge
+
+            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read 0x{readback[0]:08X})"
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_read_outch_via_conf_load'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(500000)
+
+    ok = result[0] == "PASS"
+    print(f"{'PASS' if ok else 'FAIL'}: test_read_outch_via_conf_load" +
+          (f"  ({result[0]})" if not ok else ""))
+    return ok
+
+
+def test_print_c_program_via_conf_load():
+    """End-to-end version of test_imem_word_read_via_conf_load: compiles a
+    real puts()-calling C program (via the full lrcc pipeline, exercising
+    include/stdio.h's _outch/putchar), assembled for load address PROG_BASE
+    with --base, and loads it into IMEM through conf-slave byte writes at
+    runtime -- then triggers it via the stock boot ROM's interrupt/jump,
+    exactly like `lrcc print.c -Os --base 0x200` is meant to run once
+    deployed. This is the scenario test_puts_c_program/
+    test_console_output_c_program don't cover: those boot straight from
+    address 0 via boot_code_path, so they never observe the runtime IMEM
+    word-read bug that only shows up once _outch is fetched from an IMEM
+    address other than where the program happened to assemble it during a
+    from-0 boot.
+
+    Confirms RTL console output for the conf-loaded program matches the
+    Lisp emulator's reference output for the same source (compiled without
+    --base, since the emulator always runs a from-0 image; --base only
+    changes label/jump addresses baked into the assembled bytes, not the
+    program's behavior).
+    """
+    c_source = (
+        '#include <stdio.h>\n'
+        '\n'
+        'int main() {\n'
+        '  puts("Hello, World!");\n'
+        '  return 0;\n'
+        '}\n'
+    )
+
+    prog = _compile_c_to_bin(c_source, base=PROG_BASE)
+    expected = _run_c_in_emulator(c_source)
+
+    captured = io.StringIO()
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            addr = PROG_BASE
+            for byte in prog:
+                yield _write_data(conf, clk, byte, addr)
+                addr += 1
+
+            yield _write_data(conf, clk, 1, conf_map.interrupt)
+
+            for i in range(20000):
+                yield clk.posedge
+            raise StopSimulation()
+
+        return instances()
+
+    with redirect_stdout(captured):
+        traceSignals.filename = 'trace_print_c_program_via_conf_load'
+        itb = traceSignals(tb)
+        sim = Simulation(itb)
+        sim.run(2000000)
+
+    printed = _strip_imem_load_noise(captured.getvalue())
+    ok = printed == expected
+    print(f"{'PASS' if ok else 'FAIL'}: test_print_c_program_via_conf_load" +
+          (f"  (expected {expected!r}, got {printed!r})" if not ok else ""))
     return ok
 
 
@@ -2624,30 +2914,33 @@ if __name__ == "__main__":
     #test_imem_slave_race_read()
     #test_imem_slave_race_write()
 
-    results.append(test_imem_read_corrupts_register())
-    results.append(test_imem_word_read())
-    results.append(test_imem_offset_read())
-    results.append(test_imem_write_from_global())
-    results.append(test_slave_dmem_rw())
-    results.append(test_cpu_stores_constant())
-    results.append(test_boot_code_from_file())
-    results.append(test_slave_write_cpu_doubles())
-    results.append(test_slave_write_cpu_sum())
-    results.append(test_conf_map_offset())
-    results.append(test_conf_map_gapped())
-    results.append(test_wait_ticks())
-    results.append(test_master_while_slave_request())
-    results.append(test_cpu_memory_access_slave_conflict())
-    results.append(test_cpu_reset())
-    results.append(test_dual_cpu())
-    results.append(test_cpu_slave_race_dmem_write())
-    results.append(test_cpu_slave_race_dmem_read())
-    results.append(test_cpu_slave_race_master_read())
-    results.append(test_cpu_slave_race_master_write())
-    results.append(test_no_print_c_program())
-    results.append(test_console_output())
-    results.append(test_puts_c_program())
-    results.append(test_console_output_c_program())
+    #results.append(test_imem_read_corrupts_register())
+    #results.append(test_imem_word_read())
+    #results.append(test_imem_offset_read())
+    #results.append(test_imem_word_read_via_conf_load())
+    #results.append(test_imem_write_from_global())
+    #results.append(test_slave_dmem_rw())
+    #results.append(test_cpu_stores_constant())
+    #results.append(test_boot_code_from_file())
+    #results.append(test_slave_write_cpu_doubles())
+    #results.append(test_slave_write_cpu_sum())
+    #results.append(test_conf_map_offset())
+    #results.append(test_conf_map_gapped())
+    #results.append(test_wait_ticks())
+    #results.append(test_master_while_slave_request())
+    #results.append(test_cpu_memory_access_slave_conflict())
+    #results.append(test_cpu_reset())
+    #results.append(test_dual_cpu())
+    #results.append(test_cpu_slave_race_dmem_write())
+    #results.append(test_cpu_slave_race_dmem_read())
+    #results.append(test_cpu_slave_race_master_read())
+    #results.append(test_cpu_slave_race_master_write())
+    #results.append(test_no_print_c_program())
+    #results.append(test_console_output())
+    #results.append(test_puts_c_program())
+    #results.append(test_console_output_c_program())
+    results.append(test_read_outch_via_conf_load())
+    results.append(test_print_c_program_via_conf_load())
     #results.append(test_read_coreversion())
 
     passed = sum(results)

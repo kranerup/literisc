@@ -21,12 +21,19 @@ import tempfile
 _LITERISC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def assemble(asm_forms_str, **constants):
+def assemble(asm_forms_str, base=0, **constants):
     """Assemble Lisp assembly forms into a list of bytes.
 
     asm_forms_str:
         String of Lisp assembly forms (without outer list parens), e.g.
         "(Rx= 42 R0) (A=Rx R0) (label done) (j done)"
+
+    base:
+        Address the program will be loaded at. Label/jump targets are
+        computed as if the first byte of the returned list sits at this
+        address; the returned bytes themselves are NOT padded/offset, so
+        they can be written starting at `base` (e.g. via conf-slave writes
+        to PROG_BASE) exactly as returned.
 
     constants:
         Keyword arguments become Lisp defparameter bindings, e.g.
@@ -64,7 +71,7 @@ def assemble(asm_forms_str, **constants):
 (use-package :lr-asm)
 {defparams}
 (handler-case
-    (let ((program (assemble '({asm_forms_str}))))
+    (let ((program (assemble '({asm_forms_str}) nil nil {base})))
       (fresh-line)
       (format t "BYTES:~{{~a ~}}~%" program))
   (error (e)
