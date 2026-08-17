@@ -193,14 +193,19 @@ def console_out_inst(clk, sync_rstn, cpu_dmem_adr, dmem_wr, dmem_din):
     __verilog__ = '''
 always @(posedge %(clk)s) begin
     if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1)
-        $write("%%c", %(dmem_din)s[7:0]);
+        `ifndef SYNTHESIS
+        `ifndef NO_PRINTS
+        `PA_PRINT_PA_TOP $write("%%c", %(dmem_din)s[7:0]);
+        `PA_PRINT_PA_TOP $write(" ", $time, "ns. RTL_INFO!\\n");
+        `endif
+        `endif
 end
 '''
 
     @always(clk.posedge)
     def sim():
         if sync_rstn == 1 and cpu_dmem_adr == CONSOLE_ADDRESS and dmem_wr == 1:
-            print("%c" % (int(dmem_din) & 0xff), end='', flush=True)
+            print("%s" % chr(dmem_din & 0xff), end='', flush=True)
 
     return instances()
 
