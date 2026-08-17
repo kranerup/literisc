@@ -192,7 +192,7 @@ def console_out_inst(clk, sync_rstn, cpu_dmem_adr, dmem_wr, dmem_din):
     # pattern) while the Python side below drives plain `Simulation()` runs.
     __verilog__ = '''
 always @(posedge %(clk)s) begin
-    if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1)
+    if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1) begin
         `ifndef SYNTHESIS
         `ifndef NO_PRINTS
         `PA_PRINT_PA_TOP $write("%%c", %(dmem_din)s[7:0]);
