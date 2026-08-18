@@ -135,25 +135,36 @@ def _run_c_in_emulator(c_source):
 # Address constants
 # ---------------------------------------------------------------------------
 
-PROG_BASE = 512  # IMEM byte address where user programs are loaded
+PROG_BASE = 512  # CPU-side IMEM byte address where user programs are loaded/executed
+PROG_BASE_WORDS = PROG_BASE // 4  # conf.slave_request_address is word-addressed
 
-# Slave-side addresses: must be > IMEM_HIGH to land in DMEM.
-# CPU-side addresses  : slave_addr + DMEM_LOW.
-SLAVE_RESULT0 = IMEM_HIGH + 1        # first word of DMEM via slave
-SLAVE_RESULT1 = SLAVE_RESULT0 + 4
-SLAVE_INPUT0  = SLAVE_RESULT0 + 8
-SLAVE_INPUT1  = SLAVE_RESULT0 + 12
+# CPU-side byte addresses -- the literal values embedded into assembled
+# programs (e.g. "Rx= CPU_RESULT0 R5"), dereferenced directly by the
+# CPU's own byte-addressed load/store instructions.
+CPU_RESULT0   = IMEM_HIGH + 1        # first byte of DMEM
+CPU_RESULT1   = CPU_RESULT0 + 4
+CPU_INPUT0    = CPU_RESULT0 + 8
+CPU_INPUT1    = CPU_RESULT0 + 12
 
-CPU_RESULT0   = SLAVE_RESULT0
-CPU_RESULT1   = SLAVE_RESULT1
-CPU_INPUT0    = SLAVE_INPUT0
-CPU_INPUT1    = SLAVE_INPUT1
+# Slave-side word addresses -- conf.slave_request_address is word-addressed
+# (one conf slave transaction is always a full 32-bit word), so these are
+# just the CPU-side byte addresses above divided by 4.
+SLAVE_RESULT0 = CPU_RESULT0 // 4
+SLAVE_RESULT1 = CPU_RESULT1 // 4
+SLAVE_INPUT0  = CPU_INPUT0 // 4
+SLAVE_INPUT1  = CPU_INPUT1 // 4
 
 # CONF / master port: CONF_LOW..CONF_HIGH, large enough to reach DMEM on B.
-# CPU master requests: slave_addr = (cpu_addr - CONF_LOW) // 4
-# Use SLAVE_RESULT0 as the rendezvous — it's > IMEM_HIGH so lands in B's DMEM.
-DUAL_CPU_TARGET_CONF   = CONF_LOW + SLAVE_RESULT0      # no *4, master no longer divides by 4
-DUAL_CPU_SLAVE_ADDR_B  = SLAVE_RESULT0                  # slave sees byte offset directly
+# CPU master requests: req_addr = cpu_addr - CONF_LOW (cpu_sys.py decode()),
+# still a byte-scaled difference -- the master port does NOT divide by 4
+# before driving conf.master_request_address, which wires straight into
+# B's word-addressed slave_request_address. This only works here because
+# SLAVE_RESULT0 == conf_map.dmem_low exactly (both word-scaled), so the
+# byte-vs-word mismatch resolves to the same zero offset either way -- it
+# would NOT hold for a non-zero-offset rendezvous address without also
+# fixing cpu_sys.py's req_addr computation.
+DUAL_CPU_TARGET_CONF   = CONF_LOW + SLAVE_RESULT0
+DUAL_CPU_SLAVE_ADDR_B  = SLAVE_RESULT0
 
 # ---------------------------------------------------------------------------
 # Assemble test programs
@@ -267,6 +278,26 @@ def _read_data(conf, clk, address, out):
         yield clk.posedge
     out[0] = int(conf.slave_reply_data)
 
+def _load_program(conf, clk, prog, base_addr_words):
+    """Generator: load `prog` (a list of bytes) into IMEM starting at
+    base_addr_words, via conf slave WORD writes -- the conf slave
+    interface is word-addressed only (no sub-word/byte transactions), so
+    4 consecutive program bytes are packed little-endian into one 32-bit
+    write per transaction. base_addr_words is a WORD index (e.g.
+    PROG_BASE // 4), matching conf.slave_request_address's units -- NOT
+    the CPU-side byte address. Padded with zero bytes if len(prog) isn't
+    a multiple of 4."""
+    padded = list(prog) + [0] * (-len(prog) % 4)
+    addr = base_addr_words
+    for i in range(0, len(padded), 4):
+        word = (padded[i]
+                 | (padded[i + 1] << 8)
+                 | (padded[i + 2] << 16)
+                 | (padded[i + 3] << 24))
+        yield _write_data(conf, clk, word, addr)
+        addr += 1
+
+
 def print_program_hex(name, prog_bytes):
     """Print an assembled program as a hexdump."""
     print(f"\n{name} ({len(prog_bytes)} bytes):")
@@ -367,10 +398,7 @@ def test_cpu_stores_constant():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in _PROG_STORE_CONSTANT:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_STORE_CONSTANT, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
@@ -1122,10 +1150,7 @@ def test_imem_word_read_via_conf_load():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
@@ -1163,9 +1188,17 @@ def test_read_outch_via_conf_load():
       Observed (bug present):  the word read through the shared-IMEM-port
       steal only returns its low byte correctly, so readback comes back as
       0x000000FF instead.
+
+    Deliberately does NOT poll the slave interface while the CPU is
+    running (unlike most other tests here) -- cpu_sys.py's
+    wait_for_slave() force-stalls the CPU whenever a conf slave
+    transaction is in flight, which corrupts this specific multi-cycle
+    IMEM word read if a slave read/write lands mid-sequence. That's a
+    separate, already-documented race (see the TODOs at the top of
+    cpu_sys.py), not the bug this test targets, so it just waits a fixed
+    number of idle cycles and then does a single read-back at the end.
     """
     EXPECTED  = CONSOLE_ADDRESS
-    MAX_POLLS = 400
     result    = [None]
 
     prog = assemble(
@@ -1210,22 +1243,19 @@ def test_read_outch_via_conf_load():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
-            readback = [0]
-            for i in range(MAX_POLLS):
-                yield _read_data(conf, clk, SLAVE_RESULT0, readback)
-                if readback[0] == EXPECTED:
-                    result[0] = "PASS"
-                    raise StopSimulation()
+            for i in range(500):
                 yield clk.posedge
 
-            result[0] = f"FAIL: timeout after {MAX_POLLS} polls (last read 0x{readback[0]:08X})"
+            readback = [0]
+            yield _read_data(conf, clk, SLAVE_RESULT0, readback)
+            if readback[0] == EXPECTED:
+                result[0] = "PASS"
+            else:
+                result[0] = f"FAIL: expected 0x{EXPECTED:08X}, got 0x{readback[0]:08X}"
             raise StopSimulation()
 
         return instances()
@@ -1299,10 +1329,7 @@ def test_print_c_program_via_conf_load():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
@@ -1421,6 +1448,222 @@ def test_imem_write_from_global():
     return ok
 
 
+def test_push_pop_registers():
+    """Minimal repro for the multi-register `push R0..Rn` / `pop R0..Rn`
+    instructions (README.md second-level opcodes 4/5: "for (r=R0..Rn) {
+    sp = sp - 4; M[sp].l = r; }" / "for (r=Rn..R0) { r = M[sp].l; sp = sp
+    + 4; }").
+
+    Sets up SP (R15 -- see cpu.py's SP=15 / c-codegen.lisp's "SP: Stack
+    pointer (R15)"; the top-level README's R14/R15 diagram is stale
+    relative to the actual, self-consistent cpu.py/assembler.lisp/
+    c-codegen.lisp convention) to a safe DMEM address, since it resets to
+    0 like every other register and is never implicitly initialized by
+    hardware -- exactly what the real compiler does at program startup
+    (c-codegen.lisp: `(emit \`(Rx= ,stack-top SP))`).
+
+    Sets R0/R1/R2 to distinct known values, pushes R0..R2, zeroes all
+    three registers, pops R0..R2 back, then stores each register to its
+    own DMEM word so the test can read them all back via the conf slave
+    interface.
+      Expected (push/pop correct): (R0, R1, R2) == (111, 222, 333).
+      Observed (bug present): registers come back as (0, 0, 0) -- the
+      push/pop round trip doesn't restore them at all.
+
+    Boots straight from address 0 (boot_code_path), so this is purely a
+    cpu.py control-path repro -- no conf-slave loading, no IMEM word
+    reads involved, isolating it from the separate bugs those exercise.
+    """
+    RESULT0 = CPU_RESULT0
+    RESULT1 = CPU_RESULT0 + 4
+    RESULT2 = CPU_RESULT0 + 8
+    SP_INIT = DMEM_HIGH - 63  # word-aligned, comfortably inside DMEM
+    EXPECTED = (111, 222, 333)
+    result = [None]
+
+    prog = assemble(
+        """
+        (Rx= SP_INIT SP)
+        (Rx= 111 R0)
+        (Rx= 222 R1)
+        (Rx= 333 R2)
+        (push-r R2)
+        (Rx= 0 R0)
+        (Rx= 0 R1)
+        (Rx= 0 R2)
+        (pop-r R2)
+        (Rx= RESULT0 R5)
+        (A=Rx R0)
+        (M[Rx]=A R5)
+        (Rx= RESULT1 R5)
+        (A=Rx R1)
+        (M[Rx]=A R5)
+        (Rx= RESULT2 R5)
+        (A=Rx R2)
+        (M[Rx]=A R5)
+        (label done)
+        (j done)
+        """,
+        SP_INIT=SP_INIT, RESULT0=RESULT0, RESULT1=RESULT1, RESULT2=RESULT2,
+    )
+
+    boot_hex_path = "push_pop_registers.hex"
+    with open(boot_hex_path, "w") as f:
+        for i, byte in enumerate(prog):
+            f.write(f"{byte:02x} ")
+            if i % 16 == 15:
+                f.write("\n")
+        f.write("\n")
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map,
+                        boot_code_path=boot_hex_path)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            for i in range(500):
+                yield clk.posedge
+
+            r0 = [0]; r1 = [0]; r2 = [0]
+            yield _read_data(conf, clk, SLAVE_RESULT0, r0)
+            yield _read_data(conf, clk, SLAVE_RESULT0 + 1, r1)
+            yield _read_data(conf, clk, SLAVE_RESULT0 + 2, r2)
+            result[0] = (r0[0], r1[0], r2[0])
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_push_pop_registers'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(20000)
+
+    ok = result[0] == EXPECTED
+    print(f"{'PASS' if ok else 'FAIL'}: test_push_pop_registers" +
+          (f"  (expected {EXPECTED}, got {result[0]})" if not ok else ""))
+    return ok
+
+
+def test_push_pop_registers_via_conf_load():
+    """Same repro as test_push_pop_registers, but the program is loaded
+    through the conf slave interface at PROG_BASE (byte address 0x200) at
+    runtime -- assembled with base=PROG_BASE and loaded via _load_program
+    + the stock boot ROM's interrupt/jump, the same way
+    test_cpu_stores_constant and the other conf-load tests do -- instead
+    of via boot_code_path (which replaces the whole boot ROM and runs the
+    image from address 0, no slave writes involved at all).
+
+      Expected (push/pop correct): (R0, R1, R2) == (111, 222, 333).
+      Observed (bug present): registers come back as (0, 0, 0), same as
+      the boot-loaded version -- this is a cpu.py control-path bug, not
+      an IMEM-loading/addressing one, so it shouldn't matter whether the
+      program got here via boot_code_path or conf slave writes.
+
+    Also sets up SP (R15, see test_push_pop_registers) to a safe DMEM
+    address before using push-r/pop-r, same as the boot-loaded version.
+    """
+    RESULT0 = CPU_RESULT0
+    RESULT1 = CPU_RESULT0 + 4
+    RESULT2 = CPU_RESULT0 + 8
+    SP_INIT = DMEM_HIGH - 63  # word-aligned, comfortably inside DMEM
+    EXPECTED = (111, 222, 333)
+    result = [None]
+
+    prog = assemble(
+        """
+        (Rx= SP_INIT SP)
+        (Rx= 111 R0)
+        (Rx= 222 R1)
+        (Rx= 333 R2)
+        (push-r R2)
+        (Rx= 0 R0)
+        (Rx= 0 R1)
+        (Rx= 0 R2)
+        (pop-r R2)
+        (Rx= RESULT0 R5)
+        (A=Rx R0)
+        (M[Rx]=A R5)
+        (Rx= RESULT1 R5)
+        (A=Rx R1)
+        (M[Rx]=A R5)
+        (Rx= RESULT2 R5)
+        (A=Rx R2)
+        (M[Rx]=A R5)
+        (label done)
+        (j done)
+        """,
+        base=PROG_BASE,
+        SP_INIT=SP_INIT, RESULT0=RESULT0, RESULT1=RESULT1, RESULT2=RESULT2,
+    )
+
+    def tb():
+        clk  = Signal(bool())
+        rstn = signal()
+        axi  = Axi4(asize=16, dsize=32, idsize=1)
+        conf = Conf()
+        instr_trace = Signal(modbv(0)[69:])
+        conf_map = ConfMap()
+        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
+
+        @always(clk.posedge)
+        def inc_ticks():
+            conf.ticks.next = conf.ticks + 1
+
+        @always(delay(10))
+        def clk_gen():
+            clk.next = not clk
+
+        @instance
+        def seq():
+            rstn.next = 0
+            yield clk.posedge
+            rstn.next = 1
+            yield clk.posedge
+
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
+
+            yield _write_data(conf, clk, 1, conf_map.interrupt)
+
+            for i in range(500):
+                yield clk.posedge
+
+            r0 = [0]; r1 = [0]; r2 = [0]
+            yield _read_data(conf, clk, SLAVE_RESULT0, r0)
+            yield _read_data(conf, clk, SLAVE_RESULT0 + 1, r1)
+            yield _read_data(conf, clk, SLAVE_RESULT0 + 2, r2)
+            result[0] = (r0[0], r1[0], r2[0])
+            raise StopSimulation()
+
+        return instances()
+
+    traceSignals.filename = 'trace_push_pop_registers_via_conf_load'
+    itb = traceSignals(tb)
+    sim = Simulation(itb)
+    sim.run(20000)
+
+    ok = result[0] == EXPECTED
+    print(f"{'PASS' if ok else 'FAIL'}: test_push_pop_registers_via_conf_load" +
+          (f"  (expected {EXPECTED}, got {result[0]})" if not ok else ""))
+    return ok
+
+
 def test_slave_write_cpu_doubles():
     """Test 3: slave writes input, CPU reads and doubles it, slave reads result."""
     INPUT_VALUE = 100
@@ -1452,10 +1695,7 @@ def test_slave_write_cpu_doubles():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in _PROG_READ_DOUBLE_WRITE:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_READ_DOUBLE_WRITE, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, INPUT_VALUE, SLAVE_INPUT0)
             yield _write_data(conf, clk, 1, conf_map.interrupt)
@@ -1516,10 +1756,7 @@ def test_slave_write_cpu_sum():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in _PROG_ADD_TWO:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_ADD_TWO, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, INPUT_A, SLAVE_INPUT0)
             yield _write_data(conf, clk, INPUT_B, SLAVE_INPUT1)
@@ -1556,29 +1793,36 @@ def test_conf_map_variant(imem_depth, dmem_depth, imem_low, dmem_low, label):
     shape as test_slave_write_cpu_sum, but with a conf_map whose imem_low/
     dmem_low are nonzero (and, for the "gapped" variant, not even adjacent
     to each other). conf_slave_imem_wadr/conf_slave_dmem_wadr are computed
-    as `slave_pending_address - conf_map.imem_low/dmem_low`, entirely
+    as `(slave_pending_address - conf_map.imem_low/dmem_low) * 4` (the
+    conf slave interface is word-addressed; the *4 converts to the byte
+    offset the CPU's own byte-addressed memory actually uses), entirely
     independent of cpu_sys's own internal address decode (which always
     starts IMEM at physical 0) -- so the slave-side base is a pure
     addressing convention that must be exercised at nonzero/non-contiguous
     values, not just the imem_low=0 default every other test uses.
 
-    imem_low/dmem_low: slave-bus base addresses for IMEM/DMEM (arbitrary,
-    independent of each other and of the CPU's own zero-based view).
+    imem_low/dmem_low: slave-bus WORD base addresses for IMEM/DMEM
+    (arbitrary, independent of each other and of the CPU's own zero-based
+    byte view).
     """
     mm = compute_memory_map(imem_depth, dmem_depth)  # CPU-side view: IMEM_LOW=0, DMEM_LOW=imem_depth
 
-    imem_high = imem_low + imem_depth - 1
-    dmem_high = dmem_low + dmem_depth - 1
+    # imem_low/dmem_low (like conf_map's fields generally) are word
+    # addresses, but imem_depth/dmem_depth (like cpu_sys's own params)
+    # are byte counts -- divide by 4 before combining the two.
+    imem_high = imem_low + imem_depth // 4 - 1
+    dmem_high = dmem_low + dmem_depth // 4 - 1
 
-    # Physical DMEM word offsets used by this test (same word, addressed
-    # differently by the slave bus vs. the CPU's own program).
+    # Physical DMEM byte offsets used by this test (same word, addressed
+    # differently by the slave bus [word-addressed, // 4] vs. the CPU's
+    # own program [byte-addressed, used as-is]).
     phys_result0 = 0x10
     phys_input0  = 0x18
     phys_input1  = 0x1C
 
-    slave_result0 = dmem_low + phys_result0
-    slave_input0  = dmem_low + phys_input0
-    slave_input1  = dmem_low + phys_input1
+    slave_result0 = dmem_low + phys_result0 // 4
+    slave_input0  = dmem_low + phys_input0 // 4
+    slave_input1  = dmem_low + phys_input1 // 4
 
     cpu_result0 = mm.DMEM_LOW + phys_result0
     cpu_input0  = mm.DMEM_LOW + phys_input0
@@ -1637,10 +1881,7 @@ def test_conf_map_variant(imem_depth, dmem_depth, imem_low, dmem_low, label):
             rstn.next = 1
             yield clk.posedge
 
-            addr = imem_low + PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, imem_low + PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, INPUT_A, slave_input0)
             yield _write_data(conf, clk, INPUT_B, slave_input1)
@@ -1721,10 +1962,7 @@ def test_master_request():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in _PROG_MASTER_REQUEST_ADDRESS_0:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_MASTER_REQUEST_ADDRESS_0, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
@@ -1796,10 +2034,7 @@ def test_wait_ticks():
             rstn.next = 1
             yield clk.posedge
 
-            addr = PROG_BASE
-            for byte in _PROG_READ_TICKS:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_READ_TICKS, PROG_BASE_WORDS)
 
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
@@ -1931,10 +2166,7 @@ def test_dual_cpu():
             print(DUAL_CPU_TARGET_CONF)
 
             # write program into CPU-A's IMEM starting at PROG_BASE
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf_a, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf_a, clk, prog, PROG_BASE_WORDS)
 
             # trigger CPU-A boot jump to PROG_BASE
             yield _write_data(conf_a, clk, 1, conf_map_a.interrupt)
@@ -2020,10 +2252,7 @@ def test_master_while_slave_request():
             yield clk.posedge
 
             # load program into IMEM
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             for _ in range(20):
                 yield clk.posedge
@@ -2132,10 +2361,7 @@ def test_cpu_reset():
             yield _write_data(conf, clk, 0, SLAVE_RESULT0)
 
             # --- first run ---
-            addr = PROG_BASE
-            for byte in _PROG_INCREMENT_ONCE:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, _PROG_INCREMENT_ONCE, PROG_BASE_WORDS)
             yield _write_data(conf, clk, 1, conf_map.interrupt)
 
             MAX_POLLS = 400
@@ -2193,10 +2419,14 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
     saturated, CPU may starve for DMEM access and never make progress).
     Larger values give the CPU windows to fetch/execute between accesses.
 
-    Memory layout (slave addresses, all > IMEM_HIGH so they land in DMEM):
+    Memory layout, all in the DMEM region past CPU_RESULT0/SLAVE_RESULT0
+    (byte addresses for the CPU's own program, word addresses -- // 4 --
+    for the slave port):
       SLAVE_DONE      : done flag, CPU writes DONE_MAGIC here when finished
-      CPU region      : SLAVE_CPU_BASE  + 4*i   (written by CPU program)
-      TB region       : SLAVE_TB_BASE   + 4*i   (written by TB via slave port)
+      CPU region      : CPU_CPU_BASE + 4*i (byte, written by CPU program),
+                        SLAVE_CPU_BASE + i (word, read back via slave)
+      TB region       : SLAVE_TB_BASE + i  (word, written by TB via slave
+                        port only -- the CPU program never touches it)
 
     Verification: after done flag is seen, TB reads back both regions via
     the slave port and compares against expected values.
@@ -2204,12 +2434,12 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
     N          = 16
     DONE_MAGIC = 0xD1
 
-    SLAVE_DONE     = SLAVE_RESULT0
-    SLAVE_CPU_BASE = SLAVE_RESULT0 + 0x100
-    SLAVE_TB_BASE  = SLAVE_RESULT0 + 0x200
+    CPU_DONE     = CPU_RESULT0
+    CPU_CPU_BASE = CPU_RESULT0 + 0x100
 
-    CPU_DONE     = SLAVE_DONE
-    CPU_CPU_BASE = SLAVE_CPU_BASE
+    SLAVE_DONE     = SLAVE_RESULT0
+    SLAVE_CPU_BASE = SLAVE_RESULT0 + 0x100 // 4
+    SLAVE_TB_BASE  = SLAVE_RESULT0 + 0x200 // 4
 
     def cpu_val(i):
         return 0xA000 + i * 3 + 1
@@ -2268,10 +2498,7 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
             yield _write_data(conf, clk, 0, SLAVE_DONE)
 
             # load program into IMEM
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             # trigger boot jump -- CPU starts storing to its region
             yield _write_data(conf, clk, 1, conf_map.interrupt)
@@ -2281,13 +2508,13 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
             # gap so the CPU gets memory cycles in between
             print(SLAVE_TB_BASE)
             for i in range(N):
-                yield _write_data(conf, clk, tb_val(i), SLAVE_TB_BASE + 4 * i)
+                yield _write_data(conf, clk, tb_val(i), SLAVE_TB_BASE + i)
                 for _ in range(slave_gap_cycles):
                     yield clk.posedge
                 # immediate read-back of the previous slot for extra traffic
                 if i > 0:
                     rb = [0]
-                    yield _read_data(conf, clk, SLAVE_TB_BASE + 4 * (i - 1), rb)
+                    yield _read_data(conf, clk, SLAVE_TB_BASE + (i - 1), rb)
                     if rb[0] != tb_val(i - 1):
                         result[0] = (f"FAIL: inline slave readback slot {i-1}: "
                                      f"got 0x{rb[0]:08X}, expected 0x{tb_val(i-1):08X}")
@@ -2312,17 +2539,17 @@ def test_cpu_memory_access_slave_conflict(slave_gap_cycles=0):
             # verify the CPU's N stores via the slave port
             for i in range(N):
                 rb = [0]
-                yield _read_data(conf, clk, SLAVE_CPU_BASE + 4 * i, rb)
+                yield _read_data(conf, clk, SLAVE_CPU_BASE + i, rb)
                 if rb[0] != cpu_val(i):
                     result[0] = (f"FAIL: CPU store slot {i} at slave addr "
-                                 f"0x{SLAVE_CPU_BASE + 4*i:04X}: got 0x{rb[0]:08X}, "
+                                 f"0x{SLAVE_CPU_BASE + i:04X}: got 0x{rb[0]:08X}, "
                                  f"expected 0x{cpu_val(i):08X}")
                     raise StopSimulation()
 
             # verify the TB's slave writes weren't corrupted by CPU traffic
             for i in range(N):
                 rb = [0]
-                yield _read_data(conf, clk, SLAVE_TB_BASE + 4 * i, rb)
+                yield _read_data(conf, clk, SLAVE_TB_BASE + i, rb)
                 if rb[0] != tb_val(i):
                     result[0] = (f"FAIL: slave write slot {i}: got 0x{rb[0]:08X}, "
                                  f"expected 0x{tb_val(i):08X}")
@@ -2496,10 +2723,7 @@ def test_cpu_slave_race(cpu_op, max_delay=20):
             # only the CPU core (PC, registers, pipeline state) -- IMEM and
             # DMEM survive -- so every sweep point below just re-triggers
             # the same already-loaded program.
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             for idx, (slave_op, d) in enumerate(sweep_points):
                 if idx > 0:
@@ -2666,6 +2890,10 @@ def test_imem_slave_race(cpu_op, max_delay=40):
 
     IMEM_SCRATCH_CPU = PROG_BASE + 256  # CPU's own imem scratch byte -- clear of the program
     IMEM_RACE_ADDR   = PROG_BASE + 512  # slave's race target -- clear of program + scratch
+    # conf.slave_request_address is word-addressed; these are the same
+    # locations' word indices, for the _write_data calls below.
+    IMEM_SCRATCH_SLAVE = IMEM_SCRATCH_CPU // 4
+    IMEM_RACE_ADDR_SLAVE = IMEM_RACE_ADDR // 4
 
     RESULT_PHYS  = CPU_RESULT0  # holds the CPU's own imem op result
     RESULT2_PHYS = CPU_RESULT1  # holds the CPU's read-back of the slave's race site
@@ -2738,10 +2966,7 @@ def test_imem_slave_race(cpu_op, max_delay=40):
             # Load the program into IMEM ONCE -- conf_map.cpu_reset resets
             # only the CPU core, IMEM survives, and nothing else in this
             # test ever touches PROG_BASE.
-            addr = PROG_BASE
-            for byte in prog:
-                yield _write_data(conf, clk, byte, addr)
-                addr += 1
+            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
 
             for d in range(max_delay + 1):
                 if d > 0:
@@ -2760,10 +2985,10 @@ def test_imem_slave_race(cpu_op, max_delay=40):
                 # stale correct value from an earlier sweep point.
                 yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT0)
                 yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT1)
-                yield _write_data(conf, clk, SENTINEL, IMEM_SCRATCH_CPU)
-                yield _write_data(conf, clk, SENTINEL, IMEM_RACE_ADDR)
+                yield _write_data(conf, clk, SENTINEL, IMEM_SCRATCH_SLAVE)
+                yield _write_data(conf, clk, SENTINEL, IMEM_RACE_ADDR_SLAVE)
                 if cpu_op == 'imem_read':
-                    yield _write_data(conf, clk, RACE_VALUE, IMEM_SCRATCH_CPU)
+                    yield _write_data(conf, clk, RACE_VALUE, IMEM_SCRATCH_SLAVE)
 
                 # trigger boot jump
                 yield _write_data(conf, clk, 1, conf_map.interrupt)
@@ -2773,7 +2998,7 @@ def test_imem_slave_race(cpu_op, max_delay=40):
                 for _ in range(d):
                     yield clk.posedge
 
-                yield _write_data(conf, clk, SLAVE_RACE_WRITE_VAL, IMEM_RACE_ADDR)
+                yield _write_data(conf, clk, SLAVE_RACE_WRITE_VAL, IMEM_RACE_ADDR_SLAVE)
 
                 # No polling: wait a fixed, generous window (no further
                 # slave traffic) for the CPU to reach its TICK_WAIT block
@@ -2914,11 +3139,6 @@ if __name__ == "__main__":
     #test_imem_slave_race_read()
     #test_imem_slave_race_write()
 
-    #results.append(test_imem_read_corrupts_register())
-    #results.append(test_imem_word_read())
-    #results.append(test_imem_offset_read())
-    #results.append(test_imem_word_read_via_conf_load())
-    #results.append(test_imem_write_from_global())
     #results.append(test_slave_dmem_rw())
     #results.append(test_cpu_stores_constant())
     #results.append(test_boot_code_from_file())
@@ -2935,13 +3155,20 @@ if __name__ == "__main__":
     #results.append(test_cpu_slave_race_dmem_read())
     #results.append(test_cpu_slave_race_master_read())
     #results.append(test_cpu_slave_race_master_write())
-    #results.append(test_no_print_c_program())
-    #results.append(test_console_output())
-    #results.append(test_puts_c_program())
-    #results.append(test_console_output_c_program())
+    results.append(test_no_print_c_program())
+    results.append(test_console_output())
+    results.append(test_puts_c_program())
+    results.append(test_console_output_c_program())
     results.append(test_read_outch_via_conf_load())
     results.append(test_print_c_program_via_conf_load())
-    #results.append(test_read_coreversion())
+    results.append(test_read_coreversion())
+    results.append(test_imem_read_corrupts_register())
+    results.append(test_imem_word_read())
+    results.append(test_imem_offset_read())
+    results.append(test_imem_word_read_via_conf_load())
+    results.append(test_imem_write_from_global())
+    results.append(test_push_pop_registers())
+    results.append(test_push_pop_registers_via_conf_load())
 
     passed = sum(results)
     total  = len(results)

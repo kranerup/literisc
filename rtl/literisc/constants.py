@@ -14,8 +14,8 @@ CPU_DMEM_DATA_BITS = 32
 
 CONSOLE_ADDRESS = 0xFFFFFFFF
 
-IMEM_DEPTH  = 8192
-DMEM_DEPTH  = 32768
+IMEM_DEPTH  = 2048
+DMEM_DEPTH  = 8192
 IO_DEPTH    = 100
 N_SPECIAL_REGS = 4   # IRQ, TICK, INTERRUPT, CPU_RESET
 CONF_WINDOW_SIZE = 2**24 - 2**16   # size of the CONF bus window (matches prior CONF_HIGH - CONF_LOW)
@@ -24,14 +24,11 @@ class MemoryMap:
     def __init__(self, imem_depth, dmem_depth):
         assert imem_depth > 0 and dmem_depth > 0, "imem_depth and dmem_depth must be positive"
 
-        self.IMEM_DEPTH = imem_depth
-        self.DMEM_DEPTH = dmem_depth
-
         self.IMEM_LOW  = 0
-        self.IMEM_HIGH = imem_depth - 1
+        self.IMEM_HIGH = imem_depth * 4 - 1
 
         self.DMEM_LOW  = self.IMEM_HIGH + 1
-        self.DMEM_HIGH = self.DMEM_LOW + dmem_depth - 1
+        self.DMEM_HIGH = self.DMEM_LOW + dmem_depth * 4 - 1
 
         self.IO_LOW  = self.DMEM_HIGH + 1
         self.IO_HIGH = self.IO_LOW + IO_DEPTH - 1

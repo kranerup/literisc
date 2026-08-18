@@ -77,6 +77,22 @@ def rom(
     output_flops = 0,
     name = None ):
 
+    # `depth` is a WORD count (matches dp_mem_rom/dp_mem's convention), but
+    # this function's own address math is genuinely byte-scale: raddr/
+    # waddr are real CPU byte addresses, and content[] is a byte-packed
+    # array -- so convert once, up front.
+    depth_bytes = depth * 4
+
+    # The RAM half (pmem) is genuinely word addressed; r_ram_addr/w_ram_addr
+    # below are content-relative byte addresses (raddr/waddr - len(content))
+    # fed straight into it, unshifted, so a caller doing a naturally-aligned
+    # word access at some 4-byte-aligned absolute address only stays
+    # 4-byte-aligned *relative to content* if len(content) is itself a
+    # multiple of 4. Pad with NOPs (0xff) so that always holds, regardless
+    # of the boot ROM's actual assembled length.
+    if len(content) % 4 != 0:
+        content = tuple(content) + (0xff,) * (-len(content) % 4)
+
     n_rom_data = copySignal( odata )
     rom_data = copySignal( odata )
     ram_data = copySignal( odata )
@@ -89,7 +105,7 @@ def rom(
     sel_ram = signal()
     rd_ram = signal()
 
-    adr_bits = (depth-1).bit_length()
+    adr_bits = (depth_bytes-1).bit_length()
 
     if disable_rom:
         @always_comb
@@ -167,7 +183,7 @@ def rom(
         wmask = wmask,
         clk   = clk,
         clk_en = clk_en,
-        depth = depth - len(content),
+        depth = (depth_bytes - len(content)) // 4,
         name = "pmem")
 
     @always_comb
@@ -183,13 +199,6 @@ def rom(
     return instances()
 
 def console_out_inst(clk, sync_rstn, cpu_dmem_adr, dmem_wr, dmem_din):
-    # Mirrors the emulator's write-cb-write-char: a store to CONSOLE_ADDRESS
-    # prints its low byte as a character, so `printf`/`putchar` (which target
-    # _outch = (volatile char*)0xffffffff, see include/stdio.h) produce
-    # identical output whether run on the emulator or in RTL simulation.
-    # MyHDL's toVerilog can't convert chr()/%c, so the Verilog side is
-    # hand-written here (see sync_flop_signal in Common.py for the same
-    # pattern) while the Python side below drives plain `Simulation()` runs.
     __verilog__ = '''
 always @(posedge %(clk)s) begin
     if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1) begin
@@ -217,7 +226,13 @@ def cpu_sys(
         conf,
         instr_trace,
         boot_code_path = None, # read rom from this path if it isn't None,
-        conf_map = ConfMap(0, 8191, 8192, 8192 + 32768 - 1, 8192 + 32768, 8192 + 32768 + 1),
+        # ConfMap addresses are word-addressed (see conf_map.py); IMEM_DEPTH/
+        # DMEM_DEPTH are already word counts, so this default matches
+        # conf_map.py's own defaults directly, with no further scaling.
+        conf_map = ConfMap(0, IMEM_DEPTH - 1, IMEM_DEPTH,
+                            IMEM_DEPTH + DMEM_DEPTH - 1,
+                            IMEM_DEPTH + DMEM_DEPTH,
+                            IMEM_DEPTH + DMEM_DEPTH + 1),
         imem_depth = IMEM_DEPTH,
         dmem_depth = DMEM_DEPTH,
         #boot_code_path = "./lcpu_boot_code.hex",
@@ -235,11 +250,7 @@ def cpu_sys(
     imem_radr = Signal(modbv(0)[32:])
     imem_wadr = Signal(modbv(0)[32:])
     imem_din = Signal(modbv(0)[8:])
-    # IMEM's physical storage (both the boot-ROM content[] prefix and the
-    # writable dp_mem_rom extension) can natively hold/return a full word;
-    # these are full-width so a CPU-side word read (Rx=M[A]) doesn't need
-    # to be split into 4 separate byte fetches the way instruction fetch
-    # itself (genuinely 1 byte at a time, for variable-length decode) does.
+
     imem_dout = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
     imem_final_dout = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
     imem_dout_cached = Signal(modbv(0)[CPU_DMEM_DATA_BITS:])
@@ -256,6 +267,8 @@ def cpu_sys(
     dmem_rd = signal()
     dmem_wr = signal()
     dmem_wr_sz = signal(2)
+    dmem_wmask = signal(4)
+    dmem_din_shifted = signal(CPU_DMEM_DATA_BITS)
     sel_imem_src = signal()
     
     halt = signal()
@@ -506,7 +519,7 @@ def cpu_sys(
         else:
             dmem_final_radr.next    = dmem_adr
             dmem_final_wadr.next    = dmem_adr
-            dmem_final_din.next     = dmem_din
+            dmem_final_din.next     = dmem_din_shifted
             dmem_final_renable.next = dmem_renable
             dmem_final_wenable.next = dmem_wenable
             dmem_final_wmask.next   = dmem_wmask
@@ -519,13 +532,9 @@ def cpu_sys(
             imem_final_wenable.next = conf_slave_imem_wenable
             imem_final_wmask.next   = conf_slave_imem_wmask
         else:
-            imem_final_wadr.next    = dmem_adr
-            imem_final_din.next     = dmem_din
+            imem_final_wadr.next    = cpu_dmem_adr
+            imem_final_din.next     = dmem_din_shifted
             imem_final_wenable.next = imem_wenable
-            # dmem_wmask is already computed from dmem_wr_sz for regular
-            # DMEM writes -- the same CPU store that targets an IMEM
-            # address carries the same size, so reuse it rather than
-            # duplicating the byte/half-word/word -> mask logic.
             imem_final_wmask.next  = dmem_wmask
 
     @always_comb
@@ -658,16 +667,17 @@ def cpu_sys(
                         imem_wenable.next = 1
 
     # ---------------- DMEM -------------------------
-    dmem_wmask = signal(4)
 
     @always_comb
     def mask():
+        lane = cpu_dmem_adr & 3
         if dmem_wr_sz == 0:
-            dmem_wmask.next = 0b0001
+            dmem_wmask.next = 0b0001 << lane
         elif dmem_wr_sz == 1:
-            dmem_wmask.next = 0b0011
+            dmem_wmask.next = 0b0011 << lane
         else: # sz=2
             dmem_wmask.next = 0b1111
+        dmem_din_shifted.next = dmem_din << (8 * lane)
 
     @always_comb
     def aoffs():
@@ -1261,11 +1271,11 @@ def cpu_sys(
                     elif slave_pending_address == conf_map.cpu_reset:
                         n_cpu_rstn.next = 0
                     elif slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
-                        conf_slave_imem_wadr.next    = slave_pending_address  - conf_map.imem_low
+                        conf_slave_imem_wadr.next    = (slave_pending_address  - conf_map.imem_low) * 4
                         conf_slave_imem_din.next     = slave_pending_data
                         conf_slave_imem_wenable.next = 1
                     elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
-                        conf_slave_dmem_wadr.next    = slave_pending_address - conf_map.dmem_low
+                        conf_slave_dmem_wadr.next    = (slave_pending_address - conf_map.dmem_low) * 4
                         conf_slave_dmem_din.next     = slave_pending_data
                         conf_slave_dmem_wenable.next = 1
                         conf_slave_dmem_wmask.next   = 0b1111
@@ -1278,7 +1288,7 @@ def cpu_sys(
                     if slave_pending_address <= conf_map.imem_high and slave_pending_address >= conf_map.imem_low:
                         print("TODO: implement reading from imem")
                     elif slave_pending_address <= conf_map.dmem_high and slave_pending_address >= conf_map.dmem_low:
-                        conf_slave_dmem_radr.next    = slave_pending_address - conf_map.dmem_low
+                        conf_slave_dmem_radr.next    = (slave_pending_address - conf_map.dmem_low) * 4
                         conf_slave_dmem_renable.next = 1
                     else:
                         slave_state.next = SLAVE_IDLE
