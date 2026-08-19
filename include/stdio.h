@@ -37,7 +37,14 @@ char *itoa_r(int n, char *p) {
 
 char *itoa(int n, char *buf) {
   char *p = buf;
+  int i;
   if (n == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
+  if (n == -2147483648) {
+    char *lit = "-2147483648";
+    for (i = 0; lit[i]; i++) buf[i] = lit[i];
+    buf[i] = 0;
+    return buf;
+  }
   if (n < 0) { *p++ = '-'; n = -n; }
   p = itoa_r(n, p);
   *p = 0;
@@ -52,11 +59,22 @@ void printf(char *fmt, int a0, int a1, int a2) {
   while (*fmt) {
     c = *fmt++;
     if (c == '%') {
+      if (*fmt == 0) { putchar('%'); break; }
       spec = *fmt++;
-      if (spec == 'd') {
+      if (spec == 'd' && argc < 3) {
         print_str(itoa(args[argc++], ibuf));
-      } else if (spec == 's') {
+      } else if (spec == 's' && argc < 3) {
         print_str((char *)args[argc++]);
+      } else if (spec == 'x' && argc < 3) {
+          unsigned int u = (unsigned int)args[argc++];
+          int i, started = 0;
+          for (i = 28; i >= 0; i -= 4) {
+              int d = (u >> i) & 0xf;
+              if (d || started || i == 0) {
+                  putchar(d < 10 ? '0' + d : 'a' + d - 10);
+                  started = 1;
+              }
+          }
       } else {
         putchar('%');
         putchar(spec);
