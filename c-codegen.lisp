@@ -244,6 +244,26 @@
 ;;; 64-bit Shift Operations
 ;;; ---------------------------------------------------------------------------
 
+;;; Threshold for inline vs hardware-instruction shift (in terms of
+;;; single-bit shift instructions). Below this, shift one bit at a time.
+;;; At or above, use the single A=A<<Rx/A=A>>Rx hardware instruction.
+(defparameter *shift-inline-threshold* 4)
+
+(defun emit-shift-a-by-n (count is-left)
+  "Shift the value already in A left/right by the constant COUNT bits
+   (0 <= count <= 31), emitting a single A=A<<Rx/A=A>>Rx hardware
+   instruction for large counts instead of COUNT single-bit shifts."
+  (cond
+    ((= count 0))
+    ((< count *shift-inline-threshold*)
+     (dotimes (i count)
+       (emit (if is-left '(A=A<<1) '(A=A>>1)))))
+    (t
+     (let ((count-reg (alloc-temp-reg)))
+       (emit `(Rx= ,count ,count-reg))
+       (emit (if is-left `(A=A<<Rx ,count-reg) `(A=A>>Rx ,count-reg)))
+       (free-temp-reg count-reg)))))
+
 (defun generate-shl-64 (src-pair count result-pair)
   "64-bit left shift by constant count.
    result = src << count"
@@ -270,8 +290,7 @@
     ((> count 32)
      (let ((shift-amt (- count 32)))
        (emit `(A=Rx ,(reg-pair-low src-pair)))
-       (dotimes (i shift-amt)
-         (emit '(A=A<<1)))
+       (emit-shift-a-by-n shift-amt t)
        (emit `(Rx=A ,(reg-pair-high result-pair)))
        (emit `(Rx= 0 ,(reg-pair-low result-pair)))))
 
@@ -283,21 +302,18 @@
            (complement-shift (- 32 count)))
        ;; First, get the bits from low that will move into high
        (emit `(A=Rx ,(reg-pair-low src-pair)))
-       (dotimes (i complement-shift)
-         (emit '(A=A>>1)))
+       (emit-shift-a-by-n complement-shift nil)
        (emit `(Rx=A ,temp))  ; temp = src.low >> (32 - count)
 
        ;; Shift high left and OR with temp
        (emit `(A=Rx ,(reg-pair-high src-pair)))
-       (dotimes (i count)
-         (emit '(A=A<<1)))
+       (emit-shift-a-by-n count t)
        (emit `(A\|=Rx ,temp))
        (emit `(Rx=A ,(reg-pair-high result-pair)))
 
        ;; Shift low left
        (emit `(A=Rx ,(reg-pair-low src-pair)))
-       (dotimes (i count)
-         (emit '(A=A<<1)))
+       (emit-shift-a-by-n count t)
        (emit `(Rx=A ,(reg-pair-low result-pair)))
 
        (free-temp-reg temp)))))
@@ -367,8 +383,7 @@
     ((> count 32)
      (let ((shift-amt (- count 32)))
        (emit `(A=Rx ,(reg-pair-high src-pair)))
-       (dotimes (i shift-amt)
-         (emit '(A=A>>1)))
+       (emit-shift-a-by-n shift-amt nil)
        (emit `(Rx=A ,(reg-pair-low result-pair)))
        (if is-unsigned
            (emit `(Rx= 0 ,(reg-pair-high result-pair)))
@@ -395,14 +410,12 @@
            (complement-shift (- 32 count)))
        ;; First, get the bits from high that will move into low
        (emit `(A=Rx ,(reg-pair-high src-pair)))
-       (dotimes (i complement-shift)
-         (emit '(A=A<<1)))
+       (emit-shift-a-by-n complement-shift t)
        (emit `(Rx=A ,temp))  ; temp = src.high << (32 - count)
 
        ;; Shift low right and OR with temp
        (emit `(A=Rx ,(reg-pair-low src-pair)))
-       (dotimes (i count)
-         (emit '(A=A>>1)))
+       (emit-shift-a-by-n count nil)
        (emit `(A\|=Rx ,temp))
        (emit `(Rx=A ,(reg-pair-low result-pair)))
 
@@ -412,8 +425,7 @@
        (if is-unsigned
            ;; Logical shift
            (progn
-             (dotimes (i count)
-               (emit '(A=A>>1)))
+             (emit-shift-a-by-n count nil)
              (emit `(Rx=A ,(reg-pair-high result-pair))))
            ;; Arithmetic shift - need to preserve sign bit
            ;; A=A>>1 is logical, so we need to manually propagate sign
@@ -425,8 +437,7 @@
              (emit `(Rx=A ,sign-reg))  ; sign-reg = 0 or 0x80000000
              ;; Do the shifts
              (emit `(A=Rx ,(reg-pair-high src-pair)))
-             (dotimes (i count)
-               (emit '(A=A>>1)))
+             (emit-shift-a-by-n count nil)
              ;; If sign bit was set, OR in the sign bits
              (let ((no-sign-label (gen-label "NOSIGN"))
                    (end-label (gen-label "SIGNEND"))
@@ -496,7 +507,7 @@
             (emit `(Rx= #x40000000 ,mask-reg))
             (emit `(A&=Rx ,mask-reg))  ; isolate bit 30
             (emit '(A=A<<1))  ; move back to bit 31, then to bit 0
-            (dotimes (i 31) (emit '(A=A>>1)))
+            (emit-shift-a-by-n 31 nil)
             (free-temp-reg mask-reg))
           (emit `(Rx=A ,carry-reg))  ; carry-reg = 0 or 1
 
@@ -521,7 +532,7 @@
             (emit `(A&=Rx ,one-reg))
             (free-temp-reg one-reg))
           ;; Move to bit 31
-          (dotimes (i 31) (emit '(A=A<<1)))
+          (emit-shift-a-by-n 31 t)
           (emit `(Rx=A ,carry-reg))
 
           ;; Shift high right (logical or arithmetic)
@@ -4658,10 +4669,6 @@
     (free-temp-reg quotient-reg)
     (free-temp-reg divisor-reg)
     (free-temp-reg dividend-reg)))
-
-;;; Threshold for inline vs loop shift (in terms of instructions)
-;;; Below this, use inline shifts. At or above, use loop (if optimize-size) or inline (if not)
-(defparameter *shift-inline-threshold* 4)
 
 ;;; Max instruction count for const-mul optimization under -O (not -Os)
 (defparameter *const-mul-threshold* 64)
