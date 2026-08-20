@@ -77,19 +77,10 @@ def rom(
     output_flops = 0,
     name = None ):
 
-    # `depth` is a WORD count (matches dp_mem_rom/dp_mem's convention), but
-    # this function's own address math is genuinely byte-scale: raddr/
-    # waddr are real CPU byte addresses, and content[] is a byte-packed
-    # array -- so convert once, up front.
     depth_bytes = depth * 4
 
-    # The RAM half (pmem) is genuinely word addressed; r_ram_addr/w_ram_addr
-    # below are content-relative byte addresses (raddr/waddr - len(content))
-    # fed straight into it, unshifted, so a caller doing a naturally-aligned
-    # word access at some 4-byte-aligned absolute address only stays
-    # 4-byte-aligned *relative to content* if len(content) is itself a
-    # multiple of 4. Pad with NOPs (0xff) so that always holds, regardless
-    # of the boot ROM's actual assembled length.
+
+    # Since content is a byte array, while normal imem (pmem) is a word array, we need to ensure the length of content is a multiple of 4 to prevent an instruction reading needing to read data both from boot rom and normal imem.
     if len(content) % 4 != 0:
         content = tuple(content) + (0xff,) * (-len(content) % 4)
 
@@ -165,14 +156,6 @@ def rom(
     isro = flop( n_sel_rom, sel_rom, clk_en, clk, sync_rstn )
     isra = flop( n_sel_ram, sel_ram, clk_en, clk, sync_rstn )
 
-    # pmem (unlike content[] above) is one independent full-width cell per
-    # numeric address -- data[N] holds a whole word directly, not the Nth
-    # byte of some packed sequence -- so a word read of it is already just
-    # dp_mem_rom's own registered odata, no byte-gathering needed. Its
-    # write mask, though, needs to be real (byte-lane-aware, from wmask)
-    # rather than the old single-bit wenable-as-wmask, so a partial
-    # (byte-sized) write doesn't clobber the other 3 bytes of a cell with
-    # garbage from idata's unused upper bits.
     pmem = dp_mem_rom(
         idata = idata,
         odata = ram_data,
@@ -226,21 +209,15 @@ def cpu_sys(
         conf,
         instr_trace,
         boot_code_path = None, # read rom from this path if it isn't None,
-        # ConfMap addresses are word-addressed (see conf_map.py); IMEM_DEPTH/
-        # DMEM_DEPTH are already word counts, so this default matches
-        # conf_map.py's own defaults directly, with no further scaling.
         conf_map = ConfMap(0, IMEM_DEPTH - 1, IMEM_DEPTH,
                             IMEM_DEPTH + DMEM_DEPTH - 1,
                             IMEM_DEPTH + DMEM_DEPTH,
                             IMEM_DEPTH + DMEM_DEPTH + 1),
-        imem_depth = IMEM_DEPTH,
-        dmem_depth = DMEM_DEPTH,
-        #boot_code_path = "./lcpu_boot_code.hex",
+        imem_depth = IMEM_DEPTH, # size of imem in words
+        dmem_depth = DMEM_DEPTH, # size of dmem in words
         disable_rom = False,
         ):
 
-    # Address-map regions derived from imem_depth/dmem_depth (not the fixed
-    # module-level constants, which only reflect the default sizes).
     mm = compute_memory_map(imem_depth, dmem_depth)
 
     cpu_imem_radr = signal(32)
@@ -434,12 +411,6 @@ def cpu_sys(
     icache = flop(n_imem_dout_cached, imem_dout_cached, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     tick_sel  = signal(3)   # which bit to watch, 1-5 (0 = disabled)
-    #tick_wait_valid = signal()
-    #n_tick_wait_valid = signal()
-    #prev_tick_bit = signal()
-    #tick_bit = signal()
-
-    #itw = flop(n_tick_wait_valid, tick_wait_valid, clk_en=None, clk=clk, sync_rstn=sync_rstn)
 
     # cpu reset
     cpu_rstn = signal()
@@ -452,11 +423,6 @@ def cpu_sys(
     def cpu_reset_mux():
         cpu_sync_rstn.next = sync_rstn & cpu_rstn
 
-    #@always_comb
-    #def tick_edge_detect():
-    #    cur.next = conf.ticks[int(tick_sel) - 1] if tick_sel != 0 else 0
-    #    n_tick_wait_valid.next = (cur == 1 and prev_tick_bit == 0)  # rising edge
-    #    prev_tick_bit.next = cur
 
     @always_comb
     def imem_cache():
@@ -557,30 +523,6 @@ def cpu_sys(
         sel_imem_src.next = 0
         n_sel_intr_rd_data.next = 0
 
-        #if slave_state != SLAVE_IDLE or conf.slave_request_we or conf.slave_request_re:
-        #if slave_state != SLAVE_IDLE:
-        #    n_cpu_waiting.next = 1
-        #else:
-        #    n_cpu_waiting.next = 0
-            #n_wait_type.next = wait_type
-            #n_req_reading.next = req_reading
-            #n_sel_ticks_rd_data.next = sel_ticks_rd_data
-            #n_sel_intr_rd_data.next = sel_intr_rd_data
-
-        #if conf.slave_request_we == 1 or conf.slave_request_re == 1 or slave_state != SLAVE_IDLE:
-        #    n_cpu_waiting.next = 1
-
-        #if slave_state != SLAVE_IDLE:
-        #if conf.slave_request_we == 1 or conf.slave_request_re == 1:
-        #    n_cpu_waiting.next = 1
-
-        #if slave_state_prev != SLAVE_IDLE:
-        #    #print("stalling cpu: cpu_waiting=", cpu_waiting, "wait_type=", wait_type)
-        #    n_cpu_waiting.next = cpu_waiting
-        #    n_wait_type.next = wait_type
-        #    n_req_reading.next = req_reading
-        #    n_sel_ticks_rd_data.next = sel_ticks_rd_data
-        #    n_sel_intr_rd_data.next = sel_intr_rd_data
         if cpu_waiting_final == 1:
             if wait_type == IO_WAIT:
                 n_req_reading.next = req_reading
@@ -1071,11 +1013,6 @@ def cpu_sys(
 
 
     boot_code = prog_to_tuples( program )
-#    __verilog__ = f"""
-#initial begin
-#    $readmemh("{boot_code_path}")
-#end
-#"""
 
     if boot_code_path != None:
         with open(boot_code_path) as f:
@@ -1342,7 +1279,6 @@ def cpu_sys(
                 req_done.next = 0
                 req_got_reply.next = 0
                 if req_rd == 1:
-                    # divide by 4 to translate from byte addressing to word addressing
                     conf.master_request_address.next = req_addr
                     conf.master_request_re.next = 1
                     m_state.next = M_WAIT_READ
