@@ -35,13 +35,6 @@ def dp_mem_rom(
     col_width = width // mask_bits
     nr_col = mask_bits
 
-    # See dp_mem.py: `raddr`/`waddr` are byte addresses, but physical
-    # storage is genuinely word addressed (one `width`-bit cell per
-    # `mask_bits` bytes) -- `depth` (as given by callers) is already a
-    # WORD count, so the cell array is exactly `depth` entries; only the
-    # byte-address inputs (`waddr`/`raddr`) need the //mask_bits split to
-    # get a cell index. wmask/idata must already be placed in the correct
-    # byte lane (addr % mask_bits) by the caller.
     word_depth = depth
     data = [ signal(width) for _ in range( word_depth ) ]
 

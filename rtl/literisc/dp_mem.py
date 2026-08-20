@@ -19,17 +19,6 @@ def dp_mem(
     col_width = width // mask_bits
     nr_col = mask_bits
 
-    # `raddr`/`waddr` are byte addresses (per the ISA: addresses are always
-    # byte addresses, dword accesses must be aligned -- see README.md
-    # "Load/store instructions"). Physical storage is genuinely word
-    # addressed, one `width`-bit cell per `mask_bits` bytes -- `depth` (as
-    # given by callers) is already a WORD count, so the cell array is
-    # exactly `depth` entries; only the byte-address inputs (`waddr`/
-    # `raddr`) need the //mask_bits split to get a cell index. wmask/idata
-    # are expected to already be placed in the correct byte lane
-    # (addr % mask_bits) by the caller -- this module only does the
-    # byte-address -> (word index, lane) split, it doesn't compute the
-    # lane shift for writes itself.
     word_depth = depth
     data = [ signal(width) for _ in range( word_depth ) ]
 
