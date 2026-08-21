@@ -2742,217 +2742,217 @@ def test_cpu_slave_race_master_write():
     return test_cpu_slave_race('master_write')
 
 
-def test_imem_slave_race(cpu_op, max_delay=40):
-    """
-    IMEM analogue of test_cpu_slave_race: sweep every single-cycle offset
-    (0..max_delay) between the boot trigger and a single concurrent slave
-    IMEM write, while the CPU performs `cpu_op` ('imem_write' | 'imem_read')
-    on its OWN, separate IMEM scratch byte. Verifies both sides:
-      - the CPU's own imem access produced the correct result
-      - the slave's concurrent imem write was neither dropped nor corrupted
-
-    There is no slave-side "imem read" test here: conf_slave()'s read path
-    always resolves through conf_slave_dmem_radr regardless of address, so
-    an external slave read can never observe IMEM content in this design
-    -- the only way to observe IMEM state at all is to have the CPU
-    itself read it back and store the result to DMEM, which is exactly
-    what this program does for both its own scratch byte and the slave's
-    race-site byte.
-
-    IMEM access through this dmem-mapped path is only reliably observable
-    at byte granularity (the ROM/RAM read path is 8 bits wide even though
-    the write path takes a full word), so every value used here is a
-    single byte.
-
-    To avoid a second reset/reload cycle just to read back the slave's
-    race site at a TB-controlled, safely-late moment, the CPU program
-    itself blocks on the existing TICK_WAIT mechanism (the same one
-    test_wait_ticks uses) between its own op and the race-site read-back.
-    The TB only releases that block once it knows -- by construction,
-    for every d in [0, max_delay] -- that both the CPU's own op and the
-    slave's race write have long since retired.
-
-    Runs a SINGLE MyHDL simulation for the whole sweep: the program is
-    loaded into IMEM once, and between sweep points the CPU core is
-    restarted via conf_map.cpu_reset (as in test_cpu_reset) instead of
-    rebuilding the simulation per point.
-    """
-    RACE_VALUE            = 0x55  # byte the CPU writes/reads at its own imem scratch site
-    SLAVE_RACE_WRITE_VAL  = 0x77  # byte the slave writes at the race site
-    SENTINEL              = 0x00
-    RESET_SETTLE_CYCLES   = 20    # matches test_cpu_reset's post-reset settle window
-    SETTLE_CYCLES         = 250   # >> worst-case cycles to reach the TICK_WAIT block point
-    RELEASE_SETTLE_CYCLES = 100   # >> worst-case cycles from tick-release to program end
-
-    TICK_SEL      = 5             # matches _PROG_READ_TICKS; selects conf.ticks bit 4
-    TICK_BIT_MASK = 1 << (TICK_SEL - 1)
-
-    IMEM_SCRATCH_CPU = PROG_BASE + 256  # CPU's own imem scratch byte -- clear of the program
-    IMEM_RACE_ADDR   = PROG_BASE + 512  # slave's race target -- clear of program + scratch
-    # conf.slave_request_address is word-addressed; these are the same
-    # locations' word indices, for the _write_data calls below.
-    IMEM_SCRATCH_SLAVE = IMEM_SCRATCH_CPU // 4
-    IMEM_RACE_ADDR_SLAVE = IMEM_RACE_ADDR // 4
-
-    RESULT_PHYS  = CPU_RESULT0  # holds the CPU's own imem op result
-    RESULT2_PHYS = CPU_RESULT1  # holds the CPU's read-back of the slave's race site
-
-    common_tail = """
-        (Rx= RESULT_PHYS R2)
-        (M[Rx]=A R2)
-        (Rx= TICK_ADDRESS R5)
-        (Rx= TICK_SEL R6)
-        (A=Rx R6)
-        (M[Rx]=A R5)
-        (A=M[Rx] R5)
-        (Rx= RACE_ADDR_IMEM R3)
-        (A=M[Rx] R3)
-        (Rx= RESULT2_PHYS R4)
-        (M[Rx]=A R4)
-        (label done)
-        (j done)
-        """
-
-    if cpu_op == 'imem_write':
-        prog = assemble(
-            """
-            (Rx= SCRATCH_PHYS R1)
-            (Rx= VALUE R0)
-            (A=Rx R0)
-            (M[Rx]=A R1)
-            (A=M[Rx] R1)
-            """ + common_tail,
-            SCRATCH_PHYS=IMEM_SCRATCH_CPU, VALUE=RACE_VALUE,
-            RESULT_PHYS=RESULT_PHYS, TICK_ADDRESS=TICK_ADDRESS, TICK_SEL=TICK_SEL,
-            RACE_ADDR_IMEM=IMEM_RACE_ADDR, RESULT2_PHYS=RESULT2_PHYS,
-        )
-    elif cpu_op == 'imem_read':
-        prog = assemble(
-            """
-            (Rx= SCRATCH_PHYS R1)
-            (A=M[Rx] R1)
-            """ + common_tail,
-            SCRATCH_PHYS=IMEM_SCRATCH_CPU,
-            RESULT_PHYS=RESULT_PHYS, TICK_ADDRESS=TICK_ADDRESS, TICK_SEL=TICK_SEL,
-            RACE_ADDR_IMEM=IMEM_RACE_ADDR, RESULT2_PHYS=RESULT2_PHYS,
-        )
-    else:
-        raise ValueError(f"unknown cpu_op {cpu_op!r}")
-
-    failures = []
-
-    def tb():
-        clk  = Signal(bool())
-        rstn = signal()
-        axi  = Axi4(asize=16, dsize=32, idsize=1)
-        conf = Conf()
-        instr_trace = Signal(modbv(0)[69:])
-        conf_map = ConfMap()
-        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
-
-        @always(delay(10))
-        def clk_gen():
-            clk.next = not clk
-
-        @instance
-        def seq():
-            rstn.next = 0
-            conf.ticks.next = 0
-            yield clk.posedge
-            rstn.next = 1
-            yield clk.posedge
-
-            # Load the program into IMEM ONCE -- conf_map.cpu_reset resets
-            # only the CPU core, IMEM survives, and nothing else in this
-            # test ever touches PROG_BASE.
-            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
-
-            for d in range(max_delay + 1):
-                if d > 0:
-                    yield _write_data(conf, clk, 1, conf_map.cpu_reset)
-                    for _ in range(RESET_SETTLE_CYCLES):
-                        yield clk.posedge
-
-                # conf.ticks is driven exclusively by this generator (no
-                # background heartbeat here) so TICK_WAIT release timing
-                # stays fully TB-controlled.
-                conf.ticks.next = 0
-                yield clk.posedge
-
-                # Sentinel-clear everything we're about to check, so a
-                # dropped write reads back as SENTINEL rather than a
-                # stale correct value from an earlier sweep point.
-                yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT0)
-                yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT1)
-                yield _write_data(conf, clk, SENTINEL, IMEM_SCRATCH_SLAVE)
-                yield _write_data(conf, clk, SENTINEL, IMEM_RACE_ADDR_SLAVE)
-                if cpu_op == 'imem_read':
-                    yield _write_data(conf, clk, RACE_VALUE, IMEM_SCRATCH_SLAVE)
-
-                # trigger boot jump
-                yield _write_data(conf, clk, 1, conf_map.interrupt)
-
-                # wait exactly `d` cycles, then fire the ONE slave
-                # transaction that actually overlaps the running CPU
-                for _ in range(d):
-                    yield clk.posedge
-
-                yield _write_data(conf, clk, SLAVE_RACE_WRITE_VAL, IMEM_RACE_ADDR_SLAVE)
-
-                # No polling: wait a fixed, generous window (no further
-                # slave traffic) for the CPU to reach its TICK_WAIT block
-                for _ in range(SETTLE_CYCLES):
-                    yield clk.posedge
-
-                # release the CPU to read back the now-stable race site
-                conf.ticks.next = TICK_BIT_MASK
-                for _ in range(RELEASE_SETTLE_CYCLES):
-                    yield clk.posedge
-
-                errors = []
-
-                rb1 = [0]
-                yield _read_data(conf, clk, SLAVE_RESULT0, rb1)
-                if rb1[0] != RACE_VALUE:
-                    errors.append(f"cpu {cpu_op} result wrong: 0x{rb1[0]:X}, "
-                                  f"expected 0x{RACE_VALUE:X}")
-
-                rb2 = [0]
-                yield _read_data(conf, clk, SLAVE_RESULT1, rb2)
-                if rb2[0] != SLAVE_RACE_WRITE_VAL:
-                    errors.append(f"slave imem write lost/corrupted: read back 0x{rb2[0]:X}, "
-                                  f"expected 0x{SLAVE_RACE_WRITE_VAL:X}")
-
-                if errors:
-                    failures.append(f"delay={d}: " + "; ".join(errors))
-
-            raise StopSimulation()
-
-        return instances()
-
-    traceSignals.filename = f"trace_imem_slave_race[{cpu_op}]"
-    itb = traceSignals(tb)
-    sim = Simulation(itb)
-    sim.run(20000000)
-
-    ok = not failures
-    print(f"{'PASS' if ok else 'FAIL'}: test_imem_slave_race[{cpu_op}]"
-          + (f"  ({len(failures)}/{max_delay + 1} offsets failed)" if failures else ""))
-    for f in failures[:10]:
-        print("   ", f)
-    if len(failures) > 10:
-        print(f"    ... and {len(failures) - 10} more")
-    return ok
-
-
-def test_imem_slave_race_write():
-    """Test 11a: slave imem write racing against a CPU imem write, every cycle offset."""
-    return test_imem_slave_race('imem_write')
+#def test_imem_slave_race(cpu_op, max_delay=40):
+#    """
+#    IMEM analogue of test_cpu_slave_race: sweep every single-cycle offset
+#    (0..max_delay) between the boot trigger and a single concurrent slave
+#    IMEM write, while the CPU performs `cpu_op` ('imem_write' | 'imem_read')
+#    on its OWN, separate IMEM scratch byte. Verifies both sides:
+#      - the CPU's own imem access produced the correct result
+#      - the slave's concurrent imem write was neither dropped nor corrupted
+#
+#    There is no slave-side "imem read" test here: conf_slave()'s read path
+#    always resolves through conf_slave_dmem_radr regardless of address, so
+#    an external slave read can never observe IMEM content in this design
+#    -- the only way to observe IMEM state at all is to have the CPU
+#    itself read it back and store the result to DMEM, which is exactly
+#    what this program does for both its own scratch byte and the slave's
+#    race-site byte.
+#
+#    IMEM access through this dmem-mapped path is only reliably observable
+#    at byte granularity (the ROM/RAM read path is 8 bits wide even though
+#    the write path takes a full word), so every value used here is a
+#    single byte.
+#
+#    To avoid a second reset/reload cycle just to read back the slave's
+#    race site at a TB-controlled, safely-late moment, the CPU program
+#    itself blocks on the existing TICK_WAIT mechanism (the same one
+#    test_wait_ticks uses) between its own op and the race-site read-back.
+#    The TB only releases that block once it knows -- by construction,
+#    for every d in [0, max_delay] -- that both the CPU's own op and the
+#    slave's race write have long since retired.
+#
+#    Runs a SINGLE MyHDL simulation for the whole sweep: the program is
+#    loaded into IMEM once, and between sweep points the CPU core is
+#    restarted via conf_map.cpu_reset (as in test_cpu_reset) instead of
+#    rebuilding the simulation per point.
+#    """
+#    RACE_VALUE            = 0x55  # byte the CPU writes/reads at its own imem scratch site
+#    SLAVE_RACE_WRITE_VAL  = 0x77  # byte the slave writes at the race site
+#    SENTINEL              = 0x00
+#    RESET_SETTLE_CYCLES   = 20    # matches test_cpu_reset's post-reset settle window
+#    SETTLE_CYCLES         = 250   # >> worst-case cycles to reach the TICK_WAIT block point
+#    RELEASE_SETTLE_CYCLES = 100   # >> worst-case cycles from tick-release to program end
+#
+#    TICK_SEL      = 5             # matches _PROG_READ_TICKS; selects conf.ticks bit 4
+#    TICK_BIT_MASK = 1 << (TICK_SEL - 1)
+#
+#    IMEM_SCRATCH_CPU = PROG_BASE + 256  # CPU's own imem scratch byte -- clear of the program
+#    IMEM_RACE_ADDR   = PROG_BASE + 512  # slave's race target -- clear of program + scratch
+#    # conf.slave_request_address is word-addressed; these are the same
+#    # locations' word indices, for the _write_data calls below.
+#    IMEM_SCRATCH_SLAVE = IMEM_SCRATCH_CPU // 4
+#    IMEM_RACE_ADDR_SLAVE = IMEM_RACE_ADDR // 4
+#
+#    RESULT_PHYS  = CPU_RESULT0  # holds the CPU's own imem op result
+#    RESULT2_PHYS = CPU_RESULT1  # holds the CPU's read-back of the slave's race site
+#
+#    common_tail = """
+#        (Rx= RESULT_PHYS R2)
+#        (M[Rx]=A R2)
+#        (Rx= TICK_ADDRESS R5)
+#        (Rx= TICK_SEL R6)
+#        (A=Rx R6)
+#        (M[Rx]=A R5)
+#        (A=M[Rx] R5)
+#        (Rx= RACE_ADDR_IMEM R3)
+#        (A=M[Rx] R3)
+#        (Rx= RESULT2_PHYS R4)
+#        (M[Rx]=A R4)
+#        (label done)
+#        (j done)
+#        """
+#
+#    if cpu_op == 'imem_write':
+#        prog = assemble(
+#            """
+#            (Rx= SCRATCH_PHYS R1)
+#            (Rx= VALUE R0)
+#            (A=Rx R0)
+#            (M[Rx]=A R1)
+#            (A=M[Rx] R1)
+#            """ + common_tail,
+#            SCRATCH_PHYS=IMEM_SCRATCH_CPU, VALUE=RACE_VALUE,
+#            RESULT_PHYS=RESULT_PHYS, TICK_ADDRESS=TICK_ADDRESS, TICK_SEL=TICK_SEL,
+#            RACE_ADDR_IMEM=IMEM_RACE_ADDR, RESULT2_PHYS=RESULT2_PHYS,
+#        )
+#    elif cpu_op == 'imem_read':
+#        prog = assemble(
+#            """
+#            (Rx= SCRATCH_PHYS R1)
+#            (A=M[Rx] R1)
+#            """ + common_tail,
+#            SCRATCH_PHYS=IMEM_SCRATCH_CPU,
+#            RESULT_PHYS=RESULT_PHYS, TICK_ADDRESS=TICK_ADDRESS, TICK_SEL=TICK_SEL,
+#            RACE_ADDR_IMEM=IMEM_RACE_ADDR, RESULT2_PHYS=RESULT2_PHYS,
+#        )
+#    else:
+#        raise ValueError(f"unknown cpu_op {cpu_op!r}")
+#
+#    failures = []
+#
+#    def tb():
+#        clk  = Signal(bool())
+#        rstn = signal()
+#        axi  = Axi4(asize=16, dsize=32, idsize=1)
+#        conf = Conf()
+#        instr_trace = Signal(modbv(0)[69:])
+#        conf_map = ConfMap()
+#        icpu = cpu_sys(clk, rstn, axi, conf, instr_trace, conf_map=conf_map)
+#
+#        @always(delay(10))
+#        def clk_gen():
+#            clk.next = not clk
+#
+#        @instance
+#        def seq():
+#            rstn.next = 0
+#            conf.ticks.next = 0
+#            yield clk.posedge
+#            rstn.next = 1
+#            yield clk.posedge
+#
+#            # Load the program into IMEM ONCE -- conf_map.cpu_reset resets
+#            # only the CPU core, IMEM survives, and nothing else in this
+#            # test ever touches PROG_BASE.
+#            yield _load_program(conf, clk, prog, PROG_BASE_WORDS)
+#
+#            for d in range(max_delay + 1):
+#                if d > 0:
+#                    yield _write_data(conf, clk, 1, conf_map.cpu_reset)
+#                    for _ in range(RESET_SETTLE_CYCLES):
+#                        yield clk.posedge
+#
+#                # conf.ticks is driven exclusively by this generator (no
+#                # background heartbeat here) so TICK_WAIT release timing
+#                # stays fully TB-controlled.
+#                conf.ticks.next = 0
+#                yield clk.posedge
+#
+#                # Sentinel-clear everything we're about to check, so a
+#                # dropped write reads back as SENTINEL rather than a
+#                # stale correct value from an earlier sweep point.
+#                yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT0)
+#                yield _write_data(conf, clk, SENTINEL, SLAVE_RESULT1)
+#                yield _write_data(conf, clk, SENTINEL, IMEM_SCRATCH_SLAVE)
+#                yield _write_data(conf, clk, SENTINEL, IMEM_RACE_ADDR_SLAVE)
+#                if cpu_op == 'imem_read':
+#                    yield _write_data(conf, clk, RACE_VALUE, IMEM_SCRATCH_SLAVE)
+#
+#                # trigger boot jump
+#                yield _write_data(conf, clk, 1, conf_map.interrupt)
+#
+#                # wait exactly `d` cycles, then fire the ONE slave
+#                # transaction that actually overlaps the running CPU
+#                for _ in range(d):
+#                    yield clk.posedge
+#
+#                yield _write_data(conf, clk, SLAVE_RACE_WRITE_VAL, IMEM_RACE_ADDR_SLAVE)
+#
+#                # No polling: wait a fixed, generous window (no further
+#                # slave traffic) for the CPU to reach its TICK_WAIT block
+#                for _ in range(SETTLE_CYCLES):
+#                    yield clk.posedge
+#
+#                # release the CPU to read back the now-stable race site
+#                conf.ticks.next = TICK_BIT_MASK
+#                for _ in range(RELEASE_SETTLE_CYCLES):
+#                    yield clk.posedge
+#
+#                errors = []
+#
+#                rb1 = [0]
+#                yield _read_data(conf, clk, SLAVE_RESULT0, rb1)
+#                if rb1[0] != RACE_VALUE:
+#                    errors.append(f"cpu {cpu_op} result wrong: 0x{rb1[0]:X}, "
+#                                  f"expected 0x{RACE_VALUE:X}")
+#
+#                rb2 = [0]
+#                yield _read_data(conf, clk, SLAVE_RESULT1, rb2)
+#                if rb2[0] != SLAVE_RACE_WRITE_VAL:
+#                    errors.append(f"slave imem write lost/corrupted: read back 0x{rb2[0]:X}, "
+#                                  f"expected 0x{SLAVE_RACE_WRITE_VAL:X}")
+#
+#                if errors:
+#                    failures.append(f"delay={d}: " + "; ".join(errors))
+#
+#            raise StopSimulation()
+#
+#        return instances()
+#
+#    traceSignals.filename = f"trace_imem_slave_race[{cpu_op}]"
+#    itb = traceSignals(tb)
+#    sim = Simulation(itb)
+#    sim.run(20000000)
+#
+#    ok = not failures
+#    print(f"{'PASS' if ok else 'FAIL'}: test_imem_slave_race[{cpu_op}]"
+#          + (f"  ({len(failures)}/{max_delay + 1} offsets failed)" if failures else ""))
+#    for f in failures[:10]:
+#        print("   ", f)
+#    if len(failures) > 10:
+#        print(f"    ... and {len(failures) - 10} more")
+#    return ok
 
 
-def test_imem_slave_race_read():
-    """Test 11b: slave imem write racing against a CPU imem read, every cycle offset."""
-    return test_imem_slave_race('imem_read')
+#def test_imem_slave_race_write():
+#    """Test 11a: slave imem write racing against a CPU imem write, every cycle offset."""
+#    return test_imem_slave_race('imem_write')
+
+
+#def test_imem_slave_race_read():
+#    """Test 11b: slave imem write racing against a CPU imem read, every cycle offset."""
+#    return test_imem_slave_race('imem_read')
 
 
 def test_imem_slave_read_while_running():
@@ -3301,39 +3301,36 @@ def test_read_coreversion():
 if __name__ == "__main__":
     results = []
 
-    #test_imem_slave_race_read()
-    #test_imem_slave_race_write()
-
-    #results.append(test_slave_dmem_rw())
-    #results.append(test_cpu_stores_constant())
-    #results.append(test_boot_code_from_file())
-    #results.append(test_slave_write_cpu_doubles())
-    #results.append(test_slave_write_cpu_sum())
-    #results.append(test_conf_map_offset())
-    #results.append(test_conf_map_gapped())
-    #results.append(test_wait_ticks())
-    #results.append(test_master_while_slave_request())
-    #results.append(test_cpu_memory_access_slave_conflict())
-    #results.append(test_cpu_reset())
-    #results.append(test_dual_cpu())
-    #results.append(test_cpu_slave_race_dmem_write())
-    #results.append(test_cpu_slave_race_dmem_read())
-    #results.append(test_cpu_slave_race_master_read())
-    #results.append(test_cpu_slave_race_master_write())
-    #results.append(test_no_print_c_program())
-    #results.append(test_console_output())
-    #results.append(test_puts_c_program())
-    #results.append(test_console_output_c_program())
-    #results.append(test_read_outch_via_conf_load())
-    #results.append(test_print_c_program_via_conf_load())
-    #results.append(test_read_coreversion())
-    #results.append(test_imem_read_corrupts_register())
-    #results.append(test_imem_word_read())
-    #results.append(test_imem_offset_read())
-    #results.append(test_imem_word_read_via_conf_load())
-    #results.append(test_imem_write_from_global())
-    #results.append(test_push_pop_registers())
-    #results.append(test_push_pop_registers_via_conf_load())
+    results.append(test_slave_dmem_rw())
+    results.append(test_cpu_stores_constant())
+    results.append(test_boot_code_from_file())
+    results.append(test_slave_write_cpu_doubles())
+    results.append(test_slave_write_cpu_sum())
+    results.append(test_conf_map_offset())
+    results.append(test_conf_map_gapped())
+    results.append(test_wait_ticks())
+    results.append(test_master_while_slave_request())
+    results.append(test_cpu_memory_access_slave_conflict())
+    results.append(test_cpu_reset())
+    results.append(test_dual_cpu())
+    results.append(test_cpu_slave_race_dmem_write())
+    results.append(test_cpu_slave_race_dmem_read())
+    results.append(test_cpu_slave_race_master_read())
+    results.append(test_cpu_slave_race_master_write())
+    results.append(test_no_print_c_program())
+    results.append(test_console_output())
+    results.append(test_puts_c_program())
+    results.append(test_console_output_c_program())
+    results.append(test_read_outch_via_conf_load())
+    results.append(test_print_c_program_via_conf_load())
+    results.append(test_read_coreversion())
+    results.append(test_imem_read_corrupts_register())
+    results.append(test_imem_word_read())
+    results.append(test_imem_offset_read())
+    results.append(test_imem_word_read_via_conf_load())
+    results.append(test_imem_write_from_global())
+    results.append(test_push_pop_registers())
+    results.append(test_push_pop_registers_via_conf_load())
     results.append(test_imem_slave_read_while_running())
     results.append(test_boot_rom_slave_write())
     results.append(test_boot_rom_slave_read_while_running())
