@@ -29,9 +29,28 @@ int puts(char *s) {
   return 0;
 }
 
+int div10(int n, int *rem) {
+  uint32_t u = (uint32_t)n;
+  uint32_t q = 0;
+  uint32_t b = 1u << 27;           /* highest quotient bit for n <= INT_MAX */
+  uint32_t b10 = 0x50000000u;      /* 10 * 2^27, invariant b10 == 10*b */
+  while (b != 0) {
+    if (b10 <= u) {
+      u -= b10;
+      q |= b;
+    }
+    b10 >>= 1;
+    b >>= 1;
+  }
+  *rem = (int)u;                      /* what's left of u is n % 10 */
+  return (int)q;
+}
+
 char *itoa_r(int n, char *p) {
-  if (n > 9) p = itoa_r(n / 10, p);
-  *p++ = '0' + n % 10;
+  int r;
+  int q = div10(n, &r);
+  if (q != 0) p = itoa_r(q, p);
+  *p++ = '0' + r;
   return p;
 }
 
