@@ -192,7 +192,11 @@ end
 
 always @(posedge %(clk)s) begin
     if (%(sync_rstn)s == 1 && %(cpu_dmem_adr)s == 32'hffffffff && %(dmem_wr)s == 1) begin
-        $fwrite(lcpu_stdout_fd, "%%c", %(dmem_din)s[7:0]);
+        `ifndef SYNTHESIS
+        `ifndef NO_PRINTS
+        `PA_PRINT_PA_TOP $fwrite(lcpu_stdout_fd, "%%c", %(dmem_din)s[7:0]);
+        `endif
+        `endif
     end
 end
 
